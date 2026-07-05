@@ -102,7 +102,4 @@ dependency graph come for free.
   the task says. The permission ask-gates still apply.
 - An issue whose meaning is unclear gets `needs-decision`, not improvisation.
 
-The end-to-end walkthrough (setup → plan → workers → checkpoint) lives in
-`WORKFLOW.md`, in this skill's folder.
-
 Coordination repo / flags / extra context: $ARGUMENTS
