@@ -31,6 +31,10 @@ coordination repo needs to be on GitHub, and it holds issues, never code.
 /plugin install kraken@kraken
 ```
 
+**Requirements**: `git`, and a `gh` CLI from June 2026 or later — the dependency
+flags (`--add-blocked-by` / `--blocked-by`) shipped then. Older `gh` still works for
+everything else; set dependencies via the Relationships sidebar instead.
+
 ## Quickstart
 
 1. **Create the coordination repo** (once):
