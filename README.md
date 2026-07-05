@@ -67,11 +67,13 @@ everything else; set dependencies via the Relationships sidebar instead.
    /kraken:unleash OWNER/tasks --worker-name data-env-2 --project ceres
    ```
 
-   Workers deliver on **`kraken/*` branches + draft PRs** — never the default
-   branch, never a merge. Because they run unattended, the worker environment's
-   Claude Code settings must allow `git commit`/`git push` without prompting (an
-   ask-gate with nobody around stalls the task at delivery time). Merges always
-   stay with you.
+   Workers deliver on **work branches + draft PRs** — never the default branch,
+   never a merge. Branches follow each work repo's own naming convention (CI
+   pipelines key on those patterns); traceability comes from commit trailers
+   (`Kraken-Task: OWNER/tasks#12 (worker: ..., kraken@x.y.z)`). Because workers run
+   unattended, the worker environment's Claude Code settings must allow
+   `git commit`/`git push` without prompting (an ask-gate with nobody around stalls
+   the task at delivery time). Merges always stay with you.
 
 4. **Come back to evidence**: closed issues with results, a `needs-decision` filter
    with questions waiting (options + recommendation included), and PRs ready for your
@@ -90,7 +92,8 @@ list open kraken-task issues for my project
   → execute in my environment, one task at a time
       (progress comment every ~2h — the heartbeat that keeps the reaper away)
   → run the ACCEPTANCE for real
-  → deliver: push branch kraken/<issue>-<slug> + open a draft PR (never merge)
+  → deliver: push a branch (repo's naming convention) + open a draft PR (never merge)
+      commits carry Kraken-Task trailers for traceability
   → result comment + commit/PR links → close
   → closing unblocks dependents → an idle worker picks them up
 ```
