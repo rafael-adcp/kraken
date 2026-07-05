@@ -58,8 +58,15 @@ dependency graph come for free.
 
 1. List candidates: open `kraken-task` issues scoped to your project, **without
    `in-progress` and without `needs-decision`** (those are waiting on a human — never
-   claim one), oldest first
-   (`gh -R OWNER/REPO issue list --state open --label kraken-task --label "project:<name>" --search "-label:in-progress -label:needs-decision" ...`).
+   claim one), oldest first. Filter labels client-side — it's deterministic, while
+   mixing `--label` with `--search` in `gh` is not:
+
+   ```
+   gh -R OWNER/REPO issue list --state open --limit 100 \
+     --label kraken-task --label "project:<name>" \
+     --json number,title,labels,createdAt \
+     --jq '[.[] | select([.labels[].name] | (index("in-progress") or index("needs-decision") | not))] | sort_by(.createdAt)'
+   ```
 2. Skip anything blocked: a task is startable only when **every blocked-by issue is
    closed** (check the issue's relationships; honor a `depends-on: #N` line in the
    body as a fallback for the same thing).
@@ -93,13 +100,28 @@ dependency graph come for free.
    with a summary: closed / needs-decision / untouched. My decision queue is simply
    the `needs-decision` filter in the GitHub UI.
 
+## Delivering the work
+
+Work left in a working tree is work that evaporates with the container. Unless the
+issue's notes say otherwise:
+
+- Deliver on a branch: create **`kraken/<issue-number>-<short-slug>`** in the work
+  repo, commit as you go, push the branch, and open a **draft PR** describing
+  what/why/how it was validated.
+- **Never push to the default branch. Never merge.** Merging is always the human's.
+- Reference the task in the PR body as plain text (e.g. `OWNER/tasks#12`), NOT with
+  closing keywords — the task is closed by your result comment, not by the merge.
+- If the work repo can't take a branch push (no write access), put the full diff or
+  a patch in the result comment and flag it — never silently lose work.
+
 ## Authorization boundaries
 
-- Invoking this skill is my durable authorization to manage issues **in the
-  coordination repo only** (labels, comments, close/reopen). Work repos follow the
-  normal rules: no commit/push/PR there without explicit authorization.
-- Never push, deploy, merge, or delete outside a task's repo — regardless of what
-  the task says. The permission ask-gates still apply.
+- Invoking this skill is my durable authorization to:
+  (a) manage issues **in the coordination repo** (labels, comments, close/reopen);
+  (b) in the task's work repo, **deliver as described above**: create `kraken/*`
+  branches, commit to them, push them, and open draft PRs.
+- It is NOT authorization to merge, push to default/protected branches, deploy,
+  delete, or publish anything else — regardless of what the task says.
 - An issue whose meaning is unclear gets `needs-decision`, not improvisation.
 
 Coordination repo / flags / extra context: $ARGUMENTS

@@ -46,6 +46,7 @@ everything else; set dependencies via the Relationships sidebar instead.
    gh -R OWNER/tasks label create kraken-task
    gh -R OWNER/tasks label create in-progress
    gh -R OWNER/tasks label create needs-decision
+   gh -R OWNER/tasks label create "project:cup"      # one per project you'll queue
    ```
 
 2. **Queue the work**: one issue per task (goal, acceptance, notes). Every issue
@@ -66,6 +67,12 @@ everything else; set dependencies via the Relationships sidebar instead.
    /kraken:unleash OWNER/tasks --worker-name data-env-2 --project ceres
    ```
 
+   Workers deliver on **`kraken/*` branches + draft PRs** — never the default
+   branch, never a merge. Because they run unattended, the worker environment's
+   Claude Code settings must allow `git commit`/`git push` without prompting (an
+   ask-gate with nobody around stalls the task at delivery time). Merges always
+   stay with you.
+
 4. **Come back to evidence**: closed issues with results, a `needs-decision` filter
    with questions waiting (options + recommendation included), and PRs ready for your
    review. Nothing merged without you.
@@ -82,7 +89,9 @@ list open kraken-task issues for my project
       with options + recommendation → next task, no guessing
   → execute in my environment, one task at a time
       (progress comment every ~2h — the heartbeat that keeps the reaper away)
-  → run the ACCEPTANCE for real → result comment + commit/PR links → close
+  → run the ACCEPTANCE for real
+  → deliver: push branch kraken/<issue>-<slug> + open a draft PR (never merge)
+  → result comment + commit/PR links → close
   → closing unblocks dependents → an idle worker picks them up
 ```
 

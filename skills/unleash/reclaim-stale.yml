@@ -37,6 +37,6 @@ jobs:
               gh issue edit "$num" -R "$GITHUB_REPOSITORY" \
                 --remove-label in-progress --add-label needs-decision
               gh issue comment "$num" -R "$GITHUB_REPOSITORY" \
-                --body "stale-claim: no activity for ${age}h — the worker likely died. Released for triage: relabel to retry, or investigate."
+                --body "stale-claim: no activity for ${age}h — the worker likely died. To requeue, remove the needs-decision label; or investigate first."
             fi
           done
