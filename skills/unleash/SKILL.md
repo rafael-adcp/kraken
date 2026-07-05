@@ -56,23 +56,29 @@ dependency graph come for free.
 
 ## Protocol
 
-1. List candidates: open `kraken-task` issues without `in-progress`, oldest first,
-   always scoped to your project
-   (`gh -R OWNER/REPO issue list --label kraken-task --label "project:<name>" --state open ...`).
+1. List candidates: open `kraken-task` issues scoped to your project, **without
+   `in-progress` and without `needs-decision`** (those are waiting on a human — never
+   claim one), oldest first
+   (`gh -R OWNER/REPO issue list --state open --label kraken-task --label "project:<name>" --search "-label:in-progress -label:needs-decision" ...`).
 2. Skip anything blocked: a task is startable only when **every blocked-by issue is
    closed** (check the issue's relationships; honor a `depends-on: #N` line in the
    body as a fallback for the same thing).
 3. **Claim**: add the `in-progress` label and immediately post a comment
-   `claimed-by: <worker-name>`. Then **re-read the comments**: if the FIRST
-   `claimed-by:` comment is not yours, another worker won — back off (remove
-   nothing) and pick the next candidate. Comment ordering is server-side, which
-   makes it the tiebreaker. (Assignees can't arbitrate: every worker authenticates
-   as me.)
+   `claimed-by: <worker-name>`. Then **re-read the comments**: if the first
+   `claimed-by:` comment **of the current claim window** is not yours, another
+   worker won — back off (remove nothing) and pick the next candidate. Comment
+   ordering is server-side, which makes it the tiebreaker. (Assignees can't
+   arbitrate: every worker authenticates as me.)
+   The claim window starts after the most recent `released:` / stale-claim /
+   `needs-decision` event on the issue — **ignore `claimed-by:` comments older than
+   that**, or a task once claimed by a dead worker could never be claimed again.
 4. Before touching code: restate the goal and post your **Assumptions** (my global
    rule) as a comment on the issue. If an assumption is unverifiable in the code AND
    getting it wrong would be expensive — swap `in-progress` for `needs-decision`,
    comment the question with options + your recommendation, and move on to the next
-   task. **Do not guess through it.**
+   task. **Do not guess through it.** (When I answer on the issue and remove the
+   `needs-decision` label, the task becomes claimable again — whoever picks it up
+   inherits the full thread as context.)
 5. Execute in your environment, following all my rules (TDD, conventions, comments
    policy). Keep changes scoped to the task. On a long task, post a short progress
    comment at least every ~2 hours — it is your **heartbeat**: the coordination

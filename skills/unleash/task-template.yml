@@ -40,5 +40,7 @@ body:
   - type: markdown
     attributes:
       value: >
-        After creating the issue, set its dependencies via the **Relationships**
-        sidebar ("Mark as blocked by") or `gh issue edit <n> --add-blocked-by <m>`.
+        After creating the issue: **(1) add the `project:<name>` label** — workers
+        are scoped to one project and will never see an unlabeled task; **(2)** set
+        dependencies via the **Relationships** sidebar ("Mark as blocked by") or
+        `gh issue edit <n> --add-blocked-by <m>`.

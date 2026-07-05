@@ -38,11 +38,14 @@ Run `/rp-grill` first and paste the resulting spec into the issue. Example queue
 
 `repo` is the project's canonical identity (OWNER/REPO or clone URL) — never a local
 path. Each worker runs inside an environment you prepared; the issue never cares
-which clone does the work. Every issue carries a `project:<name>` label — workers are
-scoped to exactly one project.
+which clone does the work.
+
+**Don't forget the `project:<name>` label on every issue** — the template can't add
+it for you, and workers are scoped to a project: an unlabeled task is invisible to
+all of them.
 
 ```bash
-gh -R OWNER/tasks issue edit 13 --add-blocked-by 12
+gh -R OWNER/tasks issue edit 13 --add-label "project:cup" --add-blocked-by 12
 ```
 
 The dependency graph lives in GitHub — the execution order never needs explaining
@@ -94,8 +97,10 @@ between terminals.
   `in-progress` = running (the claim comment says which runner), closed = done with
   evidence.
 - Native GitHub notifications when something closes or asks for you.
-- A `needs-decision` shows up? Answer **on the issue** ("option B, go") — the runner
-  picks it up on its next sweep. You decide without opening a terminal.
+- A `needs-decision` shows up? Answer **on the issue** ("option B, go") **and remove
+  the `needs-decision` label** — that's what puts the task back in the queue (workers
+  never touch a task still labeled `needs-decision`). You decide without opening a
+  terminal.
 
 ## 5. The checkpoint (e.g. Monday morning)
 
