@@ -1,0 +1,57 @@
+# One-click release: bumps the version in plugin.json (which is what makes
+# installed plugins pick up the update — the plugin is pinned to that string),
+# commits, tags, and publishes a GitHub Release with generated notes.
+#
+# Run it from the Actions tab: Release -> Run workflow -> pick the bump type.
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so release notes cover since-last-tag
+
+      - name: Bump version in plugin.json
+        id: bump
+        run: |
+          current=$(jq -r .version .claude-plugin/plugin.json)
+          IFS=. read -r major minor patch <<< "$current"
+          case "${{ inputs.bump }}" in
+            major) new="$((major+1)).0.0" ;;
+            minor) new="$major.$((minor+1)).0" ;;
+            *)     new="$major.$minor.$((patch+1))" ;;
+          esac
+          jq --arg v "$new" '.version = $v' .claude-plugin/plugin.json > tmp.json
+          mv tmp.json .claude-plugin/plugin.json
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+
+      - name: Commit, tag, and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .claude-plugin/plugin.json
+          git commit -m "chore(release): v${{ steps.bump.outputs.new }}"
+          git tag "v${{ steps.bump.outputs.new }}"
+          git push origin HEAD --tags
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.bump.outputs.new }}" \
+            --title "v${{ steps.bump.outputs.new }}" \
+            --generate-notes
