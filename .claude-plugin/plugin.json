@@ -1,6 +1,6 @@
 {
   "name": "kraken",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "One head, many tentacles: a task queue built on GitHub Issues where named Claude Code workers claim tasks, execute them, validate against acceptance criteria, and record the evidence — dependencies, heartbeats, and a stale-claim reaper included.",
   "author": {
     "name": "Rafael Prado",
