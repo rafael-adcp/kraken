@@ -48,25 +48,55 @@ everything else; set dependencies via the Relationships sidebar instead.
    gh -R OWNER/tasks label create needs-decision
    ```
 
-2. **Queue the work**: one issue per task (goal, acceptance, notes), dependencies via
-   `gh issue edit <n> --add-blocked-by <m>`, grouped by `project:<name>` labels.
+2. **Queue the work**: one issue per task (goal, acceptance, notes). Every issue
+   gets a **`project:<name>` label** (workers are scoped to one project — an
+   unlabeled task is invisible to all of them) and dependencies via
+   `gh issue edit <n> --add-label "project:cup" --add-blocked-by <m>`.
 
-3. **Unleash the kraken** — one worker per environment you prepared:
+3. **Unleash the kraken** — one worker per environment you prepared. Capacity is
+   decided at launch: every worker takes ONE task at a time, so a project gets
+   exactly as much parallelism as the number of workers you point at it.
 
    ```
+   # the dev container that owns the "cup" environment -> one worker
+   /kraken:unleash OWNER/tasks --worker-name cup-env --project cup
+
+   # five fully isolated clones of the data project -> five workers
    /kraken:unleash OWNER/tasks --worker-name data-env-1 --project ceres
+   /kraken:unleash OWNER/tasks --worker-name data-env-2 --project ceres
    ```
 
 4. **Come back to evidence**: closed issues with results, a `needs-decision` filter
    with questions waiting (options + recommendation included), and PRs ready for your
    review. Nothing merged without you.
 
+## The loop (what a worker does, unsupervised)
+
+```
+list open kraken-task issues for my project
+  skip: blocked-by still open · in-progress · needs-decision (waiting on the human)
+  → claim: label in-progress + comment "claimed-by: data-env-1"
+      lost the race? another claim came first → next task
+  → post ASSUMPTIONS as a comment
+      expensive unverifiable assumption? → needs-decision + question
+      with options + recommendation → next task, no guessing
+  → execute in my environment, one task at a time
+      (progress comment every ~2h — the heartbeat that keeps the reaper away)
+  → run the ACCEPTANCE for real → result comment + commit/PR links → close
+  → closing unblocks dependents → an idle worker picks them up
+```
+
+To answer a `needs-decision`: reply on the issue ("option B, go") **and remove the
+label** — the task rejoins the queue and whoever claims it inherits the full thread.
+Dead workers are handled server-side: the reaper moves silent `in-progress` issues to
+`needs-decision` after 6h.
+
 ## Docs
 
-- [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md) — the worker protocol
-  (claiming, assumptions, acceptance, authorization boundaries).
-- [`skills/unleash/WORKFLOW.md`](skills/unleash/WORKFLOW.md) — the end-to-end
-  walkthrough, from planning to the Monday-morning checkpoint.
+The single source of truth for worker behavior is
+[`skills/unleash/SKILL.md`](skills/unleash/SKILL.md) — the full protocol: claiming
+and its tiebreaker, assumptions, acceptance, heartbeats, and authorization
+boundaries.
 
 ## Origins
 
