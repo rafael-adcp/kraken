@@ -1,6 +1,6 @@
-# One-click release: bumps the version in plugin.json (which is what makes
-# installed plugins pick up the update — the plugin is pinned to that string),
-# commits, tags, and publishes a GitHub Release with generated notes.
+# One-click release, step 1 of 2: opens a release PR with the version bump.
+# Merging that PR is the human approval — main is protected, so nothing lands
+# without it. Step 2 (tag-release.yml) fires on the merge and publishes.
 #
 # Run it from the Actions tab: Release -> Run workflow -> pick the bump type.
 name: Release
@@ -15,14 +15,13 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
-  release:
+  release-pr:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # full history so release notes cover since-last-tag
 
       - name: Bump version in plugin.json
         id: bump
@@ -39,19 +38,19 @@ jobs:
           echo "current=$current" >> "$GITHUB_OUTPUT"
           echo "new=$new" >> "$GITHUB_OUTPUT"
 
-      - name: Commit, tag, and push
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .claude-plugin/plugin.json
-          git commit -m "chore(release): v${{ steps.bump.outputs.new }}"
-          git tag "v${{ steps.bump.outputs.new }}"
-          git push origin HEAD --tags
-
-      - name: Create GitHub Release
+      - name: Open the release PR
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v${{ steps.bump.outputs.new }}" \
-            --title "v${{ steps.bump.outputs.new }}" \
-            --generate-notes
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          branch="release/v${{ steps.bump.outputs.new }}"
+          git checkout -b "$branch"
+          git add .claude-plugin/plugin.json
+          git commit -m "chore(release): v${{ steps.bump.outputs.new }}"
+          git push origin "$branch"
+          gh pr create \
+            --title "chore(release): v${{ steps.bump.outputs.new }}" \
+            --body "Bumps the plugin version ${{ steps.bump.outputs.current }} -> ${{ steps.bump.outputs.new }}.
+
+          Merging this PR publishes the release: the tag and the GitHub Release are created automatically (see tag-release.yml)."

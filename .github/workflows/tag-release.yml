@@ -1,0 +1,32 @@
+# One-click release, step 2 of 2: when a version bump lands on main (i.e. the
+# release PR was merged), create the matching tag and publish the GitHub
+# Release with generated notes. Idempotent: does nothing if the tag exists.
+name: Tag and publish release
+on:
+  push:
+    branches: [main]
+    paths: [".claude-plugin/plugin.json"]
+
+permissions:
+  contents: write
+
+jobs:
+  tag-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so release notes cover since-last-tag
+
+      - name: Tag and release if the version is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(jq -r .version .claude-plugin/plugin.json)
+          if git rev-parse "v$v" >/dev/null 2>&1; then
+            echo "tag v$v already exists - nothing to do"
+            exit 0
+          fi
+          git tag "v$v"
+          git push origin "v$v"
+          gh release create "v$v" --title "v$v" --generate-notes
