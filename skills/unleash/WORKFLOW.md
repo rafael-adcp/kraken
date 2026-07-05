@@ -21,8 +21,9 @@ gh -R OWNER/tasks label create needs-decision
 must not block the queue forever. Workers heartbeat with progress comments, so a
 healthy long task is never reaped.
 
-Create a `project:<name>` label per project you want to group/scope by (e.g.
-`project:cup`, `project:ceres`) — workers filter on these.
+Create a `project:<name>` label per project (e.g.
+`project:cup`, `project:ceres`) — every task carries one, and every worker is
+scoped to exactly one (`--project` is mandatory).
 
 ## 1. Plan (minutes, e.g. Friday night)
 
@@ -37,8 +38,8 @@ Run `/rp-grill` first and paste the resulting spec into the issue. Example queue
 
 `repo` is the project's canonical identity (OWNER/REPO or clone URL) — never a local
 path. Each worker runs inside an environment you prepared; the issue never cares
-which clone does the work. Label the issues `project:<name>` so workers can scope to
-them.
+which clone does the work. Every issue carries a `project:<name>` label — workers are
+scoped to exactly one project.
 
 ```bash
 gh -R OWNER/tasks issue edit 13 --add-blocked-by 12
@@ -72,7 +73,7 @@ Launch five. The system never second-guesses you.
 ## 3. Each worker's loop (unsupervised)
 
 ```
-list open kraken-task issues without in-progress (+ project:<name> when scoped)
+list open kraken-task issues without in-progress, labeled project:<mine>
   → #13 blocked (#12 open)? skip
   → #12 free → add in-progress + comment "claimed-by: data-env-1"
   → re-read comments → first claimed-by is mine? it's my task

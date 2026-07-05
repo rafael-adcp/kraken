@@ -14,13 +14,17 @@ dependency graph come for free.
 ## Invocation
 
 ```
-/kraken:unleash OWNER/tasks [--worker-name <alias>] [--project <name>]
+/kraken:unleash OWNER/tasks --worker-name <alias> --project <name>
 ```
 
-- `--worker-name`: this worker's identity, used in every claim/comment (default:
-  host/container name). Pick names that tell me where the work ran.
-- `--project`: only take tasks labeled `project:<name>`. No flag = take anything
-  startable.
+**All three arguments are REQUIRED.** If any is missing, do not start — ask for it.
+
+- `--worker-name`: this worker's identity, used in every claim/comment. Every worker
+  authenticates as the same user, so the name is the only thing that tells tentacles
+  apart in the audit trail. Pick names that say where the work ran.
+- `--project`: only take tasks labeled `project:<name>`. Mandatory because a worker
+  runs in an environment prepared for a specific project — an unscoped worker could
+  claim a task its environment cannot host.
 
 ## The concurrency model: capacity = how many workers I launch
 
@@ -42,8 +46,9 @@ dependency graph come for free.
   template (fields: repo, goal, acceptance, notes).
 - An issue's `repo` is the **canonical identity** of the project (OWNER/REPO or
   clone URL), never a local path.
-- Tasks are grouped by an optional label **`project:<name>`** — that's what
-  `--project` filters on.
+- Every task carries a **`project:<name>`** label — that's what `--project` filters
+  on. A task without a project label is invisible to every worker (fix the label,
+  don't improvise).
 - Setting up a new coordination repo? Copy the assets bundled in this skill's
   folder: `task-template.yml` → `.github/ISSUE_TEMPLATE/task.yml` and
   `reclaim-stale.yml` → `.github/workflows/reclaim-stale.yml` (the reaper for dead
@@ -51,9 +56,9 @@ dependency graph come for free.
 
 ## Protocol
 
-1. List candidates: open `kraken-task` issues without `in-progress`, oldest first —
-   plus `--label project:<name>` when scoped
-   (`gh -R OWNER/REPO issue list --label kraken-task --state open ...`).
+1. List candidates: open `kraken-task` issues without `in-progress`, oldest first,
+   always scoped to your project
+   (`gh -R OWNER/REPO issue list --label kraken-task --label "project:<name>" --state open ...`).
 2. Skip anything blocked: a task is startable only when **every blocked-by issue is
    closed** (check the issue's relationships; honor a `depends-on: #N` line in the
    body as a fallback for the same thing).
