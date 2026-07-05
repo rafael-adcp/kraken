@@ -1,0 +1,14 @@
+{
+  "name": "kraken",
+  "owner": {
+    "name": "Rafael Prado",
+    "url": "https://github.com/rafael-adcp"
+  },
+  "plugins": [
+    {
+      "name": "kraken",
+      "source": "./",
+      "description": "One head, many tentacles: a task queue built on GitHub Issues where named Claude Code workers claim tasks, execute them, validate against acceptance criteria, and record the evidence."
+    }
+  ]
+}

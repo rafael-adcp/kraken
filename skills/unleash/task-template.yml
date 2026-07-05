@@ -1,0 +1,44 @@
+# Issue form for kraken. Copy to .github/ISSUE_TEMPLATE/task.yml in the
+# coordination repo (see SKILL.md).
+name: Task
+description: A unit of work for a kraken worker
+title: "<short imperative title>"
+labels: ["kraken-task"]
+body:
+  - type: input
+    id: repo
+    attributes:
+      label: repo
+      description: >-
+        Canonical project identity — OWNER/REPO or clone URL, the same string every
+        task for this project uses. Never a local path: each worker runs inside an
+        environment prepared for it.
+      placeholder: OWNER/REPO or clone URL
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What "done and correct" looks like
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: "Observable check: test passing, behavior, command output"
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Constraints, frozen contracts, gotchas (optional)
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: >
+        After creating the issue, set its dependencies via the **Relationships**
+        sidebar ("Mark as blocked by") or `gh issue edit <n> --add-blocked-by <m>`.

@@ -1,0 +1,42 @@
+# Reaper for kraken. Copy to .github/workflows/reclaim-stale.yml in the
+# coordination repo (see SKILL.md).
+#
+# A worker that dies mid-task leaves its issue labeled in-progress forever,
+# blocking the queue. This workflow runs server-side (so it works even when every
+# worker is dead): any in-progress issue with no activity for MAX_HOURS is moved
+# to needs-decision for the human to triage — relaunch or investigate.
+#
+# Workers must heartbeat: a short progress comment at least every ~2h on long
+# tasks keeps updatedAt fresh and the reaper away.
+#
+# Why not actions/stale: its threshold is whole DAYS (community-triage timescale);
+# a dead worker's claim must be reclaimed within hours, not days.
+name: Reclaim stale claims
+on:
+  schedule:
+    - cron: "17 * * * *" # hourly; off-minute to dodge the top-of-hour crunch
+  workflow_dispatch:
+
+jobs:
+  reclaim:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MAX_HOURS: 6
+    steps:
+      - name: Move silent in-progress issues to needs-decision
+        run: |
+          now=$(date -u +%s)
+          gh issue list -R "$GITHUB_REPOSITORY" --label in-progress --state open \
+            --json number,updatedAt --jq '.[] | "\(.number) \(.updatedAt)"' |
+          while read -r num updated; do
+            age=$(( (now - $(date -u -d "$updated" +%s)) / 3600 ))
+            if [ "$age" -ge "$MAX_HOURS" ]; then
+              gh issue edit "$num" -R "$GITHUB_REPOSITORY" \
+                --remove-label in-progress --add-label needs-decision
+              gh issue comment "$num" -R "$GITHUB_REPOSITORY" \
+                --body "stale-claim: no activity for ${age}h — the worker likely died. Released for triage: relabel to retry, or investigate."
+            fi
+          done
