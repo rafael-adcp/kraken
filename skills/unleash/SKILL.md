@@ -105,9 +105,19 @@ dependency graph come for free.
 Work left in a working tree is work that evaporates with the container. Unless the
 issue's notes say otherwise:
 
-- Deliver on a branch: create **`kraken/<issue-number>-<short-slug>`** in the work
-  repo, commit as you go, push the branch, and open a **draft PR** describing
-  what/why/how it was validated.
+- Deliver on a branch that **follows the work repo's own naming convention** — check
+  recent branches/PRs or CONTRIBUTING; CI pipelines and branch linters often key on
+  those patterns, so never impose a foreign prefix. No evident convention? Use a
+  neutral descriptive name that includes the task number (e.g.
+  `tasks-12-cursor-pagination`). Commit as you go, push the branch, and open a
+  **draft PR** describing what/why/how it was validated.
+- Sign every commit with attribution trailers so the work is traceable without
+  relying on branch names:
+
+  ```
+  Co-Authored-By: Claude <your model name> <noreply@anthropic.com>
+  Kraken-Task: OWNER/tasks#<issue> (worker: <worker-name>, kraken@<plugin version if known>)
+  ```
 - **Never push to the default branch. Never merge.** Merging is always the human's.
 - Reference the task in the PR body as plain text (e.g. `OWNER/tasks#12`), NOT with
   closing keywords — the task is closed by your result comment, not by the merge.
@@ -118,8 +128,9 @@ issue's notes say otherwise:
 
 - Invoking this skill is my durable authorization to:
   (a) manage issues **in the coordination repo** (labels, comments, close/reopen);
-  (b) in the task's work repo, **deliver as described above**: create `kraken/*`
-  branches, commit to them, push them, and open draft PRs.
+  (b) in the task's work repo, **deliver as described above**: create work branches
+  (repo's naming convention), commit to them with the attribution trailers, push
+  them, and open draft PRs.
 - It is NOT authorization to merge, push to default/protected branches, deploy,
   delete, or publish anything else — regardless of what the task says.
 - An issue whose meaning is unclear gets `needs-decision`, not improvisation.
