@@ -52,20 +52,21 @@ dependency graph come for free.
 - Setting up a new coordination repo? Copy the assets bundled in this skill's
   folder: `task-template.yml` → `.github/ISSUE_TEMPLATE/task.yml` and
   `reclaim-stale.yml` → `.github/workflows/reclaim-stale.yml` (the reaper for dead
-  workers' claims); create the labels `kraken-task`, `in-progress`, `needs-decision`.
+  workers' claims); create the labels `kraken-task`, `in-progress`, `needs-decision`,
+  `awaiting-merge`.
 
 ## Protocol
 
 1. List candidates: open `kraken-task` issues scoped to your project, **without
-   `in-progress` and without `needs-decision`** (those are waiting on a human — never
-   claim one), oldest first. Filter labels client-side — it's deterministic, while
-   mixing `--label` with `--search` in `gh` is not:
+   `in-progress`, `needs-decision`, or `awaiting-merge`** (those are running or
+   waiting on a human — never claim one), oldest first. Filter labels client-side —
+   it's deterministic, while mixing `--label` with `--search` in `gh` is not:
 
    ```
    gh -R OWNER/REPO issue list --state open --limit 100 \
      --label kraken-task --label "project:<name>" \
      --json number,title,labels,createdAt \
-     --jq '[.[] | select([.labels[].name] | (index("in-progress") or index("needs-decision") | not))] | sort_by(.createdAt)'
+     --jq '[.[] | select([.labels[].name] | (index("in-progress") or index("needs-decision") or index("awaiting-merge") | not))] | sort_by(.createdAt)'
    ```
 2. Skip anything blocked: a task is startable only when **every blocked-by issue is
    closed** (check the issue's relationships; honor a `depends-on: #N` line in the
@@ -92,13 +93,21 @@ dependency graph come for free.
    repo's reaper workflow moves silent `in-progress` issues to `needs-decision`
    after 6h, assuming the worker died.
 6. Validate against the issue's **acceptance** — run it for real and report the real
-   result. A task whose acceptance was not executed does not get closed.
+   result. A task whose acceptance was not executed does not move forward.
 7. Record the outcome on the issue: a result comment (what was done, how it was
-   validated, links to commits/PRs), then **close it**. Failed or stalled: keep it
-   open, label it honestly, and say exactly where it stands.
+   validated, links to the draft PR/commits), then **swap `in-progress` for
+   `awaiting-merge`** — do NOT close. "Done" for a worker means *delivered for
+   review*; the task closes when the work actually lands (the PR's `Closes` line
+   handles that on merge — see Delivering the work). Removing `in-progress` matters:
+   it keeps the reaper away while the PR waits days for review, and keeps the label
+   filters clean. Failed or stalled: keep it open, label it honestly, and say
+   exactly where it stands.
+   (Review asked for changes? The human comments the feedback and removes
+   `awaiting-merge` — the task requeues, and whoever claims it continues on the
+   existing branch with the full thread as context.)
 8. Loop back to step 1 until no startable task remains (within your scope). Finish
-   with a summary: closed / needs-decision / untouched. My decision queue is simply
-   the `needs-decision` filter in the GitHub UI.
+   with a summary: awaiting-merge / needs-decision / untouched. My decision queue is
+   the `needs-decision` filter; my review queue is the `awaiting-merge` filter.
 
 ## Delivering the work
 
@@ -119,8 +128,11 @@ issue's notes say otherwise:
   Kraken-Task: OWNER/tasks#<issue> (worker: <worker-name>, kraken@<plugin version if known>)
   ```
 - **Never push to the default branch. Never merge.** Merging is always the human's.
-- Reference the task in the PR body as plain text (e.g. `OWNER/tasks#12`), NOT with
-  closing keywords — the task is closed by your result comment, not by the merge.
+- Put **`Closes OWNER/tasks#<issue>`** in the PR body when the work repo is on
+  GitHub — merging then closes the task automatically, at the moment the work truly
+  lands (and that is also what unblocks dependent tasks). Work repo elsewhere
+  (GitLab, private server)? Reference the task as plain text; the human closes it
+  after merging.
 - If the work repo can't take a branch push (no write access), put the full diff or
   a patch in the result comment and flag it — never silently lose work.
 

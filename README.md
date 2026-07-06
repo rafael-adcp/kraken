@@ -46,6 +46,7 @@ everything else; set dependencies via the Relationships sidebar instead.
    gh -R OWNER/tasks label create kraken-task
    gh -R OWNER/tasks label create in-progress
    gh -R OWNER/tasks label create needs-decision
+   gh -R OWNER/tasks label create awaiting-merge
    gh -R OWNER/tasks label create "project:cup"      # one per project you'll queue
    ```
 
@@ -75,9 +76,11 @@ everything else; set dependencies via the Relationships sidebar instead.
    `git commit`/`git push` without prompting (an ask-gate with nobody around stalls
    the task at delivery time). Merges always stay with you.
 
-4. **Come back to evidence**: closed issues with results, a `needs-decision` filter
-   with questions waiting (options + recommendation included), and PRs ready for your
-   review. Nothing merged without you.
+4. **Come back to evidence**: an `awaiting-merge` filter = your review queue (each
+   task with a result comment and a draft PR), a `needs-decision` filter = your
+   decision queue (questions with options + recommendation included). Merging a PR
+   closes its task (`Closes` reference) and unblocks the dependents. Nothing merges
+   without you.
 
 ## The loop (what a worker does, unsupervised)
 
@@ -94,14 +97,16 @@ list open kraken-task issues for my project
   → run the ACCEPTANCE for real
   → deliver: push a branch (repo's naming convention) + open a draft PR (never merge)
       commits carry Kraken-Task trailers for traceability
-  → result comment + commit/PR links → close
+  → result comment + PR link → swap in-progress for awaiting-merge
+  → you review & merge → the PR's "Closes" line closes the task
   → closing unblocks dependents → an idle worker picks them up
 ```
 
 To answer a `needs-decision`: reply on the issue ("option B, go") **and remove the
 label** — the task rejoins the queue and whoever claims it inherits the full thread.
-Dead workers are handled server-side: the reaper moves silent `in-progress` issues to
-`needs-decision` after 6h.
+Same gesture when a review asks for changes: comment the feedback and remove
+`awaiting-merge`. Dead workers are handled server-side: the reaper moves silent
+`in-progress` issues to `needs-decision` after 6h.
 
 ## Docs
 
