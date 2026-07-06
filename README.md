@@ -117,6 +117,18 @@ Same gesture when a review asks for changes: comment the feedback and remove
 `awaiting-merge`. Dead workers are handled server-side: the reaper moves silent
 `in-progress` issues to `needs-decision` after 6h.
 
+**Keep it draining.** A single run empties the queue and stops. To keep a worker
+picking up tasks you file through the day, have Claude Code re-launch it on a schedule
+with `/loop`:
+
+```
+/loop 15m /kraken:unleash OWNER/tasks --worker-name cup-env --project cup
+```
+
+`/loop` is a Claude Code feature, not part of the worker: it just re-runs the command
+every 15 minutes (omit the interval to let it self-pace). Each run is an ordinary
+drain — same one task at a time, same claim tiebreaker.
+
 ## See it run
 
 A real task's timeline, end to end — claim, restated goal + assumptions, the PR

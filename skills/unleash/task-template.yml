@@ -5,17 +5,6 @@ description: A unit of work for a kraken worker
 title: "<short imperative title>"
 labels: ["kraken-task"]
 body:
-  - type: input
-    id: repo
-    attributes:
-      label: repo
-      description: >-
-        Canonical project identity — OWNER/REPO or clone URL, the same string every
-        task for this project uses. Never a local path: each worker runs inside an
-        environment prepared for it.
-      placeholder: OWNER/REPO or clone URL
-    validations:
-      required: true
   - type: textarea
     id: goal
     attributes:

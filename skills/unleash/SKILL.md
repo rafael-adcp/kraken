@@ -43,12 +43,12 @@ dependency graph come for free.
 - Use `gh -R OWNER/REPO ...` for every queue operation. The coordination repo holds
   issues only, never work code.
 - A task is an **open issue labeled `kraken-task`**, created from the repo's task
-  template (fields: repo, goal, acceptance, notes).
-- An issue's `repo` is the **canonical identity** of the project (OWNER/REPO or
-  clone URL), never a local path.
+  template (fields: goal, acceptance, notes).
 - Every task carries a **`project:<name>`** label — that's what `--project` filters
-  on. A task without a project label is invisible to every worker (fix the label,
-  don't improvise).
+  on, and it is the project's **canonical identity**: the worker runs in an
+  environment prepared for that project, so the label (not a repo path baked into the
+  task) is what says where the work lands. A task without a project label is invisible
+  to every worker (fix the label, don't improvise).
 - Setting up a new coordination repo? Copy the assets bundled in this skill's
   folder: `task-template.yml` → `.github/ISSUE_TEMPLATE/task.yml` and
   `reclaim-stale.yml` → `.github/workflows/reclaim-stale.yml` (the reaper for dead
