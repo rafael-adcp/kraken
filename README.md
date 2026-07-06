@@ -1,5 +1,8 @@
 # <img src="images/icon.png" alt="" height="90" valign="middle"> Kraken
 
+[![Release](https://img.shields.io/github/v/release/rafael-adcp/kraken)](https://github.com/rafael-adcp/kraken/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 > **TL;DR:** One head, many tentacles — a task queue built on **GitHub Issues** where
 > named Claude Code workers claim tasks, execute them, and record the evidence.
 > Write the list once; the tentacles do the rest.
@@ -40,9 +43,12 @@ everything else; set dependencies via the Relationships sidebar instead.
 1. **Create the coordination repo** (once):
 
    ```bash
-   gh repo create OWNER/tasks --private
-   # copy skills/unleash/task-template.yml -> .github/ISSUE_TEMPLATE/task.yml
-   # copy skills/unleash/reclaim-stale.yml -> .github/workflows/reclaim-stale.yml
+   gh repo create OWNER/tasks --private --clone && cd tasks
+   mkdir -p .github/ISSUE_TEMPLATE .github/workflows
+   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/task-template.yml -o .github/ISSUE_TEMPLATE/task.yml
+   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/reclaim-stale.yml -o .github/workflows/reclaim-stale.yml
+   git add -A && git commit -m "chore: kraken task template and reaper" && git push
+
    gh -R OWNER/tasks label create kraken-task
    gh -R OWNER/tasks label create in-progress
    gh -R OWNER/tasks label create needs-decision
@@ -71,10 +77,12 @@ everything else; set dependencies via the Relationships sidebar instead.
    Workers deliver on **work branches + draft PRs** — never the default branch,
    never a merge. Branches follow each work repo's own naming convention (CI
    pipelines key on those patterns); traceability comes from commit trailers
-   (`Kraken-Task: OWNER/tasks#12 (worker: ..., kraken@x.y.z)`). Because workers run
-   unattended, the worker environment's Claude Code settings must allow
-   `git commit`/`git push` without prompting (an ask-gate with nobody around stalls
-   the task at delivery time). Merges always stay with you.
+   (`Kraken-Task: OWNER/tasks#12 (worker: ..., kraken@x.y.z)`).
+
+   > [!IMPORTANT]
+   > Workers run unattended: the worker environment's Claude Code settings must
+   > allow `git commit`/`git push` without prompting — a permission ask-gate with
+   > nobody around stalls the task at delivery time. Merges always stay with you.
 
 4. **Come back to evidence**: an `awaiting-merge` filter = your review queue (each
    task with a result comment and a draft PR), a `needs-decision` filter = your
@@ -86,7 +94,8 @@ everything else; set dependencies via the Relationships sidebar instead.
 
 ```
 list open kraken-task issues for my project
-  skip: blocked-by still open · in-progress · needs-decision (waiting on the human)
+  skip: blocked-by still open · in-progress · needs-decision · awaiting-merge
+        (the last two are waiting on the human)
   → claim: label in-progress + comment "claimed-by: data-env-1"
       lost the race? another claim came first → next task
   → post ASSUMPTIONS as a comment
@@ -107,6 +116,23 @@ label** — the task rejoins the queue and whoever claims it inherits the full t
 Same gesture when a review asks for changes: comment the feedback and remove
 `awaiting-merge`. Dead workers are handled server-side: the reaper moves silent
 `in-progress` issues to `needs-decision` after 6h.
+
+## See it run
+
+A real task's timeline, end to end — claim, restated goal + assumptions, the PR
+delivered, the result with the acceptance check executed, and the close:
+
+<img src="images/pilot-task.png" width="720" alt="A kraken task issue timeline: claim comment, assumptions, draft PR link, result comment, and close">
+
+## Updating
+
+The plugin is pinned to the version in its manifest — pushes to `main` reach nobody
+until a release bumps it, so what you run is always a deliberate release. To pick up
+a new one:
+
+```
+/plugin marketplace update kraken
+```
 
 ## Docs
 
