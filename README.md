@@ -98,15 +98,18 @@ list open kraken-task issues for my project
         (the last two are waiting on the human)
   → claim: label in-progress + comment "claimed-by: data-env-1"
       lost the race? another claim came first → next task
-  → post ASSUMPTIONS as a comment
-      expensive unverifiable assumption? → needs-decision + question
-      with options + recommendation → next task, no guessing
-  → execute in my environment, one task at a time
-      (progress comment every ~2h — the heartbeat that keeps the reaper away)
-  → run the ACCEPTANCE for real
-  → deliver: push a branch (repo's naming convention) + open a draft PR (never merge)
-      commits carry Kraken-Task trailers for traceability
-  → result comment + PR link → swap in-progress for awaiting-merge
+  → hand the claimed task to a FRESH subagent (clean context per task, so the driver
+    stays lean over a long drain) — still one task at a time:
+      → post ASSUMPTIONS as a comment
+          expensive unverifiable assumption? → needs-decision + question
+          with options + recommendation → next task, no guessing
+      → execute in my environment
+          (progress comment every ~2h — the heartbeat that keeps the reaper away)
+      → run the ACCEPTANCE for real
+      → deliver: push a branch (repo's naming convention) + open a draft PR (never merge)
+          commits carry Kraken-Task trailers for traceability
+      → result comment + PR link → swap in-progress for awaiting-merge
+    subagent returns only {task#, final label, PR url} → driver loops
   → you review & merge → the PR's "Closes" line closes the task
   → closing unblocks dependents → an idle worker picks them up
 ```
