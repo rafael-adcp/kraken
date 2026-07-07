@@ -77,7 +77,7 @@ everything else; set dependencies via the Relationships sidebar instead.
    Workers deliver on **work branches + draft PRs** — never the default branch,
    never a merge. Branches follow each work repo's own naming convention (CI
    pipelines key on those patterns); traceability comes from commit trailers
-   (`Kraken-Task: OWNER/tasks#12 (worker: ..., kraken@x.y.z)`).
+   (`Kraken-Task: OWNER/work-tasks#12 (worker: ..., kraken@x.y.z)`).
 
    > [!IMPORTANT]
    > Workers run unattended: the worker environment's Claude Code settings must

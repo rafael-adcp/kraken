@@ -149,10 +149,12 @@ issue's notes say otherwise:
 
   ```
   Co-Authored-By: Claude <your model name> <noreply@anthropic.com>
-  Kraken-Task: OWNER/tasks#<issue> (worker: <worker-name>, kraken@<plugin version if known>)
+  Kraken-Task: <coordination-repo>#<issue> (worker: <worker-name>, kraken@<plugin version if known>)
   ```
+  `<coordination-repo>` is the slug you were invoked with (e.g. `OWNER/work-tasks`) —
+  substitute it, don't paste a literal `tasks`.
 - **Never push to the default branch. Never merge.** Merging is always the human's.
-- Put **`Closes OWNER/tasks#<issue>`** in the PR body when the work repo is on
+- Put **`Closes <coordination-repo>#<issue>`** in the PR body when the work repo is on
   GitHub — merging then closes the task automatically, at the moment the work truly
   lands (and that is also what unblocks dependent tasks). Work repo elsewhere
   (GitLab, private server)? Reference the task as plain text; the human closes it
