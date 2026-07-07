@@ -73,12 +73,19 @@ dependency graph come for free.
 2. Skip anything blocked: a task is startable only when **every blocked-by issue is
    closed** (check the issue's relationships; honor a `depends-on: #N` line in the
    body as a fallback for the same thing).
-3. **Claim**: add the `in-progress` label and immediately post a comment
+3. **Claim**. Your candidate list may be stale — another worker may have delivered or
+   released the task in the seconds since you listed. So **re-fetch the issue's current
+   labels first** and skip it if it now carries `in-progress`, `needs-decision`, or
+   `awaiting-merge`: never add `in-progress` on top of one of those, or you corrupt the
+   state (`in-progress` + `awaiting-merge` is exactly what the reaper later drags to
+   `needs-decision`). Check before you label — do not label-then-verify. Only if it is
+   still clear, claim: add the `in-progress` label and immediately post a comment
    `claimed-by: <worker-name>`. Then **re-read the comments**: if the first
    `claimed-by:` comment **of the current claim window** is not yours, another
    worker won — back off (remove nothing) and pick the next candidate. Comment
-   ordering is server-side, which makes it the tiebreaker. (Assignees can't
-   arbitrate: every worker authenticates as me.)
+   ordering is server-side, which makes it the tiebreaker: the re-fetch guards against a
+   stale list, the tiebreaker resolves two workers that pass the guard at the same
+   instant. (Assignees can't arbitrate: every worker authenticates as me.)
    The claim window starts after the most recent `released:` / stale-claim /
    `needs-decision` event on the issue — **ignore `claimed-by:` comments older than
    that**, or a task once claimed by a dead worker could never be claimed again.

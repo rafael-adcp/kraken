@@ -96,7 +96,9 @@ everything else; set dependencies via the Relationships sidebar instead.
 list open kraken-task issues for my project
   skip: blocked-by still open · in-progress · needs-decision · awaiting-merge
         (the last two are waiting on the human)
-  → claim: label in-progress + comment "claimed-by: data-env-1"
+  → claim: re-check the issue's live labels first (the list may be stale)
+      already in-progress/awaiting-merge/needs-decision? → skip, never relabel
+      still clear? → label in-progress + comment "claimed-by: data-env-1"
       lost the race? another claim came first → next task
   → hand the claimed task to a FRESH subagent (clean context per task, so the driver
     stays lean over a long drain) — still one task at a time:
