@@ -79,6 +79,11 @@ everything else; set dependencies via the Relationships sidebar instead.
    pipelines key on those patterns); traceability comes from commit trailers
    (`Kraken-Task: OWNER/work-tasks#12 (worker: ..., kraken@x.y.z)`).
 
+   > [!TIP]
+   > Forgot which projects live in the queue? Run
+   > `/kraken:identify OWNER/tasks` — it lists the `project:` labels and prints
+   > ready-to-paste `/kraken:unleash` lines, one per project.
+
    > [!IMPORTANT]
    > Workers run unattended: the worker environment's Claude Code settings must
    > allow `git commit`/`git push` without prompting — a permission ask-gate with
