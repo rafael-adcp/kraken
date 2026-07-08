@@ -1,0 +1,21 @@
+name: Skill lint
+
+# Deterministic checks on the skill sources. No secrets, no tokens, no model
+# calls — safe to run on every PR (semantic review stays local; see CONTRIBUTING).
+on:
+  pull_request:
+    paths:
+      - "skills/**"
+      - "README.md"
+      - "scripts/**"
+      - ".github/workflows/lint.yml"
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run skill lint
+        run: bash scripts/lint-skills.sh
