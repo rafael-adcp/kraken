@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# .githooks/pre-push — advisory LLM review of skill changes before pushing.
+#
+# When a push touches skills/** or README.md, runs `claude -p` locally to
+# review the diff against the skill's semantic invariants (label protocol,
+# step numbering, subagent context, authorization/safety trailers). The
+# deterministic gate lives in CI (see .github/workflows/lint.yml); this hook
+# is the second, semantic layer — advisory, not enforced remotely.
+#
+# Bypass:
+#   SKIP_LLM_REVIEW=1 git push        # skip the LLM review for this push
+#   git push --no-verify              # skip all pre-push hooks
+#
+# One-time setup (per clone):
+#   git config core.hooksPath .githooks
+set -uo pipefail
+
+[ "${SKIP_LLM_REVIEW:-0}" = "1" ] && exit 0
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+if ! command -v claude >/dev/null 2>&1; then
+  printf 'pre-push: `claude` CLI not found — skipping LLM skill review.\n' >&2
+  exit 0
+fi
+
+remote="${1:-origin}"
+zero='0000000000000000000000000000000000000000'
+default_branch="$(git symbolic-ref --short "refs/remotes/${remote}/HEAD" 2>/dev/null | sed "s|^${remote}/||")"
+default_branch="${default_branch:-main}"
+
+# Aggregate the diff for every ref being pushed that touches skill sources.
+diff=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -z "${local_ref:-}" ] && continue
+  [ "$local_sha" = "$zero" ] && continue  # deleted ref — nothing to review
+  if [ "$remote_sha" = "$zero" ]; then
+    base="$(git merge-base "$local_sha" "${remote}/${default_branch}" 2>/dev/null || true)"
+  else
+    base="$remote_sha"
+  fi
+  [ -z "$base" ] && continue
+  chunk="$(git diff --unified=3 "${base}..${local_sha}" -- skills/ README.md 2>/dev/null || true)"
+  [ -n "$chunk" ] && diff="${diff}${chunk}"$'\n'
+done
+
+if [ -z "$diff" ]; then
+  exit 0
+fi
+
+# Cap the diff so a huge refactor doesn't blow tokens or context.
+max_bytes=40000
+if [ "${#diff}" -gt "$max_bytes" ]; then
+  diff="${diff:0:$max_bytes}"$'\n\n[...diff truncated at 40KB — review the tail manually...]'
+fi
+
+read -r -d '' prompt <<'PROMPT' || true
+You are reviewing a diff for a "skill" — a markdown protocol interpreted at
+runtime by an LLM agent. Prose here is executable: subtle wording changes
+can silently break the agent's behavior. Be a skeptical reviewer.
+
+Focus checklist (report only real issues, not style):
+  1. Label protocol integrity. The four labels (kraken-task, in-progress,
+     needs-decision, awaiting-merge) must remain consistent across SKILL.md,
+     README.md, task-template.yml, and reclaim-stale.yml.
+  2. Step numbering. If steps were reordered, added, or removed, every
+     "step N" reference in the prose must still resolve.
+  3. Subagent context. If the skill spawns subagents, does the delegating
+     prompt carry enough context for the sub-agent to behave correctly
+     (authorization requirements, trailers, safety invariants)?
+  4. Safety trailers / authorization. Are guardrails around destructive or
+     external actions (push, deploy, merge, delete) preserved?
+  5. Contract with task-template.yml. If SKILL.md names fields
+     (goal, acceptance, notes), the template must still expose them.
+
+Respond in exactly this format, nothing else:
+
+VERDICT: ok | warn | block
+FINDINGS:
+  - <one bullet per real issue, or "none" if VERDICT is ok>
+
+Use "block" only for changes that will silently break the protocol.
+Use "warn" for likely regressions worth flagging but not blocking.
+Use "ok" when the diff is safe.
+
+--- DIFF ---
+PROMPT
+
+review="$(printf '%s\n%s\n' "$prompt" "$diff" | claude -p 2>/dev/null || true)"
+
+if [ -z "$review" ]; then
+  printf 'pre-push: LLM review returned no output — letting the push through.\n' >&2
+  exit 0
+fi
+
+printf '\n---- skill review ----\n%s\n----------------------\n' "$review" >&2
+
+verdict="$(printf '%s\n' "$review" \
+  | grep -iE '^VERDICT:' \
+  | head -1 \
+  | awk -F: '{gsub(/[[:space:]]/, "", $2); print tolower($2)}')"
+
+case "$verdict" in
+  block)
+    printf 'pre-push: blocking push. Fix the findings above, or bypass with\n' >&2
+    printf '         SKIP_LLM_REVIEW=1 git push   (or  git push --no-verify)\n' >&2
+    exit 1
+    ;;
+  warn|ok|*)
+    exit 0
+    ;;
+esac
