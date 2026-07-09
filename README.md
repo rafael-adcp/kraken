@@ -40,17 +40,40 @@ coordination repo needs to be on GitHub, and it holds issues, never code.
 flags (`--add-blocked-by` / `--blocked-by`) shipped then. Older `gh` still works for
 everything else; set dependencies via the Relationships sidebar instead.
 
-Three skills ship in the box:
+Five skills ship in the box:
 
 | Skill              | Role                                                                                     |
 | ------------------ | ---------------------------------------------------------------------------------------- |
+| `/kraken:init`     | The bootstrap — stands up a coordination repo: private repo, templates, canonical labels |
 | `/kraken:unleash`  | The worker — claims one task at a time, executes, validates, delivers a draft PR          |
 | `/kraken:watch`    | The driver — zero-token watcher that wakes a worker whenever a startable task appears     |
 | `/kraken:identify` | The recon — lists a queue's `project:` labels and prints ready-to-paste `unleash` lines   |
+| `/kraken:status`   | The return — the review + decision queues and what's in flight, with PR links            |
+
+## Concepts
+
+Five nouns do all the work in Kraken. Keep them straight and the rest follows:
+
+| Concept | What it is | What it is *not* | Lives on |
+| --- | --- | --- | --- |
+| **Coordination repo** | The kraken's head — a private repo whose **Issues are the queue**; also holds the labels (the state machine), the reaper workflow, and the dependency graph | A place for code — it holds none | **GitHub** (required) |
+| **Work repo** | Where the code lives; workers push branches + open draft PRs here | The queue — it holds no tasks | **Anywhere** (GitHub, GitLab, private) |
+| **`project:<name>` label** | A task's **canonical identity** — `--project` filters on it, and it says which prepared environment the task belongs to | Optional — a task without it is invisible to every worker | Coordination repo |
+| **Worker (tentacle)** | A **named** Claude Code session draining the queue **one task at a time**, inside one prepared environment | A pool — capacity is just how many you launch | Your machine / container / clone |
+| **Task** | An open Issue labeled `kraken-task` (goal, acceptance, notes) that moves `in-progress` → `awaiting-merge` / `needs-decision` | Closed until the work truly lands — the merge closes it | Coordination repo |
 
 ## Quickstart
 
-1. **Create the coordination repo** (once):
+1. **Create the coordination repo** (once). Running the plugin? One command stands it
+   all up — verifies or creates the private repo, installs the two templates, and creates
+   the canonical labels (idempotent, safe to re-run):
+
+   ```
+   /kraken:init OWNER/tasks --project YOUR_PROJECT_NAME
+   ```
+
+   Not running the plugin? The same setup by hand — the two assets land at
+   `.github/ISSUE_TEMPLATE/task.yml` and `.github/workflows/reclaim-stale.yml`:
 
    ```bash
    gh repo create OWNER/tasks --private --clone && cd tasks
@@ -122,11 +145,14 @@ Three skills ship in the box:
    pipelines key on those patterns); traceability comes from commit trailers
    (`Kraken-Task: OWNER/work-tasks#12 (worker: ..., kraken@x.y.z)`).
 
-5. **Come back to evidence**: an `awaiting-merge` filter = your review queue (each
-   task with a result comment and a draft PR), a `needs-decision` filter = your
-   decision queue (questions with options + recommendation included). Merging a PR
-   closes its task (`Closes` reference) and unblocks the dependents. Nothing merges
-   without you.
+5. **Come back to evidence**: `/kraken:status OWNER/tasks` prints both human-facing
+   queues at once — the `awaiting-merge` review queue (each task with a result comment
+   and a draft PR link), the `needs-decision` decision queue (questions with options +
+   recommendation), plus what's still in flight and any orphan whose PR already merged
+   but whose issue never closed. Scripting instead? The raw filters are
+   `gh -R OWNER/tasks issue list --state open --label awaiting-merge` and the same with
+   `--label needs-decision`. Merging a PR closes its task (`Closes` reference) and
+   unblocks the dependents. Nothing merges without you.
 
 ## How it works (10,000 ft)
 

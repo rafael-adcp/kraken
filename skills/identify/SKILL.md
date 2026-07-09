@@ -16,7 +16,9 @@ worker against each one, with the coordination slug already baked in.
 ```
 
 The argument is REQUIRED — the coordination repo whose queue you will enumerate.
-Missing? Do not guess. Ask for it and stop.
+Missing? Do not guess. Ask for it and stop. If the slug matches `^OWNER/` or contains
+`<`/`>`, refuse: it looks like the template placeholder — substitute your real
+`owner/repo` and re-run.
 
 ## Protocol
 
