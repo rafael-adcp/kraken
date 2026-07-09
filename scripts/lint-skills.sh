@@ -13,6 +13,7 @@ SKILL="skills/unleash/SKILL.md"
 README="README.md"
 TEMPLATE="skills/unleash/task-template.yml"
 REAPER="skills/unleash/reclaim-stale.yml"
+WATCHER="skills/watch/watch-queue.sh"
 
 fail=0
 err() { printf '  \033[31mx\033[0m %s\n' "$1"; fail=1; }
@@ -26,13 +27,13 @@ check_label() {
   for f in "$@"; do grep -qF -- "$label" "$f" || missing="$missing $f"; done
   [ -n "$missing" ] && err "label '$label' missing from:$missing"
 }
-check_label "kraken-task"    "$SKILL" "$README" "$TEMPLATE"
-check_label "in-progress"    "$SKILL" "$README" "$REAPER"
-check_label "needs-decision" "$SKILL" "$README" "$REAPER"
-check_label "awaiting-merge" "$SKILL" "$README"
+check_label "kraken-task"    "$SKILL" "$README" "$TEMPLATE" "$WATCHER"
+check_label "in-progress"    "$SKILL" "$README" "$REAPER" "$WATCHER"
+check_label "needs-decision" "$SKILL" "$README" "$REAPER" "$WATCHER"
+check_label "awaiting-merge" "$SKILL" "$README" "$WATCHER"
 # common typo class: labels use hyphens, never underscores
 for bad in kraken_task in_progress needs_decision awaiting_merge; do
-  grep -qInF -- "$bad" "$SKILL" "$README" "$TEMPLATE" "$REAPER" 2>/dev/null \
+  grep -qInF -- "$bad" "$SKILL" "$README" "$TEMPLATE" "$REAPER" "$WATCHER" 2>/dev/null \
     && err "underscore variant '$bad' found (labels use hyphens)"
 done
 [ "$fail" -eq 0 ] && note "4 canonical labels aligned across files"
@@ -78,10 +79,10 @@ done < <(
 
 # --- 5. Shell / YAML / JSON snippets parse ----------------------------------
 echo "[5] snippets & assets"
-if [ -f scripts/queue-from-issues.sh ]; then
-  bash -n scripts/queue-from-issues.sh 2>/dev/null \
-    || err "scripts/queue-from-issues.sh has a bash syntax error"
-fi
+for sh in scripts/*.sh skills/*/*.sh; do
+  [ -f "$sh" ] || continue
+  bash -n "$sh" 2>/dev/null || err "$sh has a bash syntax error"
+done
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
   for y in "$TEMPLATE" "$REAPER" .github/workflows/*.yml; do
     [ -f "$y" ] || continue
