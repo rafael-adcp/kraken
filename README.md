@@ -86,16 +86,23 @@ Three skills ship in the box:
          "Bash(git commit:*)",
          "Bash(git checkout:*)",
          "Bash(git push:*)",
-         "Bash(gh:*)"
+         "Bash(gh -R OWNER/tasks:*)",
+         "Bash(gh pr create:*)"
        ]
      }
    }
    ```
 
-   Extend the list with what the project's acceptance checks need (test runner,
-   package manager). Merges never need pre-allowing — they always stay with you.
-   Workers that would share test state (database, fixtures, ports) cannot share
-   an environment: fully isolated environments, or one worker.
+   Substitute your coordination repo in the `gh -R` line (queue operations are
+   always explicit about their repo; it holds issues only, so nothing lands
+   there). Extend the list with what the project's acceptance checks need
+   (test runner, package manager) — but never pre-allow what lands work:
+   `gh pr merge` stays deliberately off the list so merging keeps its ask-gate,
+   and since an allow-list cannot tell a work branch from a default branch,
+   protect the work repo's default branch (required review) for the hard
+   guarantee. Merges always stay with you. Workers that would share test state
+   (database, fixtures, ports) cannot share an environment: fully isolated
+   environments, or one worker.
 
 4. **Unleash the kraken** — one worker per environment you prepared. Capacity is
    decided at launch: every worker takes ONE task at a time, so a project gets
