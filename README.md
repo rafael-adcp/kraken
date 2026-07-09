@@ -40,6 +40,14 @@ coordination repo needs to be on GitHub, and it holds issues, never code.
 flags (`--add-blocked-by` / `--blocked-by`) shipped then. Older `gh` still works for
 everything else; set dependencies via the Relationships sidebar instead.
 
+Three skills ship in the box:
+
+| Skill              | Role                                                                                     |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| `/kraken:unleash`  | The worker — claims one task at a time, executes, validates, delivers a draft PR          |
+| `/kraken:watch`    | The driver — zero-token watcher that wakes a worker whenever a startable task appears     |
+| `/kraken:identify` | The recon — lists a queue's `project:` labels and prints ready-to-paste `unleash` lines   |
+
 ## Quickstart
 
 1. **Create the coordination repo** (once):
@@ -63,7 +71,33 @@ everything else; set dependencies via the Relationships sidebar instead.
    unlabeled task is invisible to all of them) and dependencies via
    `gh issue edit <n> --add-label "project:YOUR_PROJECT_NAME" --add-blocked-by <m>`.
 
-3. **Unleash the kraken** — one worker per environment you prepared. Capacity is
+3. **Prepare the worker environments** — one per worker: a machine, container,
+   or just a separate clone where that worker will live, with the project's
+   toolchain installed, `gh` authenticated, and git configured. Workers run
+   unattended, so the environment's Claude Code settings must pre-allow the
+   delivery commands — a permission prompt with nobody around stalls the task.
+   In the working directory's `.claude/settings.json`:
+
+   ```json
+   {
+     "permissions": {
+       "allow": [
+         "Bash(git add:*)",
+         "Bash(git commit:*)",
+         "Bash(git checkout:*)",
+         "Bash(git push:*)",
+         "Bash(gh:*)"
+       ]
+     }
+   }
+   ```
+
+   Extend the list with what the project's acceptance checks need (test runner,
+   package manager). Merges never need pre-allowing — they always stay with you.
+   Workers that would share test state (database, fixtures, ports) cannot share
+   an environment: fully isolated environments, or one worker.
+
+4. **Unleash the kraken** — one worker per environment you prepared. Capacity is
    decided at launch: every worker takes ONE task at a time, so a project gets
    exactly as much parallelism as the number of workers you point at it.
 
@@ -81,21 +115,11 @@ everything else; set dependencies via the Relationships sidebar instead.
    pipelines key on those patterns); traceability comes from commit trailers
    (`Kraken-Task: OWNER/work-tasks#12 (worker: ..., kraken@x.y.z)`).
 
-4. **Come back to evidence**: an `awaiting-merge` filter = your review queue (each
+5. **Come back to evidence**: an `awaiting-merge` filter = your review queue (each
    task with a result comment and a draft PR), a `needs-decision` filter = your
    decision queue (questions with options + recommendation included). Merging a PR
    closes its task (`Closes` reference) and unblocks the dependents. Nothing merges
    without you.
-
-> [!TIP]
-> Forgot which projects live in the queue? Run
-> `/kraken:identify OWNER/tasks` — it lists the `project:` labels and prints
-> ready-to-paste `/kraken:unleash` lines, one per project.
-
-> [!IMPORTANT]
-> Workers run unattended: the worker environment's Claude Code settings must
-> allow `git commit`/`git push` without prompting — a permission ask-gate with
-> nobody around stalls the task at delivery time. Merges always stay with you.
 
 ## How it works (10,000 ft)
 
@@ -128,14 +152,6 @@ everything else; set dependencies via the Relationships sidebar instead.
 The full worker protocol — claim tiebreaker, assumptions, acceptance, heartbeats,
 authorization boundaries — lives in [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md).
 
-### Answering the human queues
-
-To answer a `needs-decision`: reply on the issue ("option B, go") **and remove the
-label** — the task rejoins the queue and whoever claims it inherits the full thread.
-Same gesture when a review asks for changes: comment the feedback and remove
-`awaiting-merge`. Dead workers are handled server-side: the reaper moves silent
-`in-progress` issues to `needs-decision` after 6h.
-
 ### Keep it draining
 
 A single run empties the queue and stops. To keep a worker picking up tasks you
@@ -164,15 +180,37 @@ delivered, the result with the acceptance check executed, and the close:
 
 <img src="images/pilot-task.png" width="720" alt="A kraken task issue timeline: claim comment, assumptions, draft PR link, result comment, and close">
 
-## Updating
+## Q&A
 
-The plugin is pinned to the version in its manifest — pushes to `main` reach nobody
-until a release bumps it, so what you run is always a deliberate release. To pick up
-a new one:
+**A task landed in `needs-decision` — what do I do?**
+Reply on the issue ("option B, go") **and remove the label** — the task rejoins
+the queue, and whoever claims it inherits the full thread as context.
 
-```
-/plugin marketplace update kraken
-```
+**A review asked for changes — how does the task go back?**
+Same gesture: comment the feedback and remove `awaiting-merge`. The next claim
+continues on the existing branch with the whole discussion in hand.
+
+**A worker died mid-task — is the queue stuck?**
+No. Workers heartbeat with progress comments, and the coordination repo's reaper
+workflow drags any `in-progress` issue that has been silent for 6h to
+`needs-decision` for you to triage — relaunch or investigate.
+
+**Who can command my workers?**
+Anyone who can open issues in the coordination repo: a task is, in effect,
+instructions that will execute in your worker's environment with your
+credentials. Keep the repo private, keep write access yours, and remember that
+task bodies are untrusted input to an agent that can push branches.
+
+**Does anything survive closing the terminal?**
+The queue does — it's GitHub Issues. The worker doesn't: `/kraken:watch` and
+`/loop` both live inside a Claude Code session. Headless drivers (system cron,
+GitHub Actions) are the natural next step — see the alternatives table in
+[#32](https://github.com/rafael-adcp/kraken/issues/32).
+
+**How do I update the plugin?**
+`/plugin marketplace update kraken`. The plugin is pinned to the version in its
+manifest — pushes to `main` reach nobody until a release bumps it, so what you
+run is always a deliberate release.
 
 ## Origins
 
