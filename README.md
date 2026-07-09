@@ -138,16 +138,22 @@ Same gesture when a review asks for changes: comment the feedback and remove
 
 ### Keep it draining
 
-A single run empties the queue and stops. To keep a worker picking up tasks you file
-through the day, have Claude Code re-launch it on a schedule with `/loop`:
+A single run empties the queue and stops. To keep a worker picking up tasks you
+file through the day, arm the event-driven watcher:
 
 ```
-/loop 15m /kraken:unleash OWNER/tasks --worker-name your_project_env_1 --project your_project
+/kraken:watch OWNER/tasks --worker-name your_project_env_1 --project your_project
 ```
 
-`/loop` is a Claude Code feature, not part of the worker: it just re-runs the command
-every 15 minutes (omit the interval to let it self-pace). Each run is an ordinary
-drain — same one task at a time, same claim tiebreaker.
+A background shell script (armed via Claude Code's Monitor tool) polls the queue
+every 60s with a free `gh` call and wakes the worker **only when a startable task
+appears** — an idle queue costs zero LLM tokens. Each wake is an ordinary drain:
+same one task at a time, same claim tiebreaker. Enqueue from anywhere (`gh issue
+create`, web UI, mobile app) and the watcher picks it up within a minute; it
+lives until the session closes or you say stop.
+
+Prefer a dumb timer? `/loop 15m /kraken:unleash ...` still works — it just costs
+one full LLM turn per fire even when the queue is empty.
 
 ## Witness the Depths
 

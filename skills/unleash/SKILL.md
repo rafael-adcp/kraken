@@ -44,6 +44,20 @@ dependency graph come for free.
 
 - Use `gh -R OWNER/REPO ...` for every queue operation. The coordination repo holds
   issues only, never work code.
+- **Attribution disclaimer.** Every worker authenticates as me, so a worker's
+  comment reads exactly like one I typed. Prepend this blockquote to **every comment
+  you post to the coordination repo** — claim, assumptions, needs-decision,
+  heartbeat, result — so the timeline shows at a glance which comments are the
+  tentacle's and which are mine:
+
+  ```
+  > 🐙 **Kraken worker `<worker-name>`** — automated comment from a Claude Code tentacle, not a human.
+  ```
+
+  It sits *above* the machine-readable line (e.g. `claimed-by: <worker-name>`), never
+  replaces it — and leave a blank line between the two, or GitHub folds the body into
+  the quote. Coordination-repo comments only — work-repo PRs and commits already
+  carry their attribution in the `Kraken-Task` / `Co-Authored-By` trailers.
 - A task is an **open issue labeled `kraken-task`**, created from the repo's task
   template (fields: goal, acceptance, notes).
 - Every task carries a **`project:<name>`** label — that's what `--project` filters
@@ -94,8 +108,9 @@ dependency graph come for free.
    moment the task ships. Run it in a **new subagent**: a context born empty and
    discarded when it returns, so the driver's window stays ~O(1) per task no matter how
    long the drain runs. Brief it in full — the task pointer `{issue, repo, project,
-   worker-name}` **and** the rules it must honor (steps a–d below, *Delivering the work*,
-   *Authorization boundaries*); my global rules carry over too. "Compact" is what the
+   worker-name}` **and** the rules it must honor (steps a–d below, *Conventions* —
+   including the attribution disclaimer — *Delivering the work*, *Authorization
+   boundaries*); my global rules carry over too. "Compact" is what the
    *driver* keeps, not how the subagent runs: it works under the whole skill and returns
    only a **compact result** — task number, final label (`awaiting-merge` /
    `needs-decision` / `failed`), PR URL, and one line. Still **one task at a time**
