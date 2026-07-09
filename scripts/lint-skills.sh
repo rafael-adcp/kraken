@@ -10,6 +10,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 SKILL="skills/unleash/SKILL.md"
+INIT="skills/init/SKILL.md"
+STATUS="skills/status/SKILL.md"
 README="README.md"
 TEMPLATE="skills/unleash/task-template.yml"
 REAPER="skills/unleash/reclaim-stale.yml"
@@ -27,13 +29,14 @@ check_label() {
   for f in "$@"; do grep -qF -- "$label" "$f" || missing="$missing $f"; done
   [ -n "$missing" ] && err "label '$label' missing from:$missing"
 }
-check_label "kraken-task"    "$SKILL" "$README" "$TEMPLATE" "$WATCHER"
-check_label "in-progress"    "$SKILL" "$README" "$REAPER" "$WATCHER"
-check_label "needs-decision" "$SKILL" "$README" "$REAPER" "$WATCHER"
-check_label "awaiting-merge" "$SKILL" "$README" "$WATCHER"
+# init creates all four; status surfaces only the three human-facing labels (no kraken-task)
+check_label "kraken-task"    "$SKILL" "$INIT" "$README" "$TEMPLATE" "$WATCHER"
+check_label "in-progress"    "$SKILL" "$INIT" "$STATUS" "$README" "$REAPER" "$WATCHER"
+check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$REAPER" "$WATCHER"
+check_label "awaiting-merge" "$SKILL" "$INIT" "$STATUS" "$README" "$WATCHER"
 # common typo class: labels use hyphens, never underscores
 for bad in kraken_task in_progress needs_decision awaiting_merge; do
-  grep -qInF -- "$bad" "$SKILL" "$README" "$TEMPLATE" "$REAPER" "$WATCHER" 2>/dev/null \
+  grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$TEMPLATE" "$REAPER" "$WATCHER" 2>/dev/null \
     && err "underscore variant '$bad' found (labels use hyphens)"
 done
 [ "$fail" -eq 0 ] && note "4 canonical labels aligned across files"
