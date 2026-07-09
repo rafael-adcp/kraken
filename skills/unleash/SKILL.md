@@ -108,8 +108,9 @@ dependency graph come for free.
    moment the task ships. Run it in a **new subagent**: a context born empty and
    discarded when it returns, so the driver's window stays ~O(1) per task no matter how
    long the drain runs. Brief it in full — the task pointer `{issue, repo, project,
-   worker-name}` **and** the rules it must honor (steps a–d below, *Delivering the work*,
-   *Authorization boundaries*); my global rules carry over too. "Compact" is what the
+   worker-name}` **and** the rules it must honor (steps a–d below, *Conventions* —
+   including the attribution disclaimer — *Delivering the work*, *Authorization
+   boundaries*); my global rules carry over too. "Compact" is what the
    *driver* keeps, not how the subagent runs: it works under the whole skill and returns
    only a **compact result** — task number, final label (`awaiting-merge` /
    `needs-decision` / `failed`), PR URL, and one line. Still **one task at a time**
