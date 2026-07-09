@@ -44,6 +44,20 @@ dependency graph come for free.
 
 - Use `gh -R OWNER/REPO ...` for every queue operation. The coordination repo holds
   issues only, never work code.
+- **Attribution disclaimer.** Every worker authenticates as me, so a worker's
+  comment reads exactly like one I typed. Prepend this blockquote to **every comment
+  you post to the coordination repo** — claim, assumptions, needs-decision,
+  heartbeat, result — so the timeline shows at a glance which comments are the
+  tentacle's and which are mine:
+
+  ```
+  > 🐙 **Kraken worker `<worker-name>`** — automated comment from a Claude Code tentacle, not a human.
+  ```
+
+  It sits *above* the machine-readable line (e.g. `claimed-by: <worker-name>`), never
+  replaces it — and leave a blank line between the two, or GitHub folds the body into
+  the quote. Coordination-repo comments only — work-repo PRs and commits already
+  carry their attribution in the `Kraken-Task` / `Co-Authored-By` trailers.
 - A task is an **open issue labeled `kraken-task`**, created from the repo's task
   template (fields: goal, acceptance, notes).
 - Every task carries a **`project:<name>`** label — that's what `--project` filters
