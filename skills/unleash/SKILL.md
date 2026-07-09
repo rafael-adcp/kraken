@@ -18,6 +18,8 @@ dependency graph come for free.
 ```
 
 **All three arguments are REQUIRED.** If any is missing, do not start — ask for it.
+If the `OWNER/tasks` slug matches `^OWNER/` or contains `<`/`>`, refuse: it looks like
+the template placeholder — substitute your real `owner/repo` and re-run.
 
 - `--worker-name`: this worker's identity, used in every claim/comment. Every worker
   authenticates as the same user, so the name is the only thing that tells tentacles

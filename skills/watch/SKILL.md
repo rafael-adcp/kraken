@@ -19,7 +19,9 @@ tokens; a hit = one ordinary drain.
 
 **All three arguments are REQUIRED** — the same three as `/kraken:unleash`,
 because every wake-up runs that protocol with exactly these arguments. If any
-is missing, do not start — ask for it.
+is missing, do not start — ask for it. If the `OWNER/tasks` slug matches `^OWNER/`
+or contains `<`/`>`, refuse: it looks like the template placeholder — substitute
+your real `owner/repo` and re-run.
 
 ## Protocol
 
