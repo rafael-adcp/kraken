@@ -8,6 +8,9 @@
 > One head, many tentacles — a task queue built on **GitHub Issues** where
 > named Claude Code workers claim tasks, execute them, and record the evidence.
 > Write the list once; the tentacles do the rest.
+>
+> GitHub does the tracking. Claude Code does the coding. **Kraken is just the
+> protocol between them** — it ships nothing you have to operate.
 
 ## Why?
 
@@ -31,10 +34,18 @@ coordination repo needs to be on GitHub, and it holds issues, never code.
 
 ## Install (Claude Code plugin)
 
+Zero to a draining queue in four commands:
+
 ```
 /plugin marketplace add rafael-adcp/kraken
 /plugin install kraken@kraken
+/kraken:init OWNER/tasks --project my_app          # stand up the queue (once)
+                                                   # ...file task issues, then:
+/kraken:unleash OWNER/tasks --worker-name env-1 --project my_app
 ```
+
+> Each command in context — environments, permissions, parallelism — is
+> [the full walkthrough](#the-full-walkthrough) below.
 
 **Requirements**: `git`, and a `gh` CLI from June 2026 or later — the dependency
 flags (`--add-blocked-by` / `--blocked-by`) shipped then. Older `gh` still works for
@@ -61,100 +72,6 @@ Five nouns do all the work in Kraken. Keep them straight and the rest follows:
 | **`project:<name>` label** | A task's **canonical identity** — `--project` filters on it, and it says which prepared environment the task belongs to | Optional — a task without it is invisible to every worker | Coordination repo |
 | **Worker (tentacle)** | A **named** Claude Code session draining the queue **one task at a time**, inside one prepared environment | A pool — capacity is just how many you launch | Your machine / container / clone |
 | **Task** | An open Issue labeled `kraken-task` (goal, acceptance, notes) that moves `in-progress` → `awaiting-merge` / `needs-decision` | Closed until the work truly lands — the merge closes it | Coordination repo |
-
-## Quickstart
-
-1. **Create the coordination repo** (once). Running the plugin? One command stands it
-   all up — verifies or creates the private repo, installs the three templates, and creates
-   the canonical labels (idempotent, safe to re-run):
-
-   ```
-   /kraken:init OWNER/tasks --project YOUR_PROJECT_NAME
-   ```
-
-   Not running the plugin? The same setup by hand — the three assets land at
-   `.github/ISSUE_TEMPLATE/task.yml`, `.github/workflows/reclaim-stale.yml`, and
-   `.github/workflows/cleanup-closed.yml`:
-
-   ```bash
-   gh repo create OWNER/tasks --private --clone && cd tasks
-   mkdir -p .github/ISSUE_TEMPLATE .github/workflows
-   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/task-template.yml -o .github/ISSUE_TEMPLATE/task.yml
-   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/reclaim-stale.yml -o .github/workflows/reclaim-stale.yml
-   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/cleanup-closed.yml -o .github/workflows/cleanup-closed.yml
-   git add -A && git commit -m "chore: kraken task template, reaper, and cleanup" && git push
-
-   gh -R OWNER/tasks label create kraken-task
-   gh -R OWNER/tasks label create in-progress
-   gh -R OWNER/tasks label create needs-decision
-   gh -R OWNER/tasks label create awaiting-merge
-   gh -R OWNER/tasks label create "project:YOUR_PROJECT_NAME"      # one per project you'll queue
-   ```
-
-2. **Queue the work**: one issue per task (goal, acceptance, notes). Every issue
-   gets a **`project:<name>` label** (workers are scoped to one project — an
-   unlabeled task is invisible to all of them) and dependencies via
-   `gh issue edit <n> --add-label "project:YOUR_PROJECT_NAME" --add-blocked-by <m>`.
-
-3. **Prepare the worker environments** — one per worker: a machine, container,
-   or just a separate clone where that worker will live, with the project's
-   toolchain installed, `gh` authenticated, and git configured. Workers run
-   unattended, so the environment's Claude Code settings must pre-allow the
-   delivery commands — a permission prompt with nobody around stalls the task.
-   In the working directory's `.claude/settings.json`:
-
-   ```json
-   {
-     "permissions": {
-       "allow": [
-         "Bash(git add:*)",
-         "Bash(git commit:*)",
-         "Bash(git checkout:*)",
-         "Bash(git push:*)",
-         "Bash(gh -R OWNER/tasks:*)",
-         "Bash(gh pr create:*)"
-       ]
-     }
-   }
-   ```
-
-   Substitute your coordination repo in the `gh -R` line (queue operations are
-   always explicit about their repo; it holds issues only, so nothing lands
-   there). Extend the list with what the project's acceptance checks need
-   (test runner, package manager) — but never pre-allow what lands work:
-   `gh pr merge` stays deliberately off the list so merging keeps its ask-gate,
-   and since an allow-list cannot tell a work branch from a default branch,
-   protect the work repo's default branch (required review) for the hard
-   guarantee. Merges always stay with you. Workers that would share test state
-   (database, fixtures, ports) cannot share an environment: fully isolated
-   environments, or one worker.
-
-4. **Unleash the kraken** — one worker per environment you prepared. Capacity is
-   decided at launch: every worker takes ONE task at a time, so a project gets
-   exactly as much parallelism as the number of workers you point at it.
-
-   ```
-   # one tentacle into the "your_project_1" environment -> one worker
-   /kraken:unleash OWNER/tasks --worker-name your_project_1-env-1 --project your_project_1
-
-   # five tentacles, five isolated clones -> five workers draining your_project_2
-   /kraken:unleash OWNER/tasks --worker-name data-env-1 --project your_project_2
-   /kraken:unleash OWNER/tasks --worker-name data-env-2 --project your_project_2
-   ```
-
-   Workers deliver on **work branches + draft PRs** — never the default branch,
-   never a merge. Branches follow each work repo's own naming convention (CI
-   pipelines key on those patterns); traceability comes from commit trailers
-   (`Kraken-Task: OWNER/work-tasks#12 (worker: ..., kraken@x.y.z)`).
-
-5. **Come back to evidence**: `/kraken:status OWNER/tasks` prints both human-facing
-   queues at once — the `awaiting-merge` review queue (each task with a result comment
-   and a draft PR link), the `needs-decision` decision queue (questions with options +
-   recommendation), plus what's still in flight and any orphan whose PR already merged
-   but whose issue never closed. Scripting instead? The raw filters are
-   `gh -R OWNER/tasks issue list --state open --label awaiting-merge` and the same with
-   `--label needs-decision`. Merging a PR closes its task (`Closes` reference) and
-   unblocks the dependents. Nothing merges without you.
 
 ## How it works (10,000 ft)
 
@@ -184,10 +101,137 @@ Five nouns do all the work in Kraken. Keep them straight and the rest follows:
                  (review · merge)
 ```
 
+### The label state machine
+
+Four labels are the whole state machine — every transition is a label change,
+which is why the GitHub UI is the dashboard and the issue timeline is the log:
+
+```mermaid
+flowchart LR
+    S((" ")) -->|you file the issue| Q["kraken-task (queued)"]
+    Q -->|claim| P[in-progress]
+    P -->|deliver — draft PR or analysis| M[awaiting-merge]
+    P -->|blocking question| D[needs-decision]
+    P -->|silent for 6h — the reaper| D
+    D -->|you answer + remove the label| Q
+    M -->|review asks changes + remove the label| Q
+    M -->|PR merges — the task closes| E(((closed)))
+```
+
+Every requeue arrow lands the task back in the queue with its full thread — the
+next claim inherits the whole discussion as context.
+
+Only two transitions are ever yours: answering a decision and merging (or
+bouncing) a PR. The tentacles drive everything else.
+
 The full worker protocol — claim tiebreaker, assumptions, acceptance, heartbeats,
 authorization boundaries — lives in [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md).
 
-### Keep it draining
+## The full walkthrough
+
+1. **Create the coordination repo** (once). Running the plugin? One command stands it
+   all up — verifies or creates the private repo, installs the three templates, and creates
+   the canonical labels (idempotent, safe to re-run):
+
+   ```
+   /kraken:init OWNER/tasks --project YOUR_PROJECT_NAME
+   ```
+
+   <details>
+   <summary>Not running the plugin? The same setup by hand</summary>
+
+   The three assets land at `.github/ISSUE_TEMPLATE/task.yml`,
+   `.github/workflows/reclaim-stale.yml`, and
+   `.github/workflows/cleanup-closed.yml`:
+
+   ```bash
+   gh repo create OWNER/tasks --private --clone && cd tasks
+   mkdir -p .github/ISSUE_TEMPLATE .github/workflows
+   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/task-template.yml -o .github/ISSUE_TEMPLATE/task.yml
+   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/reclaim-stale.yml -o .github/workflows/reclaim-stale.yml
+   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/cleanup-closed.yml -o .github/workflows/cleanup-closed.yml
+   git add -A && git commit -m "chore: kraken task template, reaper, and cleanup" && git push
+
+   gh -R OWNER/tasks label create kraken-task
+   gh -R OWNER/tasks label create in-progress
+   gh -R OWNER/tasks label create needs-decision
+   gh -R OWNER/tasks label create awaiting-merge
+   gh -R OWNER/tasks label create "project:YOUR_PROJECT_NAME"      # one per project you'll queue
+   ```
+
+   </details>
+
+2. **Queue the work**: one issue per task (goal, acceptance, notes). Every issue
+   gets a **`project:<name>` label** (workers are scoped to one project — an
+   unlabeled task is invisible to all of them) and dependencies via
+   `gh issue edit <n> --add-label "project:YOUR_PROJECT_NAME" --add-blocked-by <m>`.
+
+3. **Prepare the worker environments** — one per worker: a machine, container,
+   or just a separate clone where that worker will live, with the project's
+   toolchain installed, `gh` authenticated, and git configured. Workers run
+   unattended, so the environment's Claude Code settings must pre-allow the
+   delivery commands — a permission prompt with nobody around stalls the task.
+
+   <details>
+   <summary>Example allowlist for the working directory's <code>.claude/settings.json</code></summary>
+
+   ```json
+   {
+     "permissions": {
+       "allow": [
+         "Bash(git add:*)",
+         "Bash(git commit:*)",
+         "Bash(git checkout:*)",
+         "Bash(git push:*)",
+         "Bash(gh -R OWNER/tasks:*)",
+         "Bash(gh pr create:*)"
+       ]
+     }
+   }
+   ```
+
+   Substitute your coordination repo in the `gh -R` line (queue operations are
+   always explicit about their repo; it holds issues only, so nothing lands
+   there). Extend the list with what the project's acceptance checks need
+   (test runner, package manager).
+
+   </details>
+
+   Never pre-allow what lands work: `gh pr merge` stays deliberately off the
+   list so merging keeps its ask-gate, and since an allow-list cannot tell a
+   work branch from a default branch, protect the work repo's default branch
+   (required review) for the hard guarantee. Merges always stay with you.
+   Workers that would share test state (database, fixtures, ports) cannot
+   share an environment: fully isolated environments, or one worker.
+
+4. **Unleash the kraken** — one worker per environment you prepared. Capacity is
+   decided at launch: every worker takes ONE task at a time, so a project gets
+   exactly as much parallelism as the number of workers you point at it.
+
+   ```
+   # one tentacle into the "your_project_1" environment -> one worker
+   /kraken:unleash OWNER/tasks --worker-name your_project_1-env-1 --project your_project_1
+
+   # five tentacles, five isolated clones -> five workers draining your_project_2
+   /kraken:unleash OWNER/tasks --worker-name data-env-1 --project your_project_2
+   /kraken:unleash OWNER/tasks --worker-name data-env-2 --project your_project_2
+   ```
+
+   Workers deliver on **work branches + draft PRs** — never the default branch,
+   never a merge. Branches follow each work repo's own naming convention (CI
+   pipelines key on those patterns); traceability comes from commit trailers
+   (`Kraken-Task: OWNER/work-tasks#12 (worker: ..., kraken@x.y.z)`).
+
+5. **Come back to evidence**: `/kraken:status OWNER/tasks` prints both human-facing
+   queues at once — the `awaiting-merge` review queue (each task with a result comment
+   and a draft PR link), the `needs-decision` decision queue (questions with options +
+   recommendation), plus what's still in flight and any orphan whose PR already merged
+   but whose issue never closed. Scripting instead? The raw filters are
+   `gh -R OWNER/tasks issue list --state open --label awaiting-merge` and the same with
+   `--label needs-decision`. Merging a PR closes its task (`Closes` reference) and
+   unblocks the dependents. Nothing merges without you.
+
+## Keep it draining
 
 A single run empties the queue and stops. To keep a worker picking up tasks you
 file through the day, arm the event-driven watcher:
@@ -206,6 +250,25 @@ lives until the session closes or you say stop.
 Prefer a dumb timer? `/loop 15m /kraken:unleash ...` still works — it just costs
 one full LLM turn per fire even when the queue is empty.
 
+## The operator's cheat sheet
+
+Every gesture you ever need, in one table — the tentacles handle
+everything else:
+
+| You want to...               | The gesture                                                                    | From the GitHub UI?              |
+| ---------------------------- | ------------------------------------------------------------------------------ | -------------------------------- |
+| Queue a task                 | Open an issue from the task template + `project:<name>` label                  | ✅ web + mobile                   |
+| Chain tasks                  | `gh -R OWNER/tasks issue edit <n> --add-blocked-by <m>`                         | ✅ web — Relationships sidebar    |
+| See the queues               | `/kraken:status OWNER/tasks`                                                    | ✅ filter issues by label         |
+| Answer a decision            | Reply on the issue, then **remove `needs-decision`**                            | ✅ web + mobile                   |
+| Send work back after review  | Comment the feedback, then **remove `awaiting-merge`**                          | ✅ web + mobile                   |
+| Land the work                | Merge the draft PR — its `Closes` line closes the task and unblocks dependents  | ✅ web + mobile                   |
+| Cancel a task                | Close the issue                                                                 | ✅ web + mobile                   |
+| Add capacity                 | Launch one more worker into one more prepared environment                       | ❌ a worker is a terminal session |
+
+Everything except launching workers works from your phone — file tasks on the
+commute, answer decisions from the couch, merge from anywhere.
+
 ## Witness the Depths
 
 A real task's timeline, end to end — claim, restated goal + assumptions, the PR
@@ -213,39 +276,98 @@ delivered, the result with the acceptance check executed, and the close:
 
 > Work happens while you don't. Queue a backlog before bed, on the commute, or before a meeting. Come back to finished branches instead of an empty editor.
 
+<!-- METRICS TODO: replace the placeholder line below with real numbers from an
+     actual drain. To pull them, run this prompt in Claude Code on a machine
+     whose `gh` can read the coordination repo (substitute OWNER/tasks):
+
+     Analyze my kraken coordination repo OWNER/tasks with read-only `gh` calls
+     (issue list/view, pr view — write nothing). Tasks are issues labeled
+     kraken-task; claims are `claimed-by:` comments; a delivery is the result
+     comment that came with the swap to `awaiting-merge`, carrying a draft PR
+     link.
+     1. Find the single busiest drain window (e.g. one overnight run) from the
+        claimed-by comment timestamps.
+     2. For that window report: tasks queued when it started, draft PRs
+        delivered, needs-decision raised, wall-clock span (first claim to last
+        delivery), and the distinct worker names involved.
+     3. Also report lifetime totals: tasks completed, PRs merged, and median
+        time from claim to awaiting-merge.
+     Then print the README line filled in:
+     "N tasks queued at HH:MM -> N draft PRs + N needs-decision by HH:MM —
+     zero terminals watched."
+     followed by the raw numbers so I can sanity-check them.
+-->
+
+> **`N` tasks queued at `HH:MM` → `N` draft PRs + `N` needs-decision by `HH:MM` — zero terminals watched.**
+
 <img src="images/pilot-task.png" width="720" alt="A kraken task issue timeline: claim comment, assumptions, draft PR link, result comment, and close">
 
-## Q&A
+## FAQ
 
-**A task landed in `needs-decision` — what do I do?**
+<details>
+<summary><b>A task landed in <code>needs-decision</code> — what do I do?</b></summary>
+
 Reply on the issue ("option B, go") **and remove the label** — the task rejoins
 the queue, and whoever claims it inherits the full thread as context.
 
-**A review asked for changes — how does the task go back?**
+</details>
+
+<details>
+<summary><b>A review asked for changes — how does the task go back?</b></summary>
+
 Same gesture: comment the feedback and remove `awaiting-merge`. The next claim
 continues on the existing branch with the whole discussion in hand.
 
-**A worker died mid-task — is the queue stuck?**
+</details>
+
+<details>
+<summary><b>A worker died mid-task — is the queue stuck?</b></summary>
+
 No. Workers heartbeat with progress comments, and the coordination repo's reaper
 workflow drags any `in-progress` issue that has been silent for 6h to
 `needs-decision` for you to triage — relaunch or investigate.
 
-**Who can command my workers?**
+</details>
+
+<details>
+<summary><b>Who can command my workers?</b></summary>
+
 Anyone who can open issues in the coordination repo: a task is, in effect,
 instructions that will execute in your worker's environment with your
 credentials. Keep the repo private, keep write access yours, and remember that
 task bodies are untrusted input to an agent that can push branches.
 
-**Does anything survive closing the terminal?**
+</details>
+
+<details>
+<summary><b>Does anything survive closing the terminal?</b></summary>
+
 The queue does — it's GitHub Issues. The worker doesn't: `/kraken:watch` and
 `/loop` both live inside a Claude Code session. Headless drivers (system cron,
 GitHub Actions) are the natural next step — see the alternatives table in
 [#32](https://github.com/rafael-adcp/kraken/issues/32).
 
-**How do I update the plugin?**
+</details>
+
+<details>
+<summary><b>How do I update the plugin?</b></summary>
+
 `/plugin marketplace update kraken`. The plugin is pinned to the version in its
 manifest — pushes to `main` reach nobody until a release bumps it, so what you
 run is always a deliberate release.
+
+</details>
+
+<details>
+<summary><b>What does uninstalling leave behind?</b></summary>
+
+Nothing that runs. `/plugin uninstall kraken@kraken` removes the skills — the
+only thing Kraken ever installs on a machine. The queue is just a private repo
+of issues you own (the reaper and cleanup workflows live inside it): keep it,
+archive it, or delete it. No service to stop, no daemon to kill, no state
+anywhere else.
+
+</details>
 
 ## Origins
 
