@@ -56,7 +56,7 @@ the first project is ready to queue against.
    ```
 
    Never create it public — the queue is instructions that run in your environment with
-   your credentials (see the README's Q&A on who can command your workers).
+   your credentials (see the README's FAQ on who can command your workers).
 
 2. **Install the three assets** into the coordination repo, resolving each from this
    skill's bundled `skills/unleash/` folder:
@@ -105,7 +105,7 @@ the first project is ready to queue against.
    belong to each worker's prepared environment, not the coordination repo. Instead
    print a one-line reminder: before launching a worker, pre-allow the delivery commands
    in that environment's `.claude/settings.json` — see the worker-environment
-   permissions in `README.md` (Quickstart step 3), which stays the source of truth.
+   permissions example in `README.md`, which stays the source of truth.
 
 5. **Nothing else.** No issues are read or written; no worker is launched. Point the
    operator at `identify` (to enumerate projects) or `unleash` (to start draining) as

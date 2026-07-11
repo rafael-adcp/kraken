@@ -30,8 +30,8 @@ Missing? Do not guess. Ask for it and stop. If the slug matches `^OWNER/` or con
      --jq '.[].name | select(startswith("project:"))'
    ```
 
-2. **Zero results?** Say so and stop — do not invent projects. Point at the
-   Quickstart in `README.md`: labels are created with
+2. **Zero results?** Say so and stop — do not invent projects. Point at
+   `README.md`: labels are created with
    `gh -R OWNER/tasks label create "project:<name>"`.
 
 3. **Print the launch block.** Sort the project names, strip the `project:`
