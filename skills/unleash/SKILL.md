@@ -61,7 +61,9 @@ the template placeholder — substitute your real `owner/repo` and re-run.
   the quote. Coordination-repo comments only — work-repo PRs and commits already
   carry their attribution in the `Kraken-Task` / `Co-Authored-By` trailers.
 - A task is an **open issue labeled `kraken-task`**, created from the repo's task
-  template (fields: goal, acceptance, notes).
+  template — **goal** (the outcome to plan toward, restated as Assumptions),
+  **acceptance** (the executable proof to run at validation time), and optional
+  **notes** (constraints, frozen contracts, gotchas).
 - Every task carries a **`project:<name>`** label — that's what `--project` filters
   on, and it is the project's **canonical identity**: the worker runs in an
   environment prepared for that project, so the label (not a repo path baked into the
