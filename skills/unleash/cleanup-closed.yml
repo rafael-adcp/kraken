@@ -1,0 +1,34 @@
+# Cleanup for kraken. Copy to .github/workflows/cleanup-closed.yml in the
+# coordination repo (see SKILL.md).
+#
+# Closing a task (the PR's `Closes` line, or a manual close) leaves whatever
+# state-machine label it carried at the time — awaiting-merge, needs-decision,
+# even a stale in-progress — attached forever. This strips every label off a
+# closed kraken-task issue except kraken-task itself and its project:<name>
+# label, so a closed issue reads clean and label-based queue filters never
+# pick up dead state.
+name: Cleanup closed task labels
+on:
+  issues:
+    types: [closed]
+
+jobs:
+  cleanup:
+    if: contains(github.event.issue.labels.*.name, 'kraken-task')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      NUM: ${{ github.event.issue.number }}
+    steps:
+      - name: Strip labels other than kraken-task and project:<name>
+        run: |
+          gh issue view "$NUM" -R "$REPO" --json labels --jq '.labels[].name' |
+          while read -r label; do
+            case "$label" in
+              kraken-task|project:*) ;;
+              *) gh issue edit "$NUM" -R "$REPO" --remove-label "$label" ;;
+            esac
+          done
