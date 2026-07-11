@@ -9,14 +9,16 @@ body:
     id: goal
     attributes:
       label: Goal
-      description: What "done and correct" looks like
+      description: The desired end state and why it matters. Write it as an outcome, not a procedure — this is what the worker plans toward and restates as Assumptions before executing.
+      placeholder: "Endpoint /v2/things returns cursor-paginated results so the mobile client can sync incrementally."
     validations:
       required: true
   - type: textarea
     id: acceptance
     attributes:
       label: Acceptance
-      description: "Observable check: test passing, behavior, command output"
+      description: Executable, observable proof that the Goal was met — exact commands/tests and their expected results. The worker must run these for real before the task moves forward, so anything a worker cannot execute on its own will stall the task.
+      placeholder: "`npm test -- things.spec` passes; `curl :3000/v2/things?limit=2` returns 200 with a `next_cursor` field."
     validations:
       required: true
   - type: textarea
