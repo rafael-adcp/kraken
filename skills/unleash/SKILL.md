@@ -69,11 +69,6 @@ the template placeholder — substitute your real `owner/repo` and re-run.
   environment prepared for that project, so the label (not a repo path baked into the
   task) is what says where the work lands. A task without a project label is invisible
   to every worker (fix the label, don't improvise).
-- Setting up a new coordination repo? Copy the assets bundled in this skill's
-  folder: `task-template.yml` → `.github/ISSUE_TEMPLATE/task.yml` and
-  `reclaim-stale.yml` → `.github/workflows/reclaim-stale.yml` (the reaper for dead
-  workers' claims); create the labels `kraken-task`, `in-progress`, `needs-decision`,
-  `awaiting-merge`.
 
 ## Protocol
 

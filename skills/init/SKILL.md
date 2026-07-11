@@ -29,10 +29,11 @@ the first project is ready to queue against.
 ## Design decisions
 
 - **Assets are copied from this skill's bundled folder, never fetched from the network.**
-  `task-template.yml` and `reclaim-stale.yml` ship in this plugin's
-  `skills/unleash/` folder — the same install as this skill (the `watch` skill resolves
-  its bundled `watch-queue.sh` the same way). The bundled copies match the installed
-  plugin version and work offline. Do not `curl` from `raw.githubusercontent.com`.
+  `task-template.yml`, `reclaim-stale.yml`, and `cleanup-closed.yml` ship in this
+  plugin's `skills/unleash/` folder — the same install as this skill (the `watch` skill
+  resolves its bundled `watch-queue.sh` the same way). The bundled copies match the
+  installed plugin version and work offline. Do not `curl` from
+  `raw.githubusercontent.com`.
 - **Files land via the GitHub contents API** (`gh api /repos/OWNER/tasks/contents/...`),
   not a clone — no temp dir, idempotent by content. For each asset: GET the path; on
   404, PUT it (create); if it exists and its content matches the bundled file, skip it;
@@ -57,12 +58,14 @@ the first project is ready to queue against.
    Never create it public — the queue is instructions that run in your environment with
    your credentials (see the README's Q&A on who can command your workers).
 
-2. **Install the two assets** into the coordination repo, resolving each from this
+2. **Install the three assets** into the coordination repo, resolving each from this
    skill's bundled `skills/unleash/` folder:
 
    - `task-template.yml` → `.github/ISSUE_TEMPLATE/task.yml`
    - `reclaim-stale.yml` → `.github/workflows/reclaim-stale.yml` (the reaper that
      reclaims dead workers' `in-progress` claims)
+   - `cleanup-closed.yml` → `.github/workflows/cleanup-closed.yml` (strips a closed
+     issue back to just `kraken-task` + `project:<name>`)
 
    For each, check the destination via the contents API:
 
@@ -112,8 +115,9 @@ the first project is ready to queue against.
 
 - Invoking this skill is my authorization to, on the coordination repo only:
   (a) **create the repo private** if it does not exist;
-  (b) **commit the two bundled template files** (`task.yml`, `reclaim-stale.yml`) via
-  the contents API, creating them only — never overwriting a file that already differs;
+  (b) **commit the three bundled template files** (`task.yml`, `reclaim-stale.yml`,
+  `cleanup-closed.yml`) via the contents API, creating them only — never overwriting a
+  file that already differs;
   (c) **create the canonical labels** (and the `project:<name>` label when `--project`
   is passed).
 - It is NOT authorization to read or write issues, modify `settings.json`, delete

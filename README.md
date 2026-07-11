@@ -65,22 +65,24 @@ Five nouns do all the work in Kraken. Keep them straight and the rest follows:
 ## Quickstart
 
 1. **Create the coordination repo** (once). Running the plugin? One command stands it
-   all up — verifies or creates the private repo, installs the two templates, and creates
+   all up — verifies or creates the private repo, installs the three templates, and creates
    the canonical labels (idempotent, safe to re-run):
 
    ```
    /kraken:init OWNER/tasks --project YOUR_PROJECT_NAME
    ```
 
-   Not running the plugin? The same setup by hand — the two assets land at
-   `.github/ISSUE_TEMPLATE/task.yml` and `.github/workflows/reclaim-stale.yml`:
+   Not running the plugin? The same setup by hand — the three assets land at
+   `.github/ISSUE_TEMPLATE/task.yml`, `.github/workflows/reclaim-stale.yml`, and
+   `.github/workflows/cleanup-closed.yml`:
 
    ```bash
    gh repo create OWNER/tasks --private --clone && cd tasks
    mkdir -p .github/ISSUE_TEMPLATE .github/workflows
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/task-template.yml -o .github/ISSUE_TEMPLATE/task.yml
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/reclaim-stale.yml -o .github/workflows/reclaim-stale.yml
-   git add -A && git commit -m "chore: kraken task template and reaper" && git push
+   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/cleanup-closed.yml -o .github/workflows/cleanup-closed.yml
+   git add -A && git commit -m "chore: kraken task template, reaper, and cleanup" && git push
 
    gh -R OWNER/tasks label create kraken-task
    gh -R OWNER/tasks label create in-progress
