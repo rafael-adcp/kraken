@@ -25,8 +25,9 @@ jobs:
     steps:
       - name: Strip labels other than kraken-task and project:<name>
         run: |
+          set -euo pipefail
           gh issue view "$NUM" -R "$REPO" --json labels --jq '.labels[].name' |
-          while read -r label; do
+          while IFS= read -r label; do
             case "$label" in
               kraken-task|project:*) ;;
               *) gh issue edit "$NUM" -R "$REPO" --remove-label "$label" ;;
