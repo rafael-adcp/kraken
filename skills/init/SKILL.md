@@ -38,8 +38,13 @@ the first project is ready to queue against.
   not a clone — no temp dir, idempotent by content. For each asset: GET the path; on
   404, PUT it (create); if it exists and its content matches the bundled file, skip it;
   if it exists and differs, do NOT overwrite — flag it as customized and move on.
-- **Idempotent throughout.** Re-running is safe: an existing repo, an already-installed
-  asset, and an already-created label are each a no-op, not an error.
+- **Idempotent throughout.** Re-running is safe: an existing repo and an already-installed
+  asset are no-ops; an already-created label is **re-canonicalized in place** — its color
+  and description reset to the bundled values via `--force` — never an error.
+- **Labels carry a canonical color and description.** The GitHub labels UI *is* kraken's
+  dashboard, so labels are not throwaway strings: a bare `gh label create` picks a
+  **random** color, leaving every coordination repo with a differently-colored,
+  undocumented state machine. `init` fixes both, so every kraken queue reads the same.
 
 ## Protocol
 
@@ -85,20 +90,37 @@ the first project is ready to queue against.
    - **Present but different** → do NOT overwrite. Report it as a customized file the
      operator kept on purpose, and continue.
 
-3. **Create the canonical labels.** All four, idempotently — an existing label is a
-   no-op, never an error (check-then-create, or let the create no-op on conflict):
+3. **Create the canonical labels — each with its canonical color and description.** Use
+   `--force` so the create **upserts**: it is idempotent on a fresh repo and it
+   re-canonicalizes color/description drift on a re-run (an existing label is updated in
+   place, never an error). Create all four:
 
    ```
-   gh -R OWNER/tasks label create kraken-task
-   gh -R OWNER/tasks label create in-progress
-   gh -R OWNER/tasks label create needs-decision
-   gh -R OWNER/tasks label create awaiting-merge
+   gh -R OWNER/tasks label create kraken-task    --force --color 1D76DB \
+     --description "A unit of work for a kraken worker — the queue"
+   gh -R OWNER/tasks label create in-progress    --force --color FBCA04 \
+     --description "Claimed by a worker and being executed"
+   gh -R OWNER/tasks label create needs-decision --force --color D93F0B \
+     --description "Blocked on your decision — answer, then remove the label to requeue"
+   gh -R OWNER/tasks label create awaiting-merge --force --color 0E8A16 \
+     --description "Delivered as a draft PR — waiting for your review and merge"
    ```
 
-   When invoked with `--project <name>`, also create `project:<name>` — the label a
-   worker's `--project` filters on. Without it, the four canonical labels are enough to
-   stand the repo up; create the project label later (or let a re-run with `--project`
-   do it).
+   The colors trace the state machine left to right — blue *queued* → yellow *working* →
+   red *needs you* / green *ready to land* — so the issues list reads as the flow in the
+   README's diagram.
+
+   When invoked with `--project <name>`, also create `project:<name>` the same way — the
+   label a worker's `--project` filters on — in a distinct purple, so routing identity
+   reads apart from state:
+
+   ```
+   gh -R OWNER/tasks label create "project:<name>" --force --color 5319E7 \
+     --description "Canonical project identity — a worker's --project filters on this"
+   ```
+
+   Without `--project`, the four canonical labels are enough to stand the repo up; create
+   the project label later (or let a re-run with `--project` do it).
 
 4. **Print the settings reminder.** Do NOT write, create, or touch any
    `settings.json` — clobbering an existing one is a real footgun, and the permissions
