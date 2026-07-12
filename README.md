@@ -32,6 +32,10 @@ AI coding agents made each change cheap — but you are still the bus between th
 Work repos can live **anywhere** (GitHub, GitLab, private servers) — only the
 coordination repo needs to be on GitHub, and it holds issues, never code.
 
+Wondering how this differs from Copilot's coding agent, Claude's cloud agents,
+or `claude-code-action` in CI? The honest side-by-side — including when to
+prefer them — is [Why not just use X?](#why-not-just-use-x).
+
 ## Install (Claude Code plugin)
 
 Zero to a draining queue in four commands:
@@ -302,7 +306,60 @@ delivered, the result with the acceptance check executed, and the close:
 
 <img src="images/pilot-task.png" width="720" alt="A kraken task issue timeline: claim comment, assumptions, draft PR link, result comment, and close">
 
+## Why not just use X?
+
+By 2026 the obvious reflex is "doesn't this already exist?" — assigning an issue
+to an agent is native GitHub, Claude Code runs scheduled agents in the cloud, and
+`claude-code-action` runs it in CI. It does exist, and for a single repo living
+entirely on GitHub with nothing but the code to touch, those are simpler — reach
+for them. Kraken earns its keep the moment the work needs *your* prepared
+environment. Here is the honest cut against each.
+
+**GitHub Copilot coding agent.** Assigning an issue to an agent is native GitHub,
+and if the whole story lives there — one repo, no services, secrets already in
+Actions — that native path is less to run than anything Kraken adds, and you
+should take it. What it can't reach is a hosted sandbox's blind spot: the
+worker doesn't have your local Postgres, your seeded fixtures, the private
+package registry, or the toolchain pinned to a version the sandbox never ships.
+Kraken's workers run in the environment *you* prepared, and its work repos can
+live on GitLab or a private server while only the issue queue sits on GitHub —
+so **prefer Copilot when** your code is on GitHub and the task needs nothing the
+platform doesn't already give it.
+
+**Claude Code cloud / scheduled agents.** A managed sandbox that wakes on a
+schedule is genuinely zero-infra, and if the sandbox already has everything the
+task touches, that convenience is the right trade — use it. Kraken's difference
+is the shape of the run: instead of one agent in a sandbox you don't control,
+you fan out *N named* workers, each in a distinct prepared environment, each
+leaving an audit trail in its issue timeline — who claimed what, when, and how
+it was validated. **Prefer the cloud agents when** you want scheduled runs with
+no environment to keep and the sandbox is a fine place for the work to happen;
+reach for Kraken when the work must run where your services, data, and
+credentials already live, and you want to name and audit each worker.
+
+**`claude-code-action` in CI.** Wiring the action into a pipeline is the right
+answer when the trigger is genuinely event-driven — a push, a PR, a label — and
+a fresh, ephemeral runner is exactly the clean context you want; nothing here
+beats that, so wire it up. Kraken is for the other case: a queue you drain
+unattended against long-lived services and a toolchain that would cost minutes
+to rebuild on every runner. And because a tentacle speaks the agent-agnostic
+[`kraken-protocol/1`](PROTOCOL.md), the queue isn't wed to one vendor's action —
+any tool that follows the protocol can drain it. **Prefer `claude-code-action`
+when** your automation is CI-shaped and a disposable runner is the correct
+environment; prefer Kraken when the environment is the point and you want no
+lock to a single runner or vendor.
+
 ## FAQ
+
+<details>
+<summary><b>Doesn't this already exist — Copilot, Claude cloud agents, CI?</b></summary>
+
+Partly, and for a single GitHub repo with no local services those are simpler —
+say so and use them. Kraken's edge is the prepared environment, GitLab/private
+work repos, and a fan-out of named, audited workers. The honest side-by-side is
+[Why not just use X?](#why-not-just-use-x) above.
+
+</details>
 
 <details>
 <summary><b>A task landed in <code>needs-decision</code> — what do I do?</b></summary>
