@@ -4,9 +4,9 @@
 #
 # The kraken watcher: polls the coordination repo's queue with free `gh` calls
 # and prints one line only when a startable task is waiting. Armed as a
-# persistent Monitor by skills/watch/SKILL.md, each printed line wakes the
-# agent, which runs the unleash drain protocol. Idle queue = no output = the
-# model is never invoked.
+# persistent Monitor by skills/unleash/SKILL.md (protocol step 6), each printed
+# line wakes the agent, which runs the unleash drain protocol. Idle queue = no
+# output = the model is never invoked.
 #
 # Emission rules (a state machine, not a naive "print while non-empty" — labels
 # cannot see blocked-by relationships, so a dependency-blocked task can sit

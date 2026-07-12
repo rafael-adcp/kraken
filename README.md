@@ -51,15 +51,14 @@ Zero to a draining queue in four commands:
 flags (`--add-blocked-by` / `--blocked-by`) shipped then. Older `gh` still works for
 everything else; set dependencies via the Relationships sidebar instead.
 
-Five skills ship in the box:
+Four skills ship in the box:
 
-| Skill              | Role                                                                                     |
-| ------------------ | ---------------------------------------------------------------------------------------- |
-| `/kraken:init`     | The bootstrap — stands up a coordination repo: private repo, templates, canonical labels |
-| `/kraken:unleash`  | The worker — claims one task at a time, executes, validates, delivers a draft PR          |
-| `/kraken:watch`    | The driver — zero-token watcher that wakes a worker whenever a startable task appears     |
-| `/kraken:identify` | The recon — lists a queue's `project:` labels and prints ready-to-paste `unleash` lines   |
-| `/kraken:status`   | The return — the review + decision queues and what's in flight, with PR links            |
+| Skill              | Role                                                                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `/kraken:init`     | The bootstrap — stands up a coordination repo: private repo, templates, canonical labels                                 |
+| `/kraken:unleash`  | The worker — claims one task at a time, executes, validates, delivers a draft PR; then lurks behind a zero-token watcher |
+| `/kraken:identify` | The recon — lists a queue's `project:` labels and prints ready-to-paste `unleash` lines                                  |
+| `/kraken:status`   | The return — the review + decision queues and what's in flight, with PR links                                            |
 
 ## Concepts
 
@@ -233,22 +232,20 @@ authorization boundaries — lives in [`skills/unleash/SKILL.md`](skills/unleash
 
 ## Keep it draining
 
-A single run empties the queue and stops. To keep a worker picking up tasks you
-file through the day, arm the event-driven watcher:
+An empty queue doesn't stop a worker: after the drain, `unleash` arms an
+event-driven watcher — a background shell script (via Claude Code's Monitor
+tool) polls the queue every 60s with a free `gh` call and wakes the worker
+**only when a startable task appears** — an idle queue costs zero LLM tokens.
+Each wake is an ordinary drain: same one task at a time, same claim tiebreaker.
+Enqueue from anywhere (`gh issue create`, web UI, mobile app) and the worker
+picks it up within a minute; the watcher lives until the session closes or you
+say stop.
 
-```
-/kraken:watch OWNER/tasks --worker-name your_project_env_1 --project your_project
-```
-
-A background shell script (armed via Claude Code's Monitor tool) polls the queue
-every 60s with a free `gh` call and wakes the worker **only when a startable task
-appears** — an idle queue costs zero LLM tokens. Each wake is an ordinary drain:
-same one task at a time, same claim tiebreaker. Enqueue from anywhere (`gh issue
-create`, web UI, mobile app) and the watcher picks it up within a minute; it
-lives until the session closes or you say stop.
-
-Prefer a dumb timer? `/loop 15m /kraken:unleash ...` still works — it just costs
-one full LLM turn per fire even when the queue is empty.
+Want a bounded run instead — a scheduled container, a one-off drain? Pass
+`--once`: drain and exit. Environments without the Monitor tool fall back to
+`--once` automatically; there, a dumb timer (`/loop 15m /kraken:unleash ...
+--once`) still works — it just costs one full LLM turn per fire even when the
+queue is empty.
 
 ## The operator's cheat sheet
 
@@ -342,8 +339,8 @@ task bodies are untrusted input to an agent that can push branches.
 <details>
 <summary><b>Does anything survive closing the terminal?</b></summary>
 
-The queue does — it's GitHub Issues. The worker doesn't: `/kraken:watch` and
-`/loop` both live inside a Claude Code session. Headless drivers (system cron,
+The queue does — it's GitHub Issues. The worker doesn't: `/kraken:unleash` and
+its watcher live inside a Claude Code session. Headless drivers (system cron,
 GitHub Actions) are the natural next step — see the alternatives table in
 [#32](https://github.com/rafael-adcp/kraken/issues/32).
 

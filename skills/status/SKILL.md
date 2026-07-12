@@ -24,7 +24,7 @@ on. Missing? Do not guess. Ask for it and stop.
 If the slug matches `^OWNER/` or contains `<`/`>`, refuse: it looks like the template
 placeholder — substitute your real `owner/repo` and re-run.
 
-`--project <name>` is OPTIONAL here (unlike `unleash` / `watch`). A worker needs project
+`--project <name>` is OPTIONAL here (unlike `unleash`). A worker needs project
 scoping because it runs in a prepared environment; a human checking the queue does not.
 With `--project`, filter every list to `project:<name>`; without it, report across the
 whole queue (group by `project:` label when it clarifies the picture).

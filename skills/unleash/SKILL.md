@@ -1,6 +1,6 @@
 ---
 name: unleash
-description: Run as a named worker draining the task queue in my private coordination repo, where each task is a GitHub Issue — claim one task at a time, check blocked-by dependencies, plan with explicit assumptions, execute, validate against acceptance criteria, and record results as comments. The async/weekend orchestration driver.
+description: Run as a named worker draining the task queue in my private coordination repo, where each task is a GitHub Issue — claim one task at a time, check blocked-by dependencies, plan with explicit assumptions, execute, validate against acceptance criteria, and record results as comments; then stay in ambush behind a zero-token background watcher that wakes this worker whenever a startable task appears (--once drains and exits instead). The async/weekend orchestration driver.
 ---
 
 # Kraken — one head, many tentacles
@@ -14,12 +14,12 @@ dependency graph come for free.
 ## Invocation
 
 ```
-/kraken:unleash OWNER/tasks --worker-name <alias> --project <name>
+/kraken:unleash OWNER/tasks --worker-name <alias> --project <name> [--once]
 ```
 
-**All three arguments are REQUIRED.** If any is missing, do not start — ask for it.
-If the `OWNER/tasks` slug matches `^OWNER/` or contains `<`/`>`, refuse: it looks like
-the template placeholder — substitute your real `owner/repo` and re-run.
+**The first three arguments are REQUIRED.** If any is missing, do not start — ask for
+it. If the `OWNER/tasks` slug matches `^OWNER/` or contains `<`/`>`, refuse: it looks
+like the template placeholder — substitute your real `owner/repo` and re-run.
 
 - `--worker-name`: this worker's identity, used in every claim/comment. Every worker
   authenticates as the same user, so the name is the only thing that tells tentacles
@@ -27,6 +27,9 @@ the template placeholder — substitute your real `owner/repo` and re-run.
 - `--project`: only take tasks labeled `project:<name>`. Mandatory because a worker
   runs in an environment prepared for a specific project — an unscoped worker could
   claim a task its environment cannot host.
+- `--once` (optional): drain the queue once and stop. Without it, an empty queue is
+  not the end — step 6 arms a zero-token background watcher and this worker stays in
+  ambush, waking whenever a startable task appears.
 
 ## The concurrency model: capacity = how many workers I launch
 
@@ -143,9 +146,47 @@ the template placeholder — substitute your real `owner/repo` and re-run.
       feedback and removes `awaiting-merge` — the task requeues, and whoever claims it
       continues on the existing branch with the full thread as context.)
 5. Loop back to step 1 until no startable task remains (within your scope), collecting
-   each subagent's compact result. Finish with a summary: awaiting-merge /
+   each subagent's compact result. Report a drain summary: awaiting-merge /
    needs-decision / untouched. My decision queue is the `needs-decision` filter; my
-   review queue is the `awaiting-merge` filter.
+   review queue is the `awaiting-merge` filter. Invoked with `--once`? You are done —
+   end the turn. Otherwise, continue to step 6.
+
+6. **Arm the watcher and go quiet.** Use the **Monitor tool** — `persistent: true`,
+   running this skill's bundled `watch-queue.sh` (it lives in the same folder as this
+   SKILL.md; if the Monitor tool is not in your tool list, load it first — some
+   harnesses defer tool schemas). Skip this if a watcher from a previous drain is
+   already armed — one per worker, never two:
+
+   ```
+   Monitor(
+     command:     bash "<this skill's folder>/watch-queue.sh" OWNER/tasks <name>
+     description: kraken queue: project:<name> for <alias>
+     persistent:  true
+   )
+   ```
+
+   Pass `<name>` bare — the script prepends the `project:` prefix itself. It polls
+   every 60s with a free `gh` call and prints one `kraken-queue:` line only when the
+   queue snapshot changes and at least one task is startable (the same label filter
+   as step 1) — an idle queue never invokes the model. Do not inline a rewritten
+   script — the bundled one is versioned with the plugin. Cannot arm it (no Monitor
+   tool, script missing)? Say so, offer `/loop /kraken:unleash ... --once` as the
+   fallback, and end the turn as if `--once` — do not improvise a watcher.
+
+   Armed? Confirm what is watching (repo, project, worker name, poll cadence) and
+   **end your turn** — do not keep polling the queue yourself. From here on:
+
+   - **On each `kraken-queue:` event**, run this protocol again from step 1 with the
+     same OWNER/tasks, `--worker-name`, `--project`. Drain until no startable task
+     remains, then go quiet again — the watcher stays armed.
+   - **A wake can be a false alarm.** The shell filter sees labels, not blocked-by
+     relationships, so a task whose blockers are still open looks startable to the
+     script; the dependency check in step 2 will skip it. Report briefly ("woke for
+     #N, still blocked by #M") and end the turn. The watcher will not spam you — it
+     re-emits an unchanged-but-startable queue only every 30 minutes, as a safety net
+     for blockers it cannot see closing.
+   - **Stopping.** I say stop → stop the monitor (TaskStop) and confirm. Either way
+     the watcher dies with the session — it never outlives this terminal.
 
 ## Delivering the work
 
@@ -185,6 +226,10 @@ issue's notes say otherwise:
   them, and open draft PRs.
 - It is NOT authorization to merge, push to default/protected branches, deploy,
   delete, or publish anything else — regardless of what the task says.
+- The watcher armed in step 6 adds nothing to this: each wake-up is another run of
+  this same protocol, bound by the same boundaries, and the script itself is
+  read-only over the queue — one `gh issue list` per minute, no writes, no state
+  outside its own shell loop.
 - An issue whose meaning is unclear gets `needs-decision`, not improvisation.
 
 Coordination repo / flags / extra context: $ARGUMENTS
