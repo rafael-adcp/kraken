@@ -11,6 +11,9 @@
 #   issues/<n>/createdAt   ISO timestamp
 #   issues/<n>/state       "open" | "closed"
 #   issues/<n>/labels      one label per line
+#   issues/<n>/body        issue body text (optional; absent = empty body)
+#   issues/<n>/blocked_by  one blocker issue number per line (optional;
+#                          absent = no native blockers, i.e. the real API's [])
 #   issues/<n>/comments/NNNN.md   bodies, NNNN = server order
 #   log                    every invocation, one per line
 #
@@ -19,6 +22,11 @@
 #   GH_STUB_BARRIER=<n>   `issue view --json labels` blocks until n callers
 #                         arrive — holds every racer inside the claim window so
 #                         the race test is deterministic, not timing-dependent
+#
+# `gh api repos/OWNER/REPO/issues/N/dependencies/blocked_by` models GitHub's
+# native blocked-by relationships: emits a JSON array of {number, state},
+# state read from each blocker's own issues/<n>/state file, so closing a
+# blocker in the stub is exactly `echo closed > issues/<n>/state`.
 set -u
 
 STATE="${GH_STUB_STATE:?gh stub: GH_STUB_STATE not set}"
@@ -42,12 +50,13 @@ lock() {
 unlock() { rmdir "$STATE/.lock"; }
 
 # --- argument parsing (only the shapes the transition scripts use) -----------
-sub="" issue="" jsonf="" jqexpr="" add_label="" remove_label="" body=""
+sub="" issue="" jsonf="" jqexpr="" add_label="" remove_label="" body="" endpoint=""
 label_filters=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -R)             shift 2 ;;
     issue)          sub="$2"; shift 2 ;;
+    api)            sub="api"; endpoint="$2"; shift 2 ;;
     --json)         jsonf="$2"; shift 2 ;;
     --jq)           jqexpr="$2"; shift 2 ;;
     --label)        label_filters+=("$2"); shift 2 ;;
@@ -112,6 +121,13 @@ case "$sub" in
       labels)
         emit "$(jq -n --argjson labels "$(jq -R '{name: .}' < "$d/labels" | jq -s .)" '{labels: $labels}')"
         ;;
+      body)
+        emit "$(jq -n --arg body "$([ -f "$d/body" ] && cat "$d/body" || true)" '{body: $body}')"
+        ;;
+      state)
+        st="$(cat "$d/state" | tr '[:lower:]' '[:upper:]')"
+        emit "$(jq -n --arg state "$st" '{state: $state}')"
+        ;;
       comments)
         bodies=""
         for f in "$d"/comments/*.md; do
@@ -148,6 +164,31 @@ case "$sub" in
     printf '%s\n' "$body" > "$d/comments/.tmp.$$"
     mv "$d/comments/.tmp.$$" "$d/comments/$(printf '%04d' "$n").md"
     unlock
+    ;;
+
+  api)
+    # Only the shape list-startable.sh needs:
+    #   repos/OWNER/REPO/issues/N/dependencies/blocked_by -> [{number,state}]
+    case "$endpoint" in
+      */issues/*/dependencies/blocked_by)
+        n="$(printf '%s' "$endpoint" | sed -n 's#.*/issues/\([0-9][0-9]*\)/dependencies/blocked_by#\1#p')"
+        d="$STATE/issues/$n"
+        [ -d "$d" ] || { echo "gh-stub: no such issue $n" >&2; exit 1; }
+        items=""
+        if [ -f "$d/blocked_by" ]; then
+          while IFS= read -r bn; do
+            [ -n "$bn" ] || continue
+            bstate="closed"
+            [ -f "$STATE/issues/$bn/state" ] && bstate="$(cat "$STATE/issues/$bn/state")"
+            items="${items}$(jq -n --argjson num "$bn" --arg state "$bstate" '{number: $num, state: $state}')"
+          done < "$d/blocked_by"
+        fi
+        emit "$(printf '%s' "$items" | jq -s .)"
+        ;;
+      *)
+        echo "gh-stub: unsupported api endpoint '$endpoint'" >&2; exit 1
+        ;;
+    esac
     ;;
 
   *)
