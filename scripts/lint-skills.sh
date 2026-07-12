@@ -25,7 +25,7 @@ DELIVER="skills/unleash/deliver.sh"
 HEARTBEAT="skills/unleash/heartbeat.sh" # comments only — touches no labels
 
 fail=0
-err() { printf '  \033[31mx\033[0m %s\n' "$1"; fail=1; }
+err() { printf '  \033[31mx\033[0m %s\n' "$1"; fail=$((fail+1)); } # count, so per-section fail_before diffs stay accurate
 note() { printf '  · %s\n' "$1"; }
 
 # --- 1. Label strings match across every file that hard-codes them ----------
@@ -62,6 +62,44 @@ check_label "released:"       "$PROTOCOL" "$SKILL" "$RELEASE" "$CLAIM"
 # stale-claim: is the reaper's line — the skill drives no emitter of it
 check_label "stale-claim:"    "$PROTOCOL" "$REAPER" "$CLAIM"
 [ "$fail" -eq "$fail_before" ] && note "6 machine lines aligned across spec, skill, and emitters"
+
+# --- 1c. Attribution disclaimer: byte-identical everywhere -------------------
+# The blockquote is hard-coded in every emitting script (self-contained by
+# design, no lib.sh) plus the skill and the spec. Normalize the script form
+# (\` escapes, ${WORKER}) to the doc form and require equality.
+echo "[1c] attribution disclaimer consistency"
+fail_before=$fail
+canon_disclaimer() {
+  grep -m1 -o '> 🐙 .*' "$1" | sed -e 's/\\`/`/g' -e 's/${WORKER}/<worker-name>/g' -e 's/\r$//'
+}
+ref="$(canon_disclaimer "$SKILL")"
+if [ -z "$ref" ]; then
+  err "no attribution disclaimer found in $SKILL"
+else
+  for f in "$CLAIM" "$HEARTBEAT" "$ESCALATE" "$DELIVER" "$RELEASE" "$PROTOCOL"; do
+    [ "$(canon_disclaimer "$f")" = "$ref" ] || err "attribution disclaimer drift in $f"
+  done
+fi
+[ "$fail" -eq "$fail_before" ] && note "disclaimer identical across skill, spec, and 5 emitting scripts"
+
+# --- 1d. Claim-window resets: code never ahead of the spec -------------------
+# Every keyword claim.sh treats as a window reset must appear as a machine line
+# in PROTOCOL.md's table. Catches the dangerous drift direction: a new reset
+# added to the implementation without the contract learning about it.
+echo "[1d] claim-window reset keywords (claim.sh vs PROTOCOL.md)"
+fail_before=$fail
+reset_line="$(grep -E 'released:\*' "$CLAIM")"
+resets="$(printf '%s' "$reset_line" | grep -oE '[a-z-]+:')"
+if [ -z "$resets" ]; then
+  err "could not extract the reset case pattern from $CLAIM"
+else
+  n=0
+  for kw in $resets; do
+    n=$((n+1))
+    grep -qF -- "\`${kw}" "$PROTOCOL" || err "claim-window reset '$kw' in claim.sh missing from PROTOCOL.md"
+  done
+fi
+[ "$fail" -eq "$fail_before" ] && note "$n reset keyword(s) in claim.sh all specified in PROTOCOL.md"
 
 # --- 2. Every "step N" reference points at a step that exists ---------------
 echo "[2] step references (in $SKILL)"
