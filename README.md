@@ -51,14 +51,13 @@ Zero to a draining queue in four commands:
 flags (`--add-blocked-by` / `--blocked-by`) shipped then. Older `gh` still works for
 everything else; set dependencies via the Relationships sidebar instead.
 
-Four skills ship in the box:
+Three skills ship in the box:
 
 | Skill              | Role                                                                                                                     |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
 | `/kraken:init`     | The bootstrap — stands up a coordination repo: private repo, templates, canonical labels                                 |
 | `/kraken:unleash`  | The worker — claims one task at a time, executes, validates, delivers a draft PR; then lurks behind a zero-token watcher |
-| `/kraken:identify` | The recon — lists a queue's `project:` labels and prints ready-to-paste `unleash` lines                                  |
-| `/kraken:status`   | The return — the review + decision queues and what's in flight, with PR links                                            |
+| `/kraken:status`   | The console — review + decision queues, what's in flight with PR links, and ready-to-paste `unleash` launch lines        |
 
 ## Concepts
 

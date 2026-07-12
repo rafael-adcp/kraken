@@ -1,6 +1,6 @@
 ---
 name: init
-description: Stand up a kraken coordination repo end to end — verify or create the private repo, install the bundled task template and reaper workflow, and create the canonical labels. Strictly setup, the symmetric bootstrap to identify's recon; it reads and writes no issues.
+description: Stand up a kraken coordination repo end to end — verify or create the private repo, install the bundled task template and reaper workflow, and create the canonical labels. Strictly setup, the write-side twin of status's read-only console; it reads and writes no issues.
 ---
 
 # Kraken — raise the head
@@ -8,7 +8,7 @@ description: Stand up a kraken coordination repo end to end — verify or create
 You are the setup step for kraken: given a coordination-repo slug, you make that repo
 ready to receive tasks — the private repo exists, the task template and reaper workflow
 are committed, and the state-machine labels are created. This is the symmetric partner
-to `identify` (recon before launch): `init` builds the queue, `identify` reads it. You
+to `status` (the read-only console): `init` builds the queue, `status` reads it. You
 touch no issues — none read, none written.
 
 ## Invocation
@@ -130,8 +130,8 @@ the first project is ready to queue against.
    permissions example in `README.md`, which stays the source of truth.
 
 5. **Nothing else.** No issues are read or written; no worker is launched. Point the
-   operator at `identify` (to enumerate projects) or `unleash` (to start draining) as
-   the next step.
+   operator at `status` (the queue's console, with ready-to-paste launch lines) or
+   `unleash` (to start draining) as the next step.
 
 ## Authorization boundaries
 
