@@ -59,7 +59,8 @@ check_label "heartbeat:"      "$PROTOCOL" "$SKILL" "$HEARTBEAT"
 check_label "needs-decision:" "$PROTOCOL" "$SKILL" "$ESCALATE" "$CLAIM"
 check_label "delivered:"      "$PROTOCOL" "$SKILL" "$DELIVER" "$CLAIM"
 check_label "released:"       "$PROTOCOL" "$SKILL" "$RELEASE" "$CLAIM"
-check_label "stale-claim:"    "$PROTOCOL" "$SKILL" "$REAPER" "$CLAIM"
+# stale-claim: is the reaper's line — the skill drives no emitter of it
+check_label "stale-claim:"    "$PROTOCOL" "$REAPER" "$CLAIM"
 [ "$fail" -eq "$fail_before" ] && note "6 machine lines aligned across spec, skill, and emitters"
 
 # --- 2. Every "step N" reference points at a step that exists ---------------
