@@ -13,6 +13,7 @@ SKILL="skills/unleash/SKILL.md"
 INIT="skills/init/SKILL.md"
 STATUS="skills/status/SKILL.md"
 README="README.md"
+PROTOCOL="PROTOCOL.md"
 TEMPLATE="skills/unleash/task-template.yml"
 REAPER="skills/unleash/reclaim-stale.yml"
 WATCHER="skills/unleash/watch-queue.sh" # label filter delegated to $LISTER
@@ -24,7 +25,7 @@ DELIVER="skills/unleash/deliver.sh"
 HEARTBEAT="skills/unleash/heartbeat.sh" # comments only — touches no labels
 
 fail=0
-err() { printf '  \033[31mx\033[0m %s\n' "$1"; fail=1; }
+err() { printf '  \033[31mx\033[0m %s\n' "$1"; fail=$((fail+1)); } # count, so per-section fail_before diffs stay accurate
 note() { printf '  · %s\n' "$1"; }
 
 # --- 1. Label strings match across every file that hard-codes them ----------
@@ -39,16 +40,66 @@ check_label() {
 # kraken-task); the lister owns the startable filter (all four); claim guards on
 # the three held labels; escalate/deliver each swap in-progress for their target;
 # release only touches in-progress
-check_label "kraken-task"    "$SKILL" "$INIT" "$README" "$TEMPLATE" "$LISTER"
-check_label "in-progress"    "$SKILL" "$INIT" "$STATUS" "$README" "$REAPER" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER"
-check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$REAPER" "$LISTER" "$CLAIM" "$ESCALATE"
-check_label "awaiting-merge" "$SKILL" "$INIT" "$STATUS" "$README" "$LISTER" "$CLAIM" "$DELIVER"
+check_label "kraken-task"    "$SKILL" "$INIT" "$README" "$PROTOCOL" "$TEMPLATE" "$LISTER"
+check_label "in-progress"    "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$REAPER" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER"
+check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$REAPER" "$LISTER" "$CLAIM" "$ESCALATE"
+check_label "awaiting-merge" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$DELIVER"
 # common typo class: labels use hyphens, never underscores
 for bad in kraken_task in_progress needs_decision awaiting_merge; do
-  grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$TEMPLATE" "$REAPER" "$WATCHER" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER" "$HEARTBEAT" 2>/dev/null \
+  grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$TEMPLATE" "$REAPER" "$WATCHER" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER" "$HEARTBEAT" 2>/dev/null \
     && err "underscore variant '$bad' found (labels use hyphens)"
 done
 [ "$fail" -eq 0 ] && note "4 canonical labels aligned across files"
+
+# --- 1b. Machine lines: the spec and every emitter agree ---------------------
+echo "[1b] machine-line consistency (PROTOCOL.md vs emitters)"
+fail_before=$fail
+check_label "claimed-by:"     "$PROTOCOL" "$SKILL" "$CLAIM"
+check_label "heartbeat:"      "$PROTOCOL" "$SKILL" "$HEARTBEAT"
+check_label "needs-decision:" "$PROTOCOL" "$SKILL" "$ESCALATE" "$CLAIM"
+check_label "delivered:"      "$PROTOCOL" "$SKILL" "$DELIVER" "$CLAIM"
+check_label "released:"       "$PROTOCOL" "$SKILL" "$RELEASE" "$CLAIM"
+# stale-claim: is the reaper's line — the skill drives no emitter of it
+check_label "stale-claim:"    "$PROTOCOL" "$REAPER" "$CLAIM"
+[ "$fail" -eq "$fail_before" ] && note "6 machine lines aligned across spec, skill, and emitters"
+
+# --- 1c. Attribution disclaimer: byte-identical everywhere -------------------
+# The blockquote is hard-coded in every emitting script (self-contained by
+# design, no lib.sh) plus the skill and the spec. Normalize the script form
+# (\` escapes, ${WORKER}) to the doc form and require equality.
+echo "[1c] attribution disclaimer consistency"
+fail_before=$fail
+canon_disclaimer() {
+  grep -m1 -o '> 🐙 .*' "$1" | sed -e 's/\\`/`/g' -e 's/${WORKER}/<worker-name>/g' -e 's/\r$//'
+}
+ref="$(canon_disclaimer "$SKILL")"
+if [ -z "$ref" ]; then
+  err "no attribution disclaimer found in $SKILL"
+else
+  for f in "$CLAIM" "$HEARTBEAT" "$ESCALATE" "$DELIVER" "$RELEASE" "$PROTOCOL"; do
+    [ "$(canon_disclaimer "$f")" = "$ref" ] || err "attribution disclaimer drift in $f"
+  done
+fi
+[ "$fail" -eq "$fail_before" ] && note "disclaimer identical across skill, spec, and 5 emitting scripts"
+
+# --- 1d. Claim-window resets: code never ahead of the spec -------------------
+# Every keyword claim.sh treats as a window reset must appear as a machine line
+# in PROTOCOL.md's table. Catches the dangerous drift direction: a new reset
+# added to the implementation without the contract learning about it.
+echo "[1d] claim-window reset keywords (claim.sh vs PROTOCOL.md)"
+fail_before=$fail
+reset_line="$(grep -E 'released:\*' "$CLAIM")"
+resets="$(printf '%s' "$reset_line" | grep -oE '[a-z-]+:')"
+if [ -z "$resets" ]; then
+  err "could not extract the reset case pattern from $CLAIM"
+else
+  n=0
+  for kw in $resets; do
+    n=$((n+1))
+    grep -qF -- "\`${kw}" "$PROTOCOL" || err "claim-window reset '$kw' in claim.sh missing from PROTOCOL.md"
+  done
+fi
+[ "$fail" -eq "$fail_before" ] && note "$n reset keyword(s) in claim.sh all specified in PROTOCOL.md"
 
 # --- 2. Every "step N" reference points at a step that exists ---------------
 echo "[2] step references (in $SKILL)"
@@ -75,18 +126,22 @@ done
 # --- 4. Relative links and images resolve (every SKILL.md + README) --------
 echo "[4] links & images"
 broken=0; total=0
-sources=("$README")
+sources=("$README" "$PROTOCOL")
 for s in skills/*/SKILL.md; do [ -f "$s" ] && sources+=("$s"); done
-while IFS= read -r t; do
-  [ -z "$t" ] && continue
-  case "$t" in http://*|https://*|\#*|mailto:*) continue;; esac
-  file="${t%%#*}"; [ -z "$file" ] && continue
-  total=$((total+1))
-  [ -e "$file" ] || { err "broken reference: $t"; broken=$((broken+1)); }
-done < <(
-  grep -hoE '\]\(([^)]+)\)' "${sources[@]}" | sed -E 's/^\]\(//; s/\)$//'
-  grep -hoE 'src="[^"]+"' "${sources[@]}" | sed -E 's/^src="//; s/"$//'
-)
+# resolve each target against its source file's directory, the way GitHub does
+for src in "${sources[@]}"; do
+  dir="$(dirname "$src")"
+  while IFS= read -r t; do
+    [ -z "$t" ] && continue
+    case "$t" in http://*|https://*|\#*|mailto:*) continue;; esac
+    file="${t%%#*}"; [ -z "$file" ] && continue
+    total=$((total+1))
+    [ -e "$dir/$file" ] || { err "broken reference in $src: $t"; broken=$((broken+1)); }
+  done < <(
+    grep -hoE '\]\(([^)]+)\)' "$src" | sed -E 's/^\]\(//; s/\)$//'
+    grep -hoE 'src="[^"]+"' "$src" | sed -E 's/^src="//; s/"$//'
+  )
+done
 [ "$broken" -eq 0 ] && note "$total relative link(s)/image(s) resolve"
 
 # --- 5. Shell / YAML / JSON snippets parse ----------------------------------

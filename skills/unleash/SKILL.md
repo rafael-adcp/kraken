@@ -11,6 +11,12 @@ can live anywhere (GitHub, GitLab, private servers) — each issue says which pr
 belongs to. GitHub's UI/CLI does the tracking: status, history, notifications, and the
 dependency graph come for free.
 
+The coordination contract itself — task shape, label state machine, machine lines,
+claim algorithm, authorization boundaries — is normatively specified in
+[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/1`). This file is how a Claude
+Code worker executes that contract (subagent-per-task, Monitor watcher, the bundled
+scripts); if the two ever disagree, the spec wins.
+
 ## Invocation
 
 ```
@@ -50,30 +56,23 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
 - Use `gh -R OWNER/REPO ...` for every queue operation. The coordination repo holds
   issues only, never work code.
 - **Attribution disclaimer.** Every worker authenticates as me, so a worker's
-  comment reads exactly like one I typed. Prepend this blockquote to **every comment
-  you post to the coordination repo** — claim, assumptions, needs-decision,
-  heartbeat, result — so the timeline shows at a glance which comments are the
-  tentacle's and which are mine:
+  comment reads exactly like one I typed. The transition scripts compose the
+  disclaimer themselves; prepend it to any coordination-repo comment you write
+  **by hand** (assumptions, free-form notes):
 
   ```
   > 🐙 **Kraken worker `<worker-name>`** — automated comment from a Claude Code tentacle, not a human.
   ```
 
-  It sits *above* the machine-readable line (e.g. `claimed-by: <worker-name>`), never
-  replaces it — and leave a blank line between the two, or GitHub folds the body into
-  the quote. Coordination-repo comments only — work-repo PRs and commits already
-  carry their attribution in the `Kraken-Task` / `Co-Authored-By` trailers. (The
-  bundled transition scripts compose the disclaimer themselves for the comments they
-  post; the rule above is for the comments you still write by hand.)
-- A task is an **open issue labeled `kraken-task`**, created from the repo's task
-  template — **goal** (the outcome to plan toward, restated as Assumptions),
-  **acceptance** (the executable proof to run at validation time), and optional
-  **notes** (constraints, frozen contracts, gotchas).
-- Every task carries a **`project:<name>`** label — that's what `--project` filters
-  on, and it is the project's **canonical identity**: the worker runs in an
-  environment prepared for that project, so the label (not a repo path baked into the
-  task) is what says where the work lands. A task without a project label is invisible
-  to every worker (fix the label, don't improvise).
+  Leave a blank line between it and the rest of the body, or GitHub folds the body
+  into the quote. Work-repo PRs and commits don't need it — they carry the
+  `Kraken-Task` / `Co-Authored-By` trailers instead.
+- A task is an **open issue labeled `kraken-task`** with **goal / acceptance /
+  notes** fields (shape: `PROTOCOL.md` §2) — the acceptance is what you execute at
+  validation time.
+- The **`project:<name>`** label routes the task to workers prepared for that
+  project (`--project` filters on it). A task without one is invisible to every
+  worker — fix the label, don't improvise.
 
 ## Bundled transition scripts
 
@@ -127,17 +126,10 @@ time:
    bash "<this skill's folder>/claim.sh" OWNER/tasks <issue> <worker-name>
    ```
 
-   It runs the whole sequence your stale candidate list cannot be trusted to
-   survive: re-fetches the labels and refuses to stack `in-progress` on a task
-   that grew `in-progress`, `needs-decision`, or `awaiting-merge` since you listed
-   (`in-progress` + `awaiting-merge` is exactly what the reaper later drags to
-   `needs-decision`); labels; posts the `claimed-by: <worker-name>` comment; then
-   arbitrates — the first `claimed-by:` of the **current claim window** wins, on
-   server-side comment ordering (assignees can't arbitrate: every worker
-   authenticates as me). The window starts after the most recent `released:` /
-   `stale-claim:` / `needs-decision:` / `delivered:` machine line, so neither a
-   dead worker's claim nor a review-bounced delivery ever blocks re-claiming.
-   Branch on the exit code:
+   The whole contended sequence — held-label guard (never stack a state label),
+   label, `claimed-by: <worker-name>` comment, claim-window arbitration — is the
+   script's job, executed identically every time (semantics: `PROTOCOL.md` §5).
+   Yours is only the exit code:
 
    - `0` — claimed. The task is yours; go to step 4.
    - `10` — lost the tiebreaker. Back off (remove nothing) and pick the next
@@ -199,12 +191,10 @@ time:
       It posts the result with the `delivered:` line and **swaps `in-progress` for
       `awaiting-merge`** — do NOT close. "Done" for a worker means *delivered for
       review*; the task closes when the work actually lands (the PR's `Closes` line
-      handles that on merge — see Delivering the work). Removing `in-progress` matters:
-      it keeps the reaper away while the PR waits days for review, and keeps the label
-      filters clean. Failed or stalled: keep it open, label it honestly, and say
-      exactly where it stands. (Review asked for changes? The human comments the
-      feedback and removes `awaiting-merge` — the task requeues, and whoever claims it
-      continues on the existing branch with the full thread as context.)
+      handles that on merge — see Delivering the work). Failed or stalled: keep it
+      open, label it honestly, and say exactly where it stands. (Review bounce: I
+      comment the feedback and remove `awaiting-merge` — the task requeues, and
+      whoever claims it continues on the existing branch with the full thread.)
 5. Loop back to step 1 until no startable task remains (within your scope), collecting
    each subagent's compact result. Report a drain summary: awaiting-merge /
    needs-decision / untouched. My decision queue is the `needs-decision` filter; my
@@ -279,6 +269,9 @@ issue's notes say otherwise:
   a patch in the result comment and flag it — never silently lose work.
 
 ## Authorization boundaries
+
+(Kept inline on purpose — you must see these without reading another file.
+`PROTOCOL.md` §11 is the normative version.)
 
 - Invoking this skill is my durable authorization to:
   (a) manage issues **in the coordination repo** (labels, comments, close/reopen);
