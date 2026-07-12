@@ -86,6 +86,9 @@ time:
 | --- | --- |
 | `list-startable.sh OWNER/tasks <project>` | (read-only) startable candidates, oldest first |
 | `claim.sh OWNER/tasks <issue> <worker-name>` | queued → `in-progress`: guard, label, claim comment, tiebreaker |
+| `heartbeat.sh OWNER/tasks <issue> <worker-name> "<progress>"` | liveness comment — keeps the reaper away, resets nothing |
+| `escalate.sh OWNER/tasks <issue> <worker-name> <question-file>` | `in-progress` → `needs-decision`: question posted, labels swapped |
+| `deliver.sh OWNER/tasks <issue> <worker-name> <result-file> [pr-url]` | `in-progress` → `awaiting-merge`: result posted, labels swapped |
 | `release.sh OWNER/tasks <issue> <worker-name> [reason]` | `in-progress` → queued, honestly (`released:` closes the claim window) |
 
 - Run them with `bash "<this skill's folder>/<script>"`. Do **not** inline rewritten
@@ -96,7 +99,10 @@ time:
   gh/network failure with the write possibly half-landed: re-check the issue's real
   state before retrying, and never move on while a claim is ambiguous.
 - They compose the attribution disclaimer and the machine-readable lines
-  (`claimed-by:`, `released:`) themselves — never hand-write those.
+  (`claimed-by:`, `heartbeat:`, `needs-decision:`, `delivered:`, `released:`)
+  themselves — never hand-write those. The escalation question and the result
+  comment stay yours to write: put the body in a file and hand the file to the
+  script.
 
 ## Protocol
 
@@ -129,8 +135,9 @@ time:
    arbitrates — the first `claimed-by:` of the **current claim window** wins, on
    server-side comment ordering (assignees can't arbitrate: every worker
    authenticates as me). The window starts after the most recent `released:` /
-   `stale-claim:` / `needs-decision:` machine line, so a task once claimed by a
-   dead worker can always be claimed again. Branch on the exit code:
+   `stale-claim:` / `needs-decision:` / `delivered:` machine line, so neither a
+   dead worker's claim nor a review-bounced delivery ever blocks re-claiming.
+   Branch on the exit code:
 
    - `0` — claimed. The task is yours; go to step 4.
    - `10` — lost the tiebreaker. Back off (remove nothing) and pick the next
@@ -158,20 +165,38 @@ time:
    Inside the subagent:
    a. **Assumptions.** Restate the goal and post your **Assumptions** (my global rule)
       as a comment on the issue. If an assumption is unverifiable in the code AND
-      getting it wrong would be expensive — swap `in-progress` for `needs-decision`,
-      comment the question with options + your recommendation, and return
+      getting it wrong would be expensive — escalate: write the question (options +
+      your recommendation) to a file and run
+
+      ```
+      bash "<this skill's folder>/escalate.sh" OWNER/tasks <issue> <worker-name> <question-file>
+      ```
+
+      (it posts the `needs-decision:` comment and swaps the labels), then return
       `needs-decision`. **Do not guess through it.** (When I answer on the issue and
       remove the `needs-decision` label, the task becomes claimable again — whoever
       picks it up inherits the full thread as context.)
    b. **Execute** in your environment, following all my rules (TDD, conventions,
-      comments policy). Keep changes scoped to the task. On a long task, post a short
-      progress comment at least every ~2 hours — it is your **heartbeat**: the
-      coordination repo's reaper workflow moves silent `in-progress` issues to
-      `needs-decision` after 6h, assuming the worker died.
+      comments policy). Keep changes scoped to the task. On a long task, post a
+      **heartbeat** at least every ~2 hours:
+
+      ```
+      bash "<this skill's folder>/heartbeat.sh" OWNER/tasks <issue> <worker-name> "<one line of progress>"
+      ```
+
+      The coordination repo's reaper workflow moves silent `in-progress` issues to
+      `needs-decision` after 6h, assuming the worker died — the heartbeat is what
+      keeps it away.
    c. **Validate** against the issue's **acceptance** — run it for real and report the
       real result. A task whose acceptance was not executed does not move forward.
-   d. **Record the outcome** on the issue: a result comment (what was done, how it was
-      validated, links to the draft PR/commits), then **swap `in-progress` for
+   d. **Record the outcome** on the issue: write the result comment (what was done,
+      how it was validated, links to the draft PR/commits) to a file and run
+
+      ```
+      bash "<this skill's folder>/deliver.sh" OWNER/tasks <issue> <worker-name> <result-file> <pr-url>
+      ```
+
+      It posts the result with the `delivered:` line and **swaps `in-progress` for
       `awaiting-merge`** — do NOT close. "Done" for a worker means *delivered for
       review*; the task closes when the work actually lands (the PR's `Closes` line
       handles that on merge — see Delivering the work). Removing `in-progress` matters:

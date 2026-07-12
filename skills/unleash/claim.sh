@@ -12,8 +12,9 @@
 #                  claim window wins (server-side comment ordering is the
 #                  tiebreaker — every worker authenticates as the same user, so
 #                  assignees can't arbitrate). The window starts after the most
-#                  recent released: / stale-claim: / needs-decision: machine
-#                  line, so a dead worker's old claim never blocks re-claiming.
+#                  recent released: / stale-claim: / needs-decision: /
+#                  delivered: machine line, so neither a dead worker's claim
+#                  nor a review-bounced delivery ever blocks re-claiming.
 #
 # Exit codes (the agent branches on these):
 #    0  claimed — this worker owns the task
@@ -57,7 +58,7 @@ winner=""
 while IFS= read -r line; do
   line="${line%$'\r'}"
   case "$line" in
-    released:* | stale-claim:* | needs-decision:*)
+    released:* | stale-claim:* | needs-decision:* | delivered:*)
       winner="" # claim-window reset: older claimed-by lines no longer count
       ;;
     claimed-by:*)

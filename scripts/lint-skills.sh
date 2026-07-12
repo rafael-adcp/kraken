@@ -19,6 +19,9 @@ WATCHER="skills/unleash/watch-queue.sh" # label filter delegated to $LISTER
 LISTER="skills/unleash/list-startable.sh"
 CLAIM="skills/unleash/claim.sh"
 RELEASE="skills/unleash/release.sh"
+ESCALATE="skills/unleash/escalate.sh"
+DELIVER="skills/unleash/deliver.sh"
+HEARTBEAT="skills/unleash/heartbeat.sh" # comments only — touches no labels
 
 fail=0
 err() { printf '  \033[31mx\033[0m %s\n' "$1"; fail=1; }
@@ -34,14 +37,15 @@ check_label() {
 }
 # init creates all four; status surfaces only the three human-facing labels (no
 # kraken-task); the lister owns the startable filter (all four); claim guards on
-# the three held labels; release only touches in-progress
+# the three held labels; escalate/deliver each swap in-progress for their target;
+# release only touches in-progress
 check_label "kraken-task"    "$SKILL" "$INIT" "$README" "$TEMPLATE" "$LISTER"
-check_label "in-progress"    "$SKILL" "$INIT" "$STATUS" "$README" "$REAPER" "$LISTER" "$CLAIM" "$RELEASE"
-check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$REAPER" "$LISTER" "$CLAIM"
-check_label "awaiting-merge" "$SKILL" "$INIT" "$STATUS" "$README" "$LISTER" "$CLAIM"
+check_label "in-progress"    "$SKILL" "$INIT" "$STATUS" "$README" "$REAPER" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER"
+check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$REAPER" "$LISTER" "$CLAIM" "$ESCALATE"
+check_label "awaiting-merge" "$SKILL" "$INIT" "$STATUS" "$README" "$LISTER" "$CLAIM" "$DELIVER"
 # common typo class: labels use hyphens, never underscores
 for bad in kraken_task in_progress needs_decision awaiting_merge; do
-  grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$TEMPLATE" "$REAPER" "$WATCHER" "$LISTER" "$CLAIM" "$RELEASE" 2>/dev/null \
+  grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$TEMPLATE" "$REAPER" "$WATCHER" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER" "$HEARTBEAT" 2>/dev/null \
     && err "underscore variant '$bad' found (labels use hyphens)"
 done
 [ "$fail" -eq 0 ] && note "4 canonical labels aligned across files"
