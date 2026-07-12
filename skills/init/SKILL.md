@@ -30,7 +30,7 @@ the first project is ready to queue against.
 
 - **Assets are copied from this skill's bundled folder, never fetched from the network.**
   `task-template.yml`, `reclaim-stale.yml`, and `cleanup-closed.yml` ship in this
-  plugin's `skills/unleash/` folder — the same install as this skill (the `watch` skill
+  plugin's `skills/unleash/` folder — the same install as this skill (`unleash`
   resolves its bundled `watch-queue.sh` the same way). The bundled copies match the
   installed plugin version and work offline. Do not `curl` from
   `raw.githubusercontent.com`.

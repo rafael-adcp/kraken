@@ -15,7 +15,7 @@ STATUS="skills/status/SKILL.md"
 README="README.md"
 TEMPLATE="skills/unleash/task-template.yml"
 REAPER="skills/unleash/reclaim-stale.yml"
-WATCHER="skills/watch/watch-queue.sh"
+WATCHER="skills/unleash/watch-queue.sh"
 
 fail=0
 err() { printf '  \033[31mx\033[0m %s\n' "$1"; fail=1; }
