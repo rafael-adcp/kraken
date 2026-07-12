@@ -15,7 +15,10 @@ STATUS="skills/status/SKILL.md"
 README="README.md"
 TEMPLATE="skills/unleash/task-template.yml"
 REAPER="skills/unleash/reclaim-stale.yml"
-WATCHER="skills/unleash/watch-queue.sh"
+WATCHER="skills/unleash/watch-queue.sh" # label filter delegated to $LISTER
+LISTER="skills/unleash/list-startable.sh"
+CLAIM="skills/unleash/claim.sh"
+RELEASE="skills/unleash/release.sh"
 
 fail=0
 err() { printf '  \033[31mx\033[0m %s\n' "$1"; fail=1; }
@@ -29,14 +32,16 @@ check_label() {
   for f in "$@"; do grep -qF -- "$label" "$f" || missing="$missing $f"; done
   [ -n "$missing" ] && err "label '$label' missing from:$missing"
 }
-# init creates all four; status surfaces only the three human-facing labels (no kraken-task)
-check_label "kraken-task"    "$SKILL" "$INIT" "$README" "$TEMPLATE" "$WATCHER"
-check_label "in-progress"    "$SKILL" "$INIT" "$STATUS" "$README" "$REAPER" "$WATCHER"
-check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$REAPER" "$WATCHER"
-check_label "awaiting-merge" "$SKILL" "$INIT" "$STATUS" "$README" "$WATCHER"
+# init creates all four; status surfaces only the three human-facing labels (no
+# kraken-task); the lister owns the startable filter (all four); claim guards on
+# the three held labels; release only touches in-progress
+check_label "kraken-task"    "$SKILL" "$INIT" "$README" "$TEMPLATE" "$LISTER"
+check_label "in-progress"    "$SKILL" "$INIT" "$STATUS" "$README" "$REAPER" "$LISTER" "$CLAIM" "$RELEASE"
+check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$REAPER" "$LISTER" "$CLAIM"
+check_label "awaiting-merge" "$SKILL" "$INIT" "$STATUS" "$README" "$LISTER" "$CLAIM"
 # common typo class: labels use hyphens, never underscores
 for bad in kraken_task in_progress needs_decision awaiting_merge; do
-  grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$TEMPLATE" "$REAPER" "$WATCHER" 2>/dev/null \
+  grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$TEMPLATE" "$REAPER" "$WATCHER" "$LISTER" "$CLAIM" "$RELEASE" 2>/dev/null \
     && err "underscore variant '$bad' found (labels use hyphens)"
 done
 [ "$fail" -eq 0 ] && note "4 canonical labels aligned across files"
@@ -82,7 +87,7 @@ done < <(
 
 # --- 5. Shell / YAML / JSON snippets parse ----------------------------------
 echo "[5] snippets & assets"
-for sh in scripts/*.sh skills/*/*.sh; do
+for sh in scripts/*.sh skills/*/*.sh tests/*.sh tests/t/*.sh tests/gh-stub/gh; do
   [ -f "$sh" ] || continue
   bash -n "$sh" 2>/dev/null || err "$sh has a bash syntax error"
 done

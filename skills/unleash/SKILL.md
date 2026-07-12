@@ -62,7 +62,9 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
   It sits *above* the machine-readable line (e.g. `claimed-by: <worker-name>`), never
   replaces it — and leave a blank line between the two, or GitHub folds the body into
   the quote. Coordination-repo comments only — work-repo PRs and commits already
-  carry their attribution in the `Kraken-Task` / `Co-Authored-By` trailers.
+  carry their attribution in the `Kraken-Task` / `Co-Authored-By` trailers. (The
+  bundled transition scripts compose the disclaimer themselves for the comments they
+  post; the rule above is for the comments you still write by hand.)
 - A task is an **open issue labeled `kraken-task`**, created from the repo's task
   template — **goal** (the outcome to plan toward, restated as Assumptions),
   **acceptance** (the executable proof to run at validation time), and optional
@@ -73,52 +75,85 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
   task) is what says where the work lands. A task without a project label is invisible
   to every worker (fix the label, don't improvise).
 
+## Bundled transition scripts
+
+The queue's state transitions are executed by small scripts shipped in this skill's
+folder, next to this SKILL.md. You decide **what** (which task to take, what to
+report); they execute **how** — the exact label/comment dance, identically every
+time:
+
+| Script | Does |
+| --- | --- |
+| `list-startable.sh OWNER/tasks <project>` | (read-only) startable candidates, oldest first |
+| `claim.sh OWNER/tasks <issue> <worker-name>` | queued → `in-progress`: guard, label, claim comment, tiebreaker |
+| `release.sh OWNER/tasks <issue> <worker-name> [reason]` | `in-progress` → queued, honestly (`released:` closes the claim window) |
+
+- Run them with `bash "<this skill's folder>/<script>"`. Do **not** inline rewritten
+  `gh` commands for a transition a script covers — the bundled scripts are versioned
+  with the plugin, and a hand-rolled variant is exactly the drift they exist to
+  prevent.
+- **Branch on their exit codes** — each script documents its own; `20` always means
+  gh/network failure with the write possibly half-landed: re-check the issue's real
+  state before retrying, and never move on while a claim is ambiguous.
+- They compose the attribution disclaimer and the machine-readable lines
+  (`claimed-by:`, `released:`) themselves — never hand-write those.
+
 ## Protocol
 
-1. List candidates: open `kraken-task` issues scoped to your project, **without
-   `in-progress`, `needs-decision`, or `awaiting-merge`** (those are running or
-   waiting on a human — never claim one), oldest first. Filter labels client-side —
-   it's deterministic, while mixing `--label` with `--search` in `gh` is not:
+1. List candidates with the bundled lister — open `kraken-task` issues scoped to
+   your project, **without `in-progress`, `needs-decision`, or `awaiting-merge`**
+   (those are running or waiting on a human — never claim one), oldest first, one
+   `<number> <title>` per line:
 
    ```
-   gh -R OWNER/REPO issue list --state open --limit 100 \
-     --label kraken-task --label "project:<name>" \
-     --json number,title,labels,createdAt \
-     --jq '[.[] | select([.labels[].name] | (index("in-progress") or index("needs-decision") or index("awaiting-merge") | not))] | sort_by(.createdAt)'
+   bash "<this skill's folder>/list-startable.sh" OWNER/tasks <name>
    ```
+
+   Pass `<name>` bare — the script prepends the `project:` prefix itself. No
+   output = nothing startable. Exit `20` = gh/network failure — report it, don't
+   guess at the queue.
 2. Skip anything blocked: a task is startable only when **every blocked-by issue is
    closed** (check the issue's relationships; honor a `depends-on: #N` line in the
    body as a fallback for the same thing).
-3. **Claim**. Your candidate list may be stale — another worker may have delivered or
-   released the task in the seconds since you listed. So **re-fetch the issue's current
-   labels first** and skip it if it now carries `in-progress`, `needs-decision`, or
-   `awaiting-merge`: never add `in-progress` on top of one of those, or you corrupt the
-   state (`in-progress` + `awaiting-merge` is exactly what the reaper later drags to
-   `needs-decision`). Check before you label — do not label-then-verify. Only if it is
-   still clear, claim: add the `in-progress` label and immediately post a comment
-   `claimed-by: <worker-name>`. Then **re-read the comments**: if the first
-   `claimed-by:` comment **of the current claim window** is not yours, another
-   worker won — back off (remove nothing) and pick the next candidate. Comment
-   ordering is server-side, which makes it the tiebreaker: the re-fetch guards against a
-   stale list, the tiebreaker resolves two workers that pass the guard at the same
-   instant. (Assignees can't arbitrate: every worker authenticates as me.)
-   The claim window starts after the most recent `released:` / stale-claim /
-   `needs-decision` event on the issue — **ignore `claimed-by:` comments older than
-   that**, or a task once claimed by a dead worker could never be claimed again.
+3. **Claim** with the bundled claimer:
+
+   ```
+   bash "<this skill's folder>/claim.sh" OWNER/tasks <issue> <worker-name>
+   ```
+
+   It runs the whole sequence your stale candidate list cannot be trusted to
+   survive: re-fetches the labels and refuses to stack `in-progress` on a task
+   that grew `in-progress`, `needs-decision`, or `awaiting-merge` since you listed
+   (`in-progress` + `awaiting-merge` is exactly what the reaper later drags to
+   `needs-decision`); labels; posts the `claimed-by: <worker-name>` comment; then
+   arbitrates — the first `claimed-by:` of the **current claim window** wins, on
+   server-side comment ordering (assignees can't arbitrate: every worker
+   authenticates as me). The window starts after the most recent `released:` /
+   `stale-claim:` / `needs-decision:` machine line, so a task once claimed by a
+   dead worker can always be claimed again. Branch on the exit code:
+
+   - `0` — claimed. The task is yours; go to step 4.
+   - `10` — lost the tiebreaker. Back off (remove nothing) and pick the next
+     candidate.
+   - `11` — no longer clear (a held label appeared since listing). Skip it.
+   - `20` — gh/network failure, claim state unknown. Re-check the issue's real
+     state before retrying; never move to another task while a claim of yours is
+     ambiguous.
 4. **Hand the claimed task to a fresh subagent.** Everything from here to delivery is
    the heavy part — reading and writing many files — and ~90% of it stops mattering the
    moment the task ships. Run it in a **new subagent**: a context born empty and
    discarded when it returns, so the driver's window stays ~O(1) per task no matter how
    long the drain runs. Brief it in full — the task pointer `{issue, repo, project,
    worker-name}` **and** the rules it must honor (steps a–d below, *Conventions* —
-   including the attribution disclaimer — *Delivering the work*, *Authorization
-   boundaries*); my global rules carry over too. "Compact" is what the
+   including the attribution disclaimer — *Bundled transition scripts*, *Delivering
+   the work*, *Authorization boundaries*); my global rules carry over too. "Compact" is what the
    *driver* keeps, not how the subagent runs: it works under the whole skill and returns
    only a **compact result** — task number, final label (`awaiting-merge` /
    `needs-decision` / `failed`), PR URL, and one line. Still **one task at a time**
    — the subagent is for context isolation, never for parallelism. If it errors out,
-   leave the task labeled honestly (never silently drop an `in-progress` claim) and
-   continue the loop.
+   leave the task labeled honestly — either keep it `in-progress` for triage or hand
+   it back with `release.sh` (which posts the `released:` line that closes the claim
+   window; never just strip the label) — and continue the loop.
 
    Inside the subagent:
    a. **Assumptions.** Restate the goal and post your **Assumptions** (my global rule)
@@ -167,8 +202,9 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
 
    Pass `<name>` bare — the script prepends the `project:` prefix itself. It polls
    every 60s with a free `gh` call and prints one `kraken-queue:` line only when the
-   queue snapshot changes and at least one task is startable (the same label filter
-   as step 1) — an idle queue never invokes the model. Do not inline a rewritten
+   queue snapshot changes and at least one task is startable (it delegates the filter
+   to `list-startable.sh` — literally the same file as step 1) — an idle queue never
+   invokes the model. Do not inline a rewritten
    script — the bundled one is versioned with the plugin. Cannot arm it (no Monitor
    tool, script missing)? Say so, offer `/loop /kraken:unleash ... --once` as the
    fallback, and end the turn as if `--once` — do not improvise a watcher.
