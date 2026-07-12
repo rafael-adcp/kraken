@@ -4,3 +4,4 @@
 # delimiters and exact-match line checks silently on Windows checkouts.
 *.sh          text eol=lf
 .githooks/*   text eol=lf
+tests/gh-stub/gh text eol=lf

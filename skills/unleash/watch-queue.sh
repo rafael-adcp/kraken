@@ -26,19 +26,16 @@ PROJECT="${2:?usage: watch-queue.sh OWNER/tasks PROJECT}"
 POLL_SECONDS="${KRAKEN_WATCH_POLL_SECONDS:-60}"
 REMIND_SECONDS="${KRAKEN_WATCH_REMIND_SECONDS:-1800}"
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 prev=""
 last_emit=0
 
 while true; do
   # One line per open kraken-task in the project: "<number>:startable" or
-  # "<number>:held" — held meaning in-progress / needs-decision /
-  # awaiting-merge, the same exclusion filter as unleash protocol step 1.
-  if snapshot="$(gh -R "$REPO" issue list --state open --limit 100 \
-        --label kraken-task --label "project:${PROJECT}" \
-        --json number,labels \
-        --jq 'sort_by(.number)[] | "\(.number):" + (if ([.labels[].name] | (index("in-progress") or index("needs-decision") or index("awaiting-merge"))) then "held" else "startable" end)' \
-        2>/dev/null)"; then
-    snapshot="${snapshot//$'\r'/}" # CRLF-emitting gh would silently break the $-anchored matches below
+  # "<number>:held". The startable filter itself lives in list-startable.sh —
+  # the same file unleash protocol step 1 runs — so the two can never drift.
+  if snapshot="$(bash "$SCRIPT_DIR/list-startable.sh" "$REPO" "$PROJECT" --snapshot 2>/dev/null)"; then
     count="$(printf '%s\n' "$snapshot" | grep -c ':startable$')" || true
     now="$(date +%s)"
     if [ "$count" -gt 0 ] && { [ "$snapshot" != "$prev" ] || [ "$((now - last_emit))" -ge "$REMIND_SECONDS" ]; }; then

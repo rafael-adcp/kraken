@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# Programmable `gh` stub for the kraken conformance suite (tests/run-tests.sh
+# puts this directory first on PATH). It models just enough of GitHub for the
+# bundled transition scripts: issue state, labels, and — the part that matters —
+# server-side comment ordering. The scripts' own --jq expressions are evaluated
+# by the real `jq`, so the filters under test are the shipped ones, never a
+# reimplementation.
+#
+# State layout (under $GH_STUB_STATE):
+#   issues/<n>/title       one line
+#   issues/<n>/createdAt   ISO timestamp
+#   issues/<n>/state       "open" | "closed"
+#   issues/<n>/labels      one label per line
+#   issues/<n>/comments/NNNN.md   bodies, NNNN = server order
+#   log                    every invocation, one per line
+#
+# Knobs:
+#   GH_STUB_FAIL=<ERE>    any invocation whose args match exits 1 (network sim)
+#   GH_STUB_BARRIER=<n>   `issue view --json labels` blocks until n callers
+#                         arrive — holds every racer inside the claim window so
+#                         the race test is deterministic, not timing-dependent
+set -u
+
+STATE="${GH_STUB_STATE:?gh stub: GH_STUB_STATE not set}"
+printf 'gh %s\n' "$*" >> "$STATE/log"
+
+if [ -n "${GH_STUB_FAIL:-}" ] && printf '%s' "$*" | grep -Eq "$GH_STUB_FAIL"; then
+  echo "gh-stub: injected failure for: $*" >&2
+  exit 1
+fi
+
+# mkdir is the only portable atomic primitive (Git Bash has no flock) — it
+# serializes writes, which is exactly GitHub's server-side ordering.
+lock() {
+  local i=0
+  until mkdir "$STATE/.lock" 2>/dev/null; do
+    sleep 0.05
+    i=$((i + 1))
+    [ "$i" -gt 200 ] && { echo "gh-stub: lock timeout" >&2; exit 99; }
+  done
+}
+unlock() { rmdir "$STATE/.lock"; }
+
+# --- argument parsing (only the shapes the transition scripts use) -----------
+sub="" issue="" jsonf="" jqexpr="" add_label="" remove_label="" body=""
+label_filters=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -R)             shift 2 ;;
+    issue)          sub="$2"; shift 2 ;;
+    --json)         jsonf="$2"; shift 2 ;;
+    --jq)           jqexpr="$2"; shift 2 ;;
+    --label)        label_filters+=("$2"); shift 2 ;;
+    --add-label)    add_label="$2"; shift 2 ;;
+    --remove-label) remove_label="$2"; shift 2 ;;
+    --body)         body="$2"; shift 2 ;;
+    --body-file)    body="$(cat "$2")"; shift 2 ;;
+    --state|--limit) shift 2 ;;
+    -*)             shift ;;
+    *)              issue="$1"; shift ;;
+  esac
+done
+
+issue_json() { # $1 = issue dir; emit {number,title,createdAt,labels:[{name}]}
+  local d="$1"
+  jq -n \
+    --arg n "$(basename "$d")" \
+    --arg title "$(cat "$d/title")" \
+    --arg created "$(cat "$d/createdAt")" \
+    --argjson labels "$(jq -R '{name: .}' < "$d/labels" | jq -s .)" \
+    '{number: ($n | tonumber), title: $title, createdAt: $created, labels: $labels}'
+}
+
+emit() { # $1 = JSON; apply --jq like gh does (raw strings, like jq -r)
+  if [ -n "$jqexpr" ]; then
+    printf '%s' "$1" | jq -r "$jqexpr"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+case "$sub" in
+  list)
+    items=""
+    for d in "$STATE"/issues/*/; do
+      [ -d "$d" ] || continue
+      [ "$(cat "$d/state")" = "open" ] || continue
+      ok=1
+      for lf in ${label_filters[@]+"${label_filters[@]}"}; do
+        grep -qxF -- "$lf" "$d/labels" || { ok=0; break; }
+      done
+      [ "$ok" -eq 1 ] || continue
+      items="${items}$(issue_json "$d")"
+    done
+    emit "$(printf '%s' "$items" | jq -s .)"
+    ;;
+
+  view)
+    d="$STATE/issues/$issue"
+    [ -d "$d" ] || { echo "gh-stub: no such issue $issue" >&2; exit 1; }
+    if [ "$jsonf" = "labels" ] && [ -n "${GH_STUB_BARRIER:-}" ]; then
+      mkdir -p "$STATE/.barrier"
+      : > "$STATE/.barrier/$$"
+      i=0
+      while [ "$(ls "$STATE/.barrier" | wc -l)" -lt "$GH_STUB_BARRIER" ]; do
+        sleep 0.05
+        i=$((i + 1))
+        [ "$i" -gt 100 ] && break # a stuck partner must not hang the suite
+      done
+    fi
+    case "$jsonf" in
+      labels)
+        emit "$(jq -n --argjson labels "$(jq -R '{name: .}' < "$d/labels" | jq -s .)" '{labels: $labels}')"
+        ;;
+      comments)
+        bodies=""
+        for f in "$d"/comments/*.md; do
+          [ -f "$f" ] || continue
+          bodies="${bodies}$(jq -Rs '{body: .}' < "$f")"
+        done
+        emit "$(jq -n --argjson c "$(printf '%s' "$bodies" | jq -s .)" '{comments: $c}')"
+        ;;
+      *)
+        echo "gh-stub: unsupported --json '$jsonf' for issue view" >&2; exit 1
+        ;;
+    esac
+    ;;
+
+  edit)
+    d="$STATE/issues/$issue"
+    [ -d "$d" ] || { echo "gh-stub: no such issue $issue" >&2; exit 1; }
+    lock
+    if [ -n "$add_label" ]; then
+      grep -qxF -- "$add_label" "$d/labels" || printf '%s\n' "$add_label" >> "$d/labels"
+    fi
+    if [ -n "$remove_label" ]; then
+      grep -vxF -- "$remove_label" "$d/labels" > "$d/labels.tmp" || true
+      mv "$d/labels.tmp" "$d/labels"
+    fi
+    unlock
+    ;;
+
+  comment)
+    d="$STATE/issues/$issue"
+    [ -d "$d" ] || { echo "gh-stub: no such issue $issue" >&2; exit 1; }
+    lock
+    n=$(( $(ls "$d/comments" | wc -l) + 1 ))
+    printf '%s\n' "$body" > "$d/comments/.tmp.$$"
+    mv "$d/comments/.tmp.$$" "$d/comments/$(printf '%04d' "$n").md"
+    unlock
+    ;;
+
+  *)
+    echo "gh-stub: unsupported invocation: issue $sub" >&2
+    exit 1
+    ;;
+esac
