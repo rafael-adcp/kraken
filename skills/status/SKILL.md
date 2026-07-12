@@ -1,16 +1,17 @@
 ---
 name: status
-description: Read-only status of a kraken queue — the return-side companion to identify. Surface the review queue (awaiting-merge, with PR links), the decision queue (needs-decision), and what is still in-progress (worker name + heartbeat age), and flag a possible orphan whose PR looks merged but whose issue never closed. No writes, no label changes.
+description: Read-only console of a kraken queue — everything the operator reads in one place. Surface the review queue (awaiting-merge, with PR links), the decision queue (needs-decision), what is still in-progress (worker name + heartbeat age), flag a possible orphan whose PR looks merged but whose issue never closed, and close with the launch recon — the queue's project: labels as ready-to-paste unleash lines. No writes, no label changes.
 ---
 
 # Kraken — surface the depths
 
-You are the return step for kraken: `identify` helps me *launch*, `status` helps me
-*land*. Given a coordination repo, you print what needs me — the review queue and the
-decision queue — plus what is still in flight, and you flag the one blind spot in the
-state machine: an `awaiting-merge` task whose PR is already merged but whose issue was
-never closed (the reaper only watches `in-progress`, so these can sit forever). You read
-the queue; you never touch it.
+You are the operator's console for kraken: the one read-only view of a coordination
+repo. Given the repo, you print what needs me — the review queue and the decision
+queue — plus what is still in flight, and you flag the one blind spot in the state
+machine: an `awaiting-merge` task whose PR is already merged but whose issue was never
+closed (the reaper only watches `in-progress`, so these can sit forever). You close
+with the launch recon: which projects live in this queue, as copy-paste lines to point
+a worker at each. You read the queue; you never touch it.
 
 ## Invocation
 
@@ -67,8 +68,25 @@ whole queue (group by `project:` label when it clarifies the picture).
    is a heuristic — it **flags, it never acts**. It changes no labels and closes no
    issues; the operator decides.
 
-6. **Print the grouped summary.** Read-only from here — nothing is written. Output
-   sketch (drop the `project:<name>` suffix when no `--project` was passed):
+6. **Launch recon.** When run without `--project` (or when I ask for it), enumerate
+   the queue's projects. Filter client-side — `gh label list --search` is a substring
+   match, and we want an exact prefix:
+
+   ```
+   gh -R OWNER/tasks label list --limit 200 --json name \
+     --jq '.[].name | select(startswith("project:"))'
+   ```
+
+   Sort the names and strip the `project:` prefix for the launch lines in the summary
+   below. Substitute the real `OWNER/tasks` — never leave a literal `OWNER/tasks` in
+   the output. Keep `<worker-name>` as a placeholder — that stays my call at launch
+   time (`unleash`: capacity = how many workers I start). Zero `project:` labels? Say
+   so and skip the section — do not invent projects (they are created with
+   `gh -R OWNER/tasks label create "project:<name>"`, or by `init --project`).
+
+7. **Print the grouped summary.** Read-only from here — nothing is written. Output
+   sketch (drop the `project:<name>` suffix and add the Launch section when no
+   `--project` was passed):
 
    ```
    🐙 kraken status — project:<name> @ OWNER/tasks
@@ -84,14 +102,21 @@ whole queue (group by `project:` label when it clarifies the picture).
         #99  <title>  · worker <name> · last heartbeat 12m ago
 
      ⚠️  1 possible orphan: #85 awaiting-merge 4d — its PR looks merged, close it?
+
+     🚀 Launch — one worker per prepared environment
+        /kraken:unleash OWNER/tasks --worker-name <worker-name> --project <name-1>
+        /kraken:unleash OWNER/tasks --worker-name <worker-name> --project <name-2>
    ```
 
    Empty groups: say so plainly (e.g. "Review queue — nothing waiting").
 
 ## Authorization boundaries
 
-- Read-only. This skill runs `gh issue list` / `gh pr view` calls and prints a summary.
+- Read-only. This skill runs `gh issue list` / `gh pr view` / `gh label list` calls
+  and prints a summary.
 - It does NOT write, comment, change labels, close issues, or merge anything — not even
   the orphan it flags. Every action is mine; the output tells me what needs me.
+- It does NOT invoke `/kraken:unleash` on my behalf — the launch lines are copy-paste;
+  I launch workers deliberately.
 
 Coordination repo / flags / extra context: $ARGUMENTS
