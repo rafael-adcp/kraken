@@ -10,7 +10,7 @@
 > Write the list once; the tentacles do the rest.
 >
 > GitHub does the tracking. Claude Code does the coding. **Kraken is just the
-> protocol between them** — it ships nothing you have to operate.
+> [protocol](PROTOCOL.md) between them** — it ships nothing you have to operate.
 
 ## Why?
 
@@ -122,8 +122,12 @@ next claim inherits the whole discussion as context.
 Only two transitions are ever yours: answering a decision and merging (or
 bouncing) a PR. The tentacles drive everything else.
 
-The full worker protocol — claim tiebreaker, assumptions, acceptance, heartbeats,
-authorization boundaries — lives in [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md).
+The coordination contract — task shape, state machine, machine-readable comment
+lines, the claim algorithm — is normatively specified in
+[`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/1`); it is agent-agnostic, so any
+tool that follows it can be a tentacle on the same queue. How a Claude Code worker
+executes it — subagents, the watcher, the bundled transition scripts — lives in
+[`skills/unleash/SKILL.md`](skills/unleash/SKILL.md).
 
 ## The full walkthrough
 
