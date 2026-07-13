@@ -107,8 +107,10 @@ time:
 
 1. List candidates with the bundled lister — open `kraken-task` issues scoped to
    your project, **without `in-progress`, `needs-decision`, or `awaiting-merge`**
-   (those are running or waiting on a human — never claim one), oldest first, one
-   `<number> <title>` per line:
+   (those are running or waiting on a human — never claim one) **and not
+   dependency-blocked** (the lister checks blocked-by relationships server-side,
+   honoring a `depends-on: #N` body line as a fallback — see `PROTOCOL.md` §3),
+   oldest first, one `<number> <title>` per line:
 
    ```
    bash "<this skill's folder>/list-startable.sh" OWNER/tasks <name>
@@ -117,9 +119,10 @@ time:
    Pass `<name>` bare — the script prepends the `project:` prefix itself. No
    output = nothing startable. Exit `20` = gh/network failure — report it, don't
    guess at the queue.
-2. Skip anything blocked: a task is startable only when **every blocked-by issue is
-   closed** (check the issue's relationships; honor a `depends-on: #N` line in the
-   body as a fallback for the same thing).
+2. **Trust the lister.** Every line it prints is startable — labels checked,
+   blocked-by relationships checked, server-side. There is nothing left to
+   re-verify before claiming; the whole "is this really unblocked" judgment
+   lives in `list-startable.sh` (`PROTOCOL.md` §3), not here.
 3. **Claim** with the bundled claimer:
 
    ```
@@ -230,12 +233,6 @@ time:
    - **On each `kraken-queue:` event**, run this protocol again from step 1 with the
      same OWNER/tasks, `--worker-name`, `--project`. Drain until no startable task
      remains, then go quiet again — the watcher stays armed.
-   - **A wake can be a false alarm.** The shell filter sees labels, not blocked-by
-     relationships, so a task whose blockers are still open looks startable to the
-     script; the dependency check in step 2 will skip it. Report briefly ("woke for
-     #N, still blocked by #M") and end the turn. The watcher will not spam you — it
-     re-emits an unchanged-but-startable queue only every 30 minutes, as a safety net
-     for blockers it cannot see closing.
    - **Stopping.** I say stop → stop the monitor (TaskStop) and confirm. Either way
      the watcher dies with the session — it never outlives this terminal.
 

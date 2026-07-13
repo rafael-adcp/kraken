@@ -30,6 +30,21 @@ mk_comment() {
   printf '%s\n' "$2" > "$d/$(printf '%04d' $(( $(ls "$d" | wc -l) + 1 ))).md"
 }
 
+# mk_blocked_by N BLOCKER... — record N's native blocked-by relationships
+# (the gh-stub's `api .../dependencies/blocked_by` reads this file).
+mk_blocked_by() {
+  local d="$STATE/issues/$1"
+  shift
+  : > "$d/blocked_by"
+  local b
+  for b in "$@"; do printf '%s\n' "$b" >> "$d/blocked_by"; done
+}
+
+# mk_body N TEXT — set N's issue body (for the `depends-on: #N` fallback).
+mk_body() {
+  printf '%s\n' "$2" > "$STATE/issues/$1/body"
+}
+
 fail() { echo "FAIL: $*"; exit 1; }
 
 assert_eq() { # actual expected context

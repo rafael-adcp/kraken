@@ -9,6 +9,11 @@ mk_issue 7 "a task" kraken-task "project:app"
 out="$(GH_STUB_FAIL='issue list' bash "$SCRIPTS/list-startable.sh" OWNER/tasks app)"
 assert_rc $? 20 "list-startable exit on gh failure"
 
+# list-startable: the blocked-by check's own gh api call fails — a
+# label-clear candidate must still surface 20, not silently list or drop.
+out="$(GH_STUB_FAIL='dependencies/blocked_by' bash "$SCRIPTS/list-startable.sh" OWNER/tasks app)"
+assert_rc $? 20 "list-startable exit on blocked-by gh api failure"
+
 # claim: failure at the guard read — nothing written.
 out="$(GH_STUB_FAIL='issue view' bash "$SCRIPTS/claim.sh" OWNER/tasks 7 w1)"
 assert_rc $? 20 "claim exit on guard failure"
