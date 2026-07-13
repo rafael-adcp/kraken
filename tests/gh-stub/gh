@@ -50,7 +50,7 @@ lock() {
 unlock() { rmdir "$STATE/.lock"; }
 
 # --- argument parsing (only the shapes the transition scripts use) -----------
-sub="" issue="" jsonf="" jqexpr="" add_label="" remove_label="" body="" endpoint=""
+sub="" issue="" jsonf="" jqexpr="" add_label="" remove_label="" body="" endpoint="" limit=""
 label_filters=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -64,20 +64,29 @@ while [ $# -gt 0 ]; do
     --remove-label) remove_label="$2"; shift 2 ;;
     --body)         body="$2"; shift 2 ;;
     --body-file)    body="$(cat "$2")"; shift 2 ;;
-    --state|--limit) shift 2 ;;
+    --limit)        limit="$2"; shift 2 ;;
+    --state)        shift 2 ;;
     -*)             shift ;;
     *)              issue="$1"; shift ;;
   esac
 done
 
 issue_json() { # $1 = issue dir; emit {number,title,createdAt,labels:[{name}]}
+  # One jq per issue (not four): the list case builds a whole queue, so a
+  # tighter fork budget here is what keeps large-queue cases (tests/t/14)
+  # from dominating the suite. Files are read straight into jq via --rawfile.
   local d="$1"
   jq -n \
     --arg n "$(basename "$d")" \
-    --arg title "$(cat "$d/title")" \
-    --arg created "$(cat "$d/createdAt")" \
-    --argjson labels "$(jq -R '{name: .}' < "$d/labels" | jq -s .)" \
-    '{number: ($n | tonumber), title: $title, createdAt: $created, labels: $labels}'
+    --rawfile title "$d/title" \
+    --rawfile created "$d/createdAt" \
+    --rawfile labels "$d/labels" \
+    '{
+       number: ($n | tonumber),
+       title: ($title | rtrimstr("\n")),
+       createdAt: ($created | rtrimstr("\n")),
+       labels: ($labels | rtrimstr("\n") | split("\n") | map(select(. != "") | {name: .}))
+     }'
 }
 
 emit() { # $1 = JSON; apply --jq like gh does (raw strings, like jq -r)
@@ -101,7 +110,15 @@ case "$sub" in
       [ "$ok" -eq 1 ] || continue
       items="${items}$(issue_json "$d")"
     done
-    emit "$(printf '%s' "$items" | jq -s .)"
+    # Honor --limit like real gh: it page-fetches newest-first (created desc)
+    # and stops at the ceiling, so an over-limit queue silently loses its
+    # OLDEST tasks. Modeling that truncation is what gives the pagination
+    # conformance case (tests/t/14) its teeth; absent --limit means no cap.
+    all="$(printf '%s' "$items" | jq -s 'sort_by(.createdAt) | reverse')"
+    if [ -n "$limit" ]; then
+      all="$(printf '%s' "$all" | jq --argjson lim "$limit" '.[:$lim]')"
+    fi
+    emit "$all"
     ;;
 
   view)

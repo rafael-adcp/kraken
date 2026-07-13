@@ -42,7 +42,17 @@ HELD='index("in-progress") or index("needs-decision") or index("awaiting-merge")
 #   <number>\t<held 0|1>\t<title>
 JQ='sort_by(.createdAt)[] | "\(.number)\t" + (if ([.labels[].name] | ('"$HELD"')) then "1" else "0" end) + "\t\(.title)"'
 
-rows="$(gh -R "$REPO" issue list --state open --limit 100 \
+# Fetch the WHOLE queue, never a truncated page. `gh issue list` exposes no
+# cursor — it page-fetches the API (100/page) up to --limit, then stops, and
+# has no "unlimited" sentinel. A literal 100 silently dropped every task past
+# the cutoff, so the drain, oldest-first ordering, and the watcher's snapshot
+# all saw a truncated set. We instead pass a ceiling far above any realistic
+# project queue; gh walks every page under it, so no queue size produces a
+# silently incomplete listing. Both modes read this one call, so --snapshot
+# inherits the fix.
+LIMIT=1000000
+
+rows="$(gh -R "$REPO" issue list --state open --limit "$LIMIT" \
   --label kraken-task --label "project:${PROJECT}" \
   --json number,title,labels,createdAt \
   --jq "$JQ")" || exit 20
