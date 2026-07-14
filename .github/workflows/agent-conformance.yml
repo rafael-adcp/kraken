@@ -1,0 +1,34 @@
+name: Agent conformance
+
+# Tests the SKILL's JUDGMENT, not just the scripts: drives a real headless
+# `claude -p "/kraken:unleash ... --once"` against the gh-stub and asserts on
+# artifacts (stub state + a real work repo). Unlike the mechanical conformance
+# suite, each scenario spends REAL model tokens — so this runs on a SCHEDULE,
+# never per-push. See tests/agent/run-agent-tests.sh.
+on:
+  schedule:
+    # 06:00 UTC nightly.
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}   # manual runs (e.g. before a release)
+
+# One run at a time — the scenarios spend tokens; no point stacking them.
+concurrency:
+  group: agent-conformance
+  cancel-in-progress: false
+
+jobs:
+  agent-conformance:
+    runs-on: ubuntu-latest
+    # Skip on forks / when the secret is absent — the harness self-skips, but
+    # gating here avoids a spurious "green skip" hiding a real config gap.
+    if: ${{ github.repository == 'rafael-adcp/kraken' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run agent-behavior scenarios
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: bash tests/agent/run-agent-tests.sh
