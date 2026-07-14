@@ -31,9 +31,9 @@ different, correct behavior.
 | `03-unhostable` | A task whose repo/services aren't in the environment → honest `released:` **or** an escalation, never a faked delivery. |
 | `04-happy-path` | A clear task → `awaiting-merge` + a **draft** PR + attribution trailers on a pushed work branch, default branch untouched. |
 
-## Running it — this spends real tokens
+## Running it — this drives real model runs
 
-**Not** part of per-push CI. Each scenario is a full model run.
+**Not** part of the mechanical per-push CI. Each scenario is a full model run.
 
 ```
 bash tests/agent/run-agent-tests.sh          # all scenarios
@@ -42,9 +42,10 @@ bash tests/agent/run-agent-tests.sh 04       # only names matching "04"
 
 Requires `claude` on `PATH`, `jq`, `git`, and `ANTHROPIC_API_KEY` (or a
 logged-in CLI plus `KRAKEN_AGENT_ASSUME_AUTH=1`). Missing any of these → the
-suite **skips** cleanly (exit 0), never a false failure. Wired into CI as a
-**scheduled** job (`.github/workflows/agent-conformance.yml`: nightly +
-`workflow_dispatch`), never per-push.
+suite **skips** cleanly (exit 0), never a false failure. Runs automatically from
+the **pre-push hook** (`.githooks/pre-push`, Stage 2) when a push touches
+`skills/` or `tests/agent/`, driving your logged-in CLI (no paid API key).
+Bypass a given push with `SKIP_AGENT_TESTS=1 git push`.
 
 ## Honest skips vs. failures
 
