@@ -387,6 +387,28 @@ workflow drags any `in-progress` issue that has been silent for 6h to
 </details>
 
 <details>
+<summary><b>A worker hit the Claude usage limit mid-task — what happens?</b></summary>
+
+Nothing corrupt, but today it costs you time. A usage limit looks to the queue like
+sudden silence: the model stops mid-drain, so the claim just sits `in-progress` with no
+new heartbeat — and an `in-progress` task is **held**, invisible to every worker (it is
+excluded from the startable set), so nobody, not even the same worker relaunched, can
+pick it up. The **reaper is the backstop**: after 6h of silence it moves the issue to
+`needs-decision` with a `stale-claim:` comment. That is honest but blunt — `stale-claim:`
+reads *"the worker likely died"*, which for a rate limit is a half-truth (the worker is
+paused, not dead), and 6h is a long wait for a window that may reset in one.
+
+So the operator's move is to break the hold sooner. Once the reaper has moved the task to
+`needs-decision`, **remove that label** to requeue it — any worker with capacity then
+claims it and continues on the existing branch, the whole thread in hand. To skip the 6h
+wait, requeue by hand: on the stuck issue, **remove `in-progress`** and add nothing — with
+only `kraken-task` left it is startable again (holding it in `needs-decision` would just
+trade one held state for another). Then relaunch a worker — in another environment or on an
+account that still has quota — and it claims the now-startable task.
+
+</details>
+
+<details>
 <summary><b>Who can command my workers?</b></summary>
 
 Anyone who can open issues in the coordination repo: a task is, in effect,
