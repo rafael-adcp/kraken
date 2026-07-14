@@ -5,5 +5,17 @@
   "author": {
     "name": "Rafael Prado",
     "url": "https://github.com/rafael-adcp"
-  }
+  },
+  "homepage": "https://github.com/rafael-adcp/kraken",
+  "repository": "https://github.com/rafael-adcp/kraken",
+  "license": "MIT",
+  "keywords": [
+    "task-queue",
+    "orchestration",
+    "github-issues",
+    "autonomous-agents",
+    "agent-orchestrator",
+    "parallel-workers",
+    "claude-code"
+  ]
 }
