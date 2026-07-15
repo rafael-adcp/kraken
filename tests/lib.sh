@@ -24,10 +24,14 @@ mk_issue() {
   for l in "$@"; do printf '%s\n' "$l" >> "$d/labels"; done
 }
 
-# mk_comment N BODY — append a comment in server order.
+# mk_comment N BODY [CREATED_AT] — append a comment in server order. An optional
+# ISO CREATED_AT is written to a .at sidecar so the reaper's staleness anchor
+# (newest worker machine line's createdAt) can be exercised deterministically.
 mk_comment() {
   local d="$STATE/issues/$1/comments"
-  printf '%s\n' "$2" > "$d/$(printf '%04d' $(( $(ls "$d" | wc -l) + 1 ))).md"
+  local seq; seq="$(printf '%04d' $(( $(ls "$d"/*.md 2>/dev/null | wc -l) + 1 )))"
+  printf '%s\n' "$2" > "$d/$seq.md"
+  [ $# -ge 3 ] && printf '%s\n' "$3" > "$d/$seq.at"
 }
 
 # mk_blocked_by N BLOCKER... — record N's native blocked-by relationships
@@ -57,6 +61,6 @@ assert_rc() { # actual expected context
 
 has_label() { grep -qxF -- "$2" "$STATE/issues/$1/labels"; }
 
-comment_count() { ls "$STATE/issues/$1/comments" | wc -l | tr -d ' '; }
+comment_count() { ls "$STATE/issues/$1/comments"/*.md 2>/dev/null | wc -l | tr -d ' '; }
 
 last_comment() { cat "$STATE/issues/$1/comments/$(printf '%04d' "$(comment_count "$1")").md"; }

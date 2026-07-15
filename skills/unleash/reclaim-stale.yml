@@ -3,11 +3,19 @@
 #
 # A worker that dies mid-task leaves its issue labeled in-progress forever,
 # blocking the queue. This workflow runs server-side (so it works even when every
-# worker is dead): any in-progress issue with no activity for MAX_HOURS is moved
-# to needs-decision for the human to triage — relaunch or investigate.
+# worker is dead): any in-progress issue whose worker has been silent for
+# MAX_HOURS is moved to needs-decision for the human to triage — relaunch or
+# investigate.
 #
-# Workers must heartbeat: a short progress comment at least every ~2h on long
-# tasks keeps updatedAt fresh and the reaper away.
+# Staleness is anchored to the worker's last machine line (the newest
+# `claimed-by:`/`heartbeat:` comment), NOT the issue's updatedAt. An operator
+# comment on a dead worker's issue must shorten time-to-triage, not extend it —
+# reading updatedAt would let any human comment keep a dead claim alive for
+# another MAX_HOURS. An in-progress issue with no worker machine line at all is
+# treated as infinitely stale and reclaimed.
+#
+# Workers must heartbeat: a short progress comment (the `heartbeat:` machine line)
+# at least every ~2h on long tasks keeps the anchor fresh and the reaper away.
 #
 # Why not actions/stale: its threshold is whole DAYS (community-triage timescale);
 # a dead worker's claim must be reclaimed within hours, not days.
@@ -29,14 +37,25 @@ jobs:
       - name: Move silent in-progress issues to needs-decision
         run: |
           now=$(date -u +%s)
+          # Per issue, emit "<number> <anchor>" where <anchor> is the createdAt of
+          # the newest comment carrying a worker machine line (^claimed-by: or
+          # ^heartbeat:), or the literal "none" when the worker never spoke. Only
+          # those two lines mark liveness: delivered:/released: already drop
+          # in-progress, so they never appear on a still-held claim. Operator
+          # comments are ignored — they must not reset the clock.
           gh issue list -R "$GITHUB_REPOSITORY" --label in-progress --state open \
-            --json number,updatedAt --jq '.[] | "\(.number) \(.updatedAt)"' |
-          while read -r num updated; do
-            age=$(( (now - $(date -u -d "$updated" +%s)) / 3600 ))
-            if [ "$age" -ge "$MAX_HOURS" ]; then
-              gh issue edit "$num" -R "$GITHUB_REPOSITORY" \
-                --remove-label in-progress --add-label needs-decision
-              gh issue comment "$num" -R "$GITHUB_REPOSITORY" \
-                --body "stale-claim: no activity for ${age}h — the worker likely died. To requeue, remove the needs-decision label; or investigate first."
+            --json number,comments \
+            --jq '.[] | "\(.number) \([.comments[] | select(.body | test("(?m)^(claimed-by|heartbeat): ")) | .createdAt] | max // "none")"' |
+          while read -r num anchor; do
+            if [ "$anchor" = "none" ]; then
+              age="" # no worker machine line at all: infinitely stale
+            else
+              age=$(( (now - $(date -u -d "$anchor" +%s)) / 3600 ))
+              [ "$age" -lt "$MAX_HOURS" ] && continue
             fi
+            reason=$([ -z "$age" ] && echo "no worker heartbeat on record" || echo "no worker heartbeat for ${age}h")
+            gh issue edit "$num" -R "$GITHUB_REPOSITORY" \
+              --remove-label in-progress --add-label needs-decision
+            gh issue comment "$num" -R "$GITHUB_REPOSITORY" \
+              --body "stale-claim: ${reason} — the worker likely died. To requeue, remove the needs-decision label; or investigate first."
           done
