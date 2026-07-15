@@ -18,6 +18,21 @@ behavior say so explicitly ("implements kraken-protocol/1").
 <!-- Add entries here as they merge; the release flow promotes this section to a
      versioned heading. See CONTRIBUTING.md → "Releasing". -->
 
+### Added
+
+- `SessionEnd` hook (`hooks/hooks.json` + `hooks/session-end-release.sh`): a
+  worker that ends its Claude Code session *gracefully* while still holding a
+  claim now auto-releases it (`released: <worker>` / `reason: session ended`,
+  then drops `in-progress`), so the task requeues in seconds instead of waiting
+  ~6h for the reaper. Best-effort — a failed release falls back to the reaper
+  and never blocks session exit. Covers a graceful end only (terminal closed,
+  `/exit`); a usage-limit pause / hard kill / crash never fires `SessionEnd`, so
+  the reaper stays the backstop for hard death (implements kraken-protocol/1 §9).
+- `claim.sh` writes a per-worker claim state file
+  (`${KRAKEN_STATE_DIR:-$HOME/.kraken}/claim-<worker>.json`) on a won claim; the
+  terminal transitions (`deliver.sh`, `escalate.sh`, `release.sh`) remove it.
+  This is the primitive the `SessionEnd` hook reads to know a claim is open.
+
 ## [0.2.16] - 2026-07-15
 
 ### Added

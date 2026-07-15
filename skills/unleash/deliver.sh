@@ -44,5 +44,9 @@ $(cat "$RESULT_FILE")" >/dev/null \
 gh -R "$REPO" issue edit "$ISSUE" --remove-label in-progress --add-label awaiting-merge >/dev/null \
   || { echo "deliver: gh-failure issue=${ISSUE} stage=labels"; exit 20; }
 
+# The claim is delivered: drop the state file the SessionEnd hook watches, so a
+# later graceful exit does not release a task already awaiting review.
+rm -f "${KRAKEN_STATE_DIR:-$HOME/.kraken}/claim-${WORKER}.json" 2>/dev/null || true
+
 echo "deliver: delivered issue=${ISSUE} worker=${WORKER}${PR_URL:+ pr=${PR_URL}}"
 exit 0

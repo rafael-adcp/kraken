@@ -34,5 +34,9 @@ $(cat "$QUESTION_FILE")" >/dev/null \
 gh -R "$REPO" issue edit "$ISSUE" --remove-label in-progress --add-label needs-decision >/dev/null \
   || { echo "escalate: gh-failure issue=${ISSUE} stage=labels"; exit 20; }
 
+# The claim is handed to the operator: drop the state file the SessionEnd hook
+# watches, so a later graceful exit does not release a task we no longer hold.
+rm -f "${KRAKEN_STATE_DIR:-$HOME/.kraken}/claim-${WORKER}.json" 2>/dev/null || true
+
 echo "escalate: escalated issue=${ISSUE} worker=${WORKER}"
 exit 0

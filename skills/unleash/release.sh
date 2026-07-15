@@ -33,5 +33,9 @@ gh -R "$REPO" issue comment "$ISSUE" --body "$body" >/dev/null \
 gh -R "$REPO" issue edit "$ISSUE" --remove-label in-progress >/dev/null \
   || { echo "release: gh-failure issue=${ISSUE} stage=label"; exit 20; }
 
+# The claim is gone: drop the state file the SessionEnd hook watches, so a
+# later graceful exit does not re-release an already-released claim.
+rm -f "${KRAKEN_STATE_DIR:-$HOME/.kraken}/claim-${WORKER}.json" 2>/dev/null || true
+
 echo "release: released issue=${ISSUE} worker=${WORKER}"
 exit 0
