@@ -2,6 +2,13 @@
 # Merging that PR is the human approval — main is protected, so nothing lands
 # without it. Step 2 (tag-release.yml) fires on the merge and publishes.
 #
+# BEFORE running this: update CHANGELOG.md — move the entries under
+# "## [Unreleased]" into a new "## [X.Y.Z] - YYYY-MM-DD" heading and add the
+# compare link. Call out protocol-affecting changes ("implements
+# kraken-protocol/1"), because the kraken@<version> commit trailer maps back to
+# a protocol revision through the changelog. Full steps: CONTRIBUTING.md ->
+# "Releasing".
+#
 # Run it from the Actions tab: Release -> Run workflow -> pick the bump type.
 name: Release
 on:
