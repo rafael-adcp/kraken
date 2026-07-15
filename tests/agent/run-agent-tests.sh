@@ -6,10 +6,12 @@
 # and asserts on ARTIFACTS: the stub's final state (labels, machine lines) and a
 # real local work repo (branch pushed? trailers? default branch untouched?).
 #
-# This spends REAL model tokens — it is NOT part of the per-push conformance
-# suite. Run it on a schedule (see .github/workflows/agent-conformance.yml) or
-# by hand. Requires: claude on PATH, ANTHROPIC_API_KEY (or a logged-in CLI), jq,
-# git. Absent any of these -> SKIP with exit 0, never a false failure.
+# This drives REAL model runs — it is NOT part of the mechanical per-push
+# conformance suite (tests/run-tests.sh). It runs from the pre-push hook
+# (.githooks/pre-push, Stage 2) when a push touches skills/ or tests/agent/,
+# against the logged-in CLI; run it by hand any time too. Requires: claude on
+# PATH, ANTHROPIC_API_KEY (or a logged-in CLI), jq, git. Absent any of these ->
+# SKIP with exit 0, never a false failure.
 #
 # Advisory scenarios (flaky by nature — the notes on #62 anticipate this) are
 # listed in ADVISORY below: they run and report, but a failure does not fail the

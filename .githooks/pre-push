@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
-# .githooks/pre-push — advisory LLM review of skill changes before pushing.
+# .githooks/pre-push — local, token-free-ish semantic gates before pushing.
+# Both stages drive the logged-in `claude` CLI (your Claude Code subscription),
+# not a paid API key — so they cost no API bill. They run locally on purpose:
+# the agent-behavior harness used to live in CI (agent-conformance.yml) where it
+# burned a paid ANTHROPIC_API_KEY on a nightly schedule; it now runs here.
 #
-# When a push touches skills/** or README.md, runs `claude -p` locally to
-# review the diff against the skill's semantic invariants (label protocol,
-# step numbering, subagent context, authorization/safety trailers). The
-# deterministic gate lives in CI (see .github/workflows/lint.yml); this hook
-# is the second, semantic layer — advisory, not enforced remotely.
+# Stage 1 — advisory LLM skill review. When a push touches skills/** or
+#   README.md, runs `claude -p` to review the diff against the skill's semantic
+#   invariants (label protocol, step numbering, subagent context, safety
+#   trailers). The deterministic gate lives in CI (.github/workflows/lint.yml);
+#   this is the second, semantic layer.
+#
+# Stage 2 — agent-behavior harness. When a push touches skills/** or
+#   tests/agent/**, runs tests/agent/run-agent-tests.sh, which drives real
+#   `/kraken:unleash --once` runs against the gh-stub. Blocking scenarios fail
+#   the push; advisory scenarios only warn. Takes a few minutes (4 scenarios).
 #
 # Bypass:
-#   SKIP_LLM_REVIEW=1 git push        # skip the LLM review for this push
+#   SKIP_AGENT_TESTS=1 git push       # skip only the slow Stage 2 harness
+#   SKIP_LLM_REVIEW=1 git push        # skip both stages for this push
 #   git push --no-verify              # skip all pre-push hooks
 #
 # One-time setup (per clone):
@@ -30,8 +40,11 @@ zero='0000000000000000000000000000000000000000'
 default_branch="$(git symbolic-ref --short "refs/remotes/${remote}/HEAD" 2>/dev/null | sed "s|^${remote}/||")"
 default_branch="${default_branch:-main}"
 
-# Aggregate the diff for every ref being pushed that touches skill sources.
+# Aggregate the diff for every ref being pushed that touches skill sources, and
+# separately note whether anything that shapes agent behavior (skills/ or the
+# agent scenarios) changed — that gates the expensive Stage 2 harness.
 diff=""
+agent_touched=""
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ -z "${local_ref:-}" ] && continue
   [ "$local_sha" = "$zero" ] && continue  # deleted ref — nothing to review
@@ -43,18 +56,12 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   [ -z "$base" ] && continue
   chunk="$(git diff --unified=3 "${base}..${local_sha}" -- skills/ README.md 2>/dev/null || true)"
   [ -n "$chunk" ] && diff="${diff}${chunk}"$'\n'
+  touched="$(git diff --name-only "${base}..${local_sha}" -- skills/ tests/agent/ 2>/dev/null || true)"
+  [ -n "$touched" ] && agent_touched=1
 done
 
-if [ -z "$diff" ]; then
-  exit 0
-fi
-
-# Cap the diff so a huge refactor doesn't blow tokens or context.
-max_bytes=40000
-if [ "${#diff}" -gt "$max_bytes" ]; then
-  diff="${diff:0:$max_bytes}"$'\n\n[...diff truncated at 40KB — review the tail manually...]'
-fi
-
+# The skill-review prompt (Stage 1). Defined unconditionally — it's just a
+# string, only fed to `claude -p` when there's a skill diff to review.
 read -r -d '' prompt <<'PROMPT' || true
 You are reviewing a diff for a "skill" — a markdown protocol interpreted at
 runtime by an LLM agent. Prose here is executable: subtle wording changes
@@ -87,27 +94,49 @@ Use "ok" when the diff is safe.
 --- DIFF ---
 PROMPT
 
-review="$(printf '%s\n%s\n' "$prompt" "$diff" | claude -p 2>/dev/null || true)"
+# ---- Stage 1: advisory LLM review of the skill diff (skills/** or README.md) ----
+if [ -n "$diff" ]; then
+  # Cap the diff so a huge refactor doesn't blow tokens or context.
+  max_bytes=40000
+  if [ "${#diff}" -gt "$max_bytes" ]; then
+    diff="${diff:0:$max_bytes}"$'\n\n[...diff truncated at 40KB — review the tail manually...]'
+  fi
 
-if [ -z "$review" ]; then
-  printf 'pre-push: LLM review returned no output — letting the push through.\n' >&2
-  exit 0
+  review="$(printf '%s\n%s\n' "$prompt" "$diff" | claude -p 2>/dev/null || true)"
+
+  if [ -z "$review" ]; then
+    printf 'pre-push: LLM review returned no output — letting the push through.\n' >&2
+  else
+    printf '\n---- skill review ----\n%s\n----------------------\n' "$review" >&2
+    verdict="$(printf '%s\n' "$review" \
+      | grep -iE '^VERDICT:' \
+      | head -1 \
+      | awk -F: '{gsub(/[[:space:]]/, "", $2); print tolower($2)}')"
+    if [ "$verdict" = "block" ]; then
+      printf 'pre-push: blocking push. Fix the findings above, or bypass with\n' >&2
+      printf '         SKIP_LLM_REVIEW=1 git push   (or  git push --no-verify)\n' >&2
+      exit 1
+    fi
+  fi
 fi
 
-printf '\n---- skill review ----\n%s\n----------------------\n' "$review" >&2
+# ---- Stage 2: agent-behavior harness (skills/** or tests/agent/** changed) ----
+# Moved here from CI (agent-conformance.yml). Runs on the logged-in CLI via
+# KRAKEN_AGENT_ASSUME_AUTH=1 — no paid API key. The harness self-skips (exit 0)
+# when it can't run for real; blocking scenarios exit non-zero, advisory don't.
+if [ -n "$agent_touched" ]; then
+  if [ "${SKIP_AGENT_TESTS:-0}" = "1" ]; then
+    printf 'pre-push: SKIP_AGENT_TESTS=1 — skipping agent-behavior harness.\n' >&2
+  else
+    printf '\npre-push: running agent-behavior harness (skills/ or tests/agent/ changed).\n' >&2
+    printf '          drives real /kraken:unleash runs on your logged-in CLI; may take a few minutes.\n' >&2
+    printf '          bypass: SKIP_AGENT_TESTS=1 git push\n' >&2
+    if ! KRAKEN_AGENT_ASSUME_AUTH=1 bash "$ROOT/tests/agent/run-agent-tests.sh"; then
+      printf 'pre-push: blocking push — a blocking agent scenario failed above.\n' >&2
+      printf '         bypass with SKIP_AGENT_TESTS=1 git push   (or  git push --no-verify)\n' >&2
+      exit 1
+    fi
+  fi
+fi
 
-verdict="$(printf '%s\n' "$review" \
-  | grep -iE '^VERDICT:' \
-  | head -1 \
-  | awk -F: '{gsub(/[[:space:]]/, "", $2); print tolower($2)}')"
-
-case "$verdict" in
-  block)
-    printf 'pre-push: blocking push. Fix the findings above, or bypass with\n' >&2
-    printf '         SKIP_LLM_REVIEW=1 git push   (or  git push --no-verify)\n' >&2
-    exit 1
-    ;;
-  warn|ok|*)
-    exit 0
-    ;;
-esac
+exit 0
