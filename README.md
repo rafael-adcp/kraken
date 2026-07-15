@@ -448,6 +448,14 @@ anywhere else.
 
 </details>
 
+## Contributing
+
+Kraken is a small, protocol-first tool. The spec ([`PROTOCOL.md`](PROTOCOL.md))
+wins on any disagreement, the skills are prompts, and the scripts are the
+mechanics. Dev setup, PR conventions, the release flow, and where design
+discussion happens are all in [`CONTRIBUTING.md`](CONTRIBUTING.md); what changed
+between versions lives in [`CHANGELOG.md`](CHANGELOG.md).
+
 ## Origins
 
 Distilled from [orch-ai-orchestrator](https://github.com/rafael-adcp/orch-ai-orchestrator):
