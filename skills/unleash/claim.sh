@@ -73,6 +73,16 @@ $stream
 EOF
 
 if [ "$winner" = "$WORKER" ]; then
+  # Record the open claim so the SessionEnd hook can auto-release it if this
+  # worker's Claude Code session ends before a terminal transition (deliver /
+  # escalate / release each remove this file). Best-effort: a state-dir we
+  # cannot write is not worth failing a won claim over — the reaper still backs
+  # us up. The env override lets the conformance suite redirect it.
+  state_dir="${KRAKEN_STATE_DIR:-$HOME/.kraken}"
+  if mkdir -p "$state_dir" 2>/dev/null; then
+    printf '{"repo": "%s", "issue": "%s", "worker": "%s"}\n' \
+      "$REPO" "$ISSUE" "$WORKER" > "$state_dir/claim-${WORKER}.json" 2>/dev/null || true
+  fi
   echo "claim: claimed issue=${ISSUE} worker=${WORKER}"
   exit 0
 fi

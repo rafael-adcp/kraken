@@ -1,0 +1,15 @@
+{
+  "description": "Auto-release an open claim when a worker's Claude Code session ends gracefully, so the task requeues in seconds instead of waiting ~6h for the reaper (PROTOCOL.md §9, coordination-repo #13).",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-end-release.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

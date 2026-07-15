@@ -406,6 +406,11 @@ only `kraken-task` left it is startable again (holding it in `needs-decision` wo
 trade one held state for another). Then relaunch a worker — in another environment or on an
 account that still has quota — and it claims the now-startable task.
 
+Note the `SessionEnd` auto-release (see *Does anything survive closing the terminal?*) does
+**not** help here: a usage limit does not end the session — the turn aborts but the session
+stays open waiting for input, so `SessionEnd` never fires. The reaper remains the backstop
+for a rate-limit pause, exactly as above.
+
 </details>
 
 <details>
@@ -422,8 +427,16 @@ task bodies are untrusted input to an agent that can push branches.
 <summary><b>Does anything survive closing the terminal?</b></summary>
 
 The queue does — it's GitHub Issues. The worker doesn't: `/kraken:unleash` and
-its watcher live inside a Claude Code session. Headless drivers (system cron,
-GitHub Actions) are the natural next step — see the alternatives table in
+its watcher live inside a Claude Code session. But a **graceful** exit now
+self-heals: a bundled `SessionEnd` hook fires when you close the terminal or
+`/exit`, and if the worker was still holding a claim it runs `release.sh` for
+you — `released: <worker>` / `reason: session ended`, then drops `in-progress`,
+so the task is back on the queue in seconds instead of waiting ~6h for the
+reaper. That covers a graceful end only; a hard kill / crash / power loss (and a
+usage-limit pause — see below) never fires `SessionEnd`, so the **reaper stays
+the backstop** for hard death. Headless drivers (system cron, GitHub Actions)
+are the natural next step for surviving the terminal entirely — see the
+alternatives table in
 [#32](https://github.com/rafael-adcp/kraken/issues/32).
 
 </details>
