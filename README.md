@@ -280,29 +280,9 @@ delivered, the result with the acceptance check executed, and the close:
 
 > Work happens while you don't. Queue a backlog before bed, on the commute, or before a meeting. Come back to finished branches instead of an empty editor.
 
-<!-- METRICS TODO: replace the placeholder line below with real numbers from an
-     actual drain. To pull them, run this prompt in Claude Code on a machine
-     whose `gh` can read the coordination repo (substitute OWNER/tasks):
-
-     Analyze my kraken coordination repo OWNER/tasks with read-only `gh` calls
-     (issue list/view, pr view — write nothing). Tasks are issues labeled
-     kraken-task; claims are `claimed-by:` comments; a delivery is the result
-     comment that came with the swap to `awaiting-merge`, carrying a draft PR
-     link.
-     1. Find the single busiest drain window (e.g. one overnight run) from the
-        claimed-by comment timestamps.
-     2. For that window report: tasks queued when it started, draft PRs
-        delivered, needs-decision raised, wall-clock span (first claim to last
-        delivery), and the distinct worker names involved.
-     3. Also report lifetime totals: tasks completed, PRs merged, and median
-        time from claim to awaiting-merge.
-     Then print the README line filled in:
-     "N tasks queued at HH:MM -> N draft PRs + N needs-decision by HH:MM —
-     zero terminals watched."
-     followed by the raw numbers so I can sanity-check them.
--->
-
-> **`N` tasks queued at `HH:MM` → `N` draft PRs + `N` needs-decision by `HH:MM` — zero terminals watched.**
+> **100 tasks queued at 17:24 → 100 draft PRs + 0 needs-decision by 18:01 — zero terminals watched.** *(highest burst so far)*
+> So far: 126 tasks filed, 125 PRs merged.
+> Median claim → draft PR: 13.9 min in normal operation (n=25, mean 16.9, max ~46 min) — 0.4 min in burst mode (n=100), where workers stage the work before claiming.
 
 <img src="images/pilot-task.png" width="720" alt="A kraken task issue timeline: claim comment, assumptions, draft PR link, result comment, and close">
 
