@@ -15,6 +15,9 @@
 #   issues/<n>/blocked_by  one blocker issue number per line (optional;
 #                          absent = no native blockers, i.e. the real API's [])
 #   issues/<n>/comments/NNNN.md   bodies, NNNN = server order
+#   issues/<n>/comments/NNNN.at   optional ISO timestamp for that comment
+#                          (absent = derived from the issue's createdAt); the
+#                          reaper reads comment createdAt to anchor staleness
 #   log                    every invocation, one per line
 #
 # Knobs:
@@ -72,7 +75,7 @@ while [ $# -gt 0 ]; do
     --title)        title="$2"; shift 2 ;;
     --head)         head="$2"; shift 2 ;;
     --base)         base="$2"; shift 2 ;;
-    --draft)        draft=1; shift ;;
+    --draft | -d)   draft=1; shift ;;
     --body)         body="$2"; shift 2 ;;
     --body-file)    body="$(cat "$2")"; shift 2 ;;
     --limit)        limit="$2"; shift 2 ;;
@@ -82,30 +85,57 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-issue_json() { # $1 = issue dir; emit {number,title,createdAt,labels:[{name}]}
+comments_json() { # $1 = issue dir; emit [{body, createdAt}] in server order.
+  # A comment's createdAt comes from its .at sidecar when present, else it is
+  # derived from the issue's createdAt so ordering stays stable — the reaper
+  # anchors staleness to the newest worker machine line's createdAt.
+  local d="$1" f at bodies="" created
+  created="$(cat "$d/createdAt")"
+  for f in "$d"/comments/*.md; do
+    [ -f "$f" ] || continue
+    if [ -f "${f%.md}.at" ]; then
+      at="$(cat "${f%.md}.at")"
+    else
+      at="$created"
+    fi
+    bodies="${bodies}$(jq -Rs --arg at "$at" '{body: ., createdAt: $at}' < "$f")"
+  done
+  printf '%s' "$bodies" | jq -s .
+}
+
+issue_json() { # $1 = issue dir; emit {number,title,createdAt,updatedAt,labels:[{name}],comments}
   # One jq per issue (not four): the list case builds a whole queue, so a
   # tighter fork budget here is what keeps large-queue cases (tests/t/14)
   # from dominating the suite. Files are read straight into jq via --rawfile.
-  local d="$1"
+  # updatedAt is the newest comment createdAt (or the issue createdAt when no
+  # comment exists), so a list caller reading .updatedAt sees a plausible value.
+  local d="$1" comments
+  comments="$(comments_json "$d")"
   jq -n \
     --arg n "$(basename "$d")" \
     --rawfile title "$d/title" \
     --rawfile created "$d/createdAt" \
+    --argjson comments "$comments" \
     --rawfile labels "$d/labels" \
     '{
        number: ($n | tonumber),
        title: ($title | rtrimstr("\n")),
        createdAt: ($created | rtrimstr("\n")),
-       labels: ($labels | rtrimstr("\n") | split("\n") | map(select(. != "") | {name: .}))
+       updatedAt: ([$comments[].createdAt] + [($created | rtrimstr("\n"))] | max),
+       labels: ($labels | rtrimstr("\n") | split("\n") | map(select(. != "") | {name: .})),
+       comments: $comments
      }'
 }
 
 emit() { # $1 = JSON; apply --jq like gh does (raw strings, like jq -r)
-  if [ -n "$jqexpr" ]; then
+  # Strip CR: real gh (and Linux CI's jq) emit LF, but jq's Windows build writes
+  # CRLF, and a trailing \r poisons a consumer that reads a timestamp/number off
+  # a line (the reaper's `date -d "$anchor"`). Harmless on LF-only output.
+  { if [ -n "$jqexpr" ]; then
     printf '%s' "$1" | jq -r "$jqexpr"
   else
     printf '%s\n' "$1"
-  fi
+  fi ; } | tr -d '\r'
 }
 
 case "$sub" in
@@ -188,7 +218,7 @@ case "$sub" in
     d="$STATE/issues/$issue"
     [ -d "$d" ] || { echo "gh-stub: no such issue $issue" >&2; exit 1; }
     lock
-    n=$(( $(ls "$d/comments" | wc -l) + 1 ))
+    n=$(( $(ls "$d/comments"/*.md 2>/dev/null | wc -l) + 1 ))
     printf '%s\n' "$body" > "$d/comments/.tmp.$$"
     mv "$d/comments/.tmp.$$" "$d/comments/$(printf '%04d' "$n").md"
     unlock

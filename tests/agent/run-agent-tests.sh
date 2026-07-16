@@ -24,6 +24,22 @@ AGENT_DIR="$ROOT/tests/agent"
 
 # --- preflight: skip cleanly when the harness cannot run for real -------------
 skip() { echo "agent-conformance: SKIP ($1)"; exit 0; }
+
+# Bail early on native Windows (Git Bash / MSYS / Cygwin). The harness relies on
+# the gh-stub shadowing the real `gh` through PATH so the nested `claude -p`
+# judges against the seeded queue, not GitHub. On Windows that shadowing is
+# unreliable — the agent's tool shell can resolve `gh` to the real, logged-in
+# CLI (an extensionless stub does not reliably beat `gh.exe`), so scenarios fail
+# for environment reasons, not skill ones. Run it under WSL or Linux instead.
+case "$(uname -s 2>/dev/null)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "agent-conformance: SKIP (native Windows — the gh-stub cannot reliably shadow the real gh here)"
+    echo "  Run this harness under WSL or Linux, where the stub wins on PATH:"
+    echo "    wsl  # then, in the repo:  make test-agent"
+    exit 0
+    ;;
+esac
+
 command -v jq  >/dev/null 2>&1 || skip "jq not found"
 command -v git >/dev/null 2>&1 || skip "git not found"
 command -v claude >/dev/null 2>&1 || skip "claude CLI not on PATH"

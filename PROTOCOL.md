@@ -173,10 +173,17 @@ network failure — re-check first).
   the `heartbeat:` machine line) at least every **2 hours** while executing.
 - The coordination repo runs the **reaper**
   ([`skills/unleash/reclaim-stale.yml`](skills/unleash/reclaim-stale.yml)):
-  any `in-progress` issue with no activity for **6 hours** (`MAX_HOURS`,
-  configurable) is moved to `needs-decision` with a `stale-claim:` comment
-  for the operator to triage. Any issue activity resets the clock; the
-  heartbeat exists to keep a live worker's claim alive.
+  any `in-progress` issue whose worker has been silent for **6 hours**
+  (`MAX_HOURS`, configurable) is moved to `needs-decision` with a
+  `stale-claim:` comment for the operator to triage. Staleness is anchored to
+  the worker's **last machine line** — the most recent `claimed-by:` /
+  `heartbeat:` comment — **not** the issue's `updatedAt`. Operator comments
+  and other activity do **not** reset the clock: a human commenting on a dead
+  worker's issue must shorten time-to-triage, not extend the claim's life by
+  another `MAX_HOURS`. Only the worker's own `heartbeat:` keeps a live claim
+  alive. An `in-progress` issue with no `claimed-by:`/`heartbeat:` line at all
+  is treated as infinitely stale and reclaimed. (`delivered:` / `released:`
+  already remove `in-progress`, so they never anchor a still-held claim.)
 
 ## 7. Escalation
 

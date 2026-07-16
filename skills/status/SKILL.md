@@ -53,8 +53,11 @@ whole queue (group by `project:` label when it clarifies the picture).
 
 4. **In flight (`in-progress`).** For each, print number, title, the worker name (from
    the `claimed-by: <worker-name>` comment), and the **heartbeat age** — time since the
-   issue's most recent comment. A large age is a worker that may have died (the reaper
-   moves silent `in-progress` issues to `needs-decision` after 6h).
+   worker's last machine line, i.e. the most recent comment whose body has a
+   `^claimed-by:` or `^heartbeat:` line, **not** the last comment by anyone. Operator
+   comments do not count: they must not make a dead worker look alive. A large age is a
+   worker that may have died (the reaper anchors staleness to that same last machine line
+   and moves silent `in-progress` issues to `needs-decision` after 6h).
 
 5. **Possible-orphan flag (cheap heuristic, flag-only).** For each `awaiting-merge`
    issue, parse the PR URL from its result comment and check the PR's state:

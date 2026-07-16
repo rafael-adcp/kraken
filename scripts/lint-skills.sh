@@ -70,7 +70,11 @@ check_label "stale-claim:"    "$PROTOCOL" "$REAPER" "$CLAIM"
 echo "[1c] attribution disclaimer consistency"
 fail_before=$fail
 canon_disclaimer() {
-  grep -m1 -o '> 🐙 .*' "$1" | sed -e 's/\\`/`/g' -e 's/${WORKER}/<worker-name>/g' -e 's/\r$//'
+  # LC_ALL=C: GNU grep 3.1 (Git Bash's build) won't match the astral-plane 🐙
+  # (U+1F419) under a UTF-8 locale, so a local run false-fails "no disclaimer
+  # found" on prose that has it. The disclaimer is a fixed byte string, so
+  # bytewise matching is exact (and matches how CI's newer grep behaves).
+  LC_ALL=C grep -m1 -o '> 🐙 .*' "$1" | sed -e 's/\\`/`/g' -e 's/${WORKER}/<worker-name>/g' -e 's/\r$//'
 }
 ref="$(canon_disclaimer "$SKILL")"
 if [ -z "$ref" ]; then
