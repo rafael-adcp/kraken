@@ -34,8 +34,10 @@ assert_eq "$snapshot" "2:startable" "closing the blocker flips the candidate to 
 startable_count="$(printf '%s\n' "$snapshot" | grep -c ':startable$')" || true
 assert_eq "$startable_count" "1" "once the blocker closes, the snapshot has exactly the newly-clear task startable"
 
-# watch-queue.sh's own gate is textually verifiable too: it must not carry
-# the false-alarm re-emission timer this task removed.
-grep -q 'REMIND_SECONDS' "$SCRIPTS/watch-queue.sh" && fail "watch-queue.sh must not retain the 30-min re-emission safety net"
-grep -q 'count.*-gt 0.*snapshot.*!=.*prev' "$SCRIPTS/watch-queue.sh" \
-  || fail "watch-queue.sh must gate emission on count>0 AND snapshot changed, nothing else"
+# The watch gate is textually verifiable too. `watch` now lives in kraken.py
+# (the watch-queue.sh shim just execs it), so assert against the module: it must
+# not carry the false-alarm re-emission timer this task removed, and it must
+# gate emission on count>0 AND the snapshot changing — nothing else.
+grep -q 'REMIND_SECONDS' "$SCRIPTS/kraken.py" && fail "kraken.py watch must not retain the 30-min re-emission safety net"
+grep -q 'count > 0 and snapshot != prev' "$SCRIPTS/kraken.py" \
+  || fail "kraken.py watch must gate emission on count>0 AND snapshot changed, nothing else"

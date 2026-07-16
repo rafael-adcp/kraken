@@ -165,6 +165,7 @@ case "$sub" in
   view)
     d="$STATE/issues/$issue"
     [ -d "$d" ] || { echo "gh-stub: no such issue $issue" >&2; exit 1; }
+    labels_src="$d/labels"
     if [ "$jsonf" = "labels" ] && [ -n "${GH_STUB_BARRIER:-}" ]; then
       mkdir -p "$STATE/.barrier"
       : > "$STATE/.barrier/$$"
@@ -172,12 +173,28 @@ case "$sub" in
       while [ "$(ls "$STATE/.barrier" | wc -l)" -lt "$GH_STUB_BARRIER" ]; do
         sleep 0.05
         i=$((i + 1))
-        [ "$i" -gt 100 ] && break # a stuck partner must not hang the suite
+        # A stuck partner must not hang the suite. The ceiling is generous (~30s)
+        # so a cold-started worker — kraken.py's interpreter warm-up is slower
+        # than a bash script's, especially on a network/overlay filesystem — is
+        # never mistaken for a stuck one, which would break the race's pairing.
+        [ "$i" -gt 600 ] && break
       done
+      # All racers have arrived. The barrier only guaranteed simultaneous
+      # ARRIVAL, not a simultaneous read: whoever's guard-gh returns first lets
+      # its worker add `in-progress` before a slower racer's read runs, and that
+      # racer would then wrongly see a held task and skip (exit 11) instead of
+      # racing the claim. So the first arriver snapshots the labels under the
+      # lock, and every racer reads that pre-race snapshot — so all guards see
+      # the identical clear state the race is meant to test, no matter how the
+      # worker interpreters are scheduled.
+      lock
+      [ -f "$STATE/.barrier/labels.snap" ] || cp "$d/labels" "$STATE/.barrier/labels.snap"
+      unlock
+      labels_src="$STATE/.barrier/labels.snap"
     fi
     case "$jsonf" in
       labels)
-        emit "$(jq -n --argjson labels "$(jq -R '{name: .}' < "$d/labels" | jq -s .)" '{labels: $labels}')"
+        emit "$(jq -n --argjson labels "$(jq -R '{name: .}' < "$labels_src" | jq -s .)" '{labels: $labels}')"
         ;;
       body)
         emit "$(jq -n --arg body "$([ -f "$d/body" ] && cat "$d/body" || true)" '{body: $body}')"
@@ -225,9 +242,24 @@ case "$sub" in
     ;;
 
   api)
-    # Only the shape list-startable.sh needs:
+    # The shapes the transitions need:
     #   repos/OWNER/REPO/issues/N/dependencies/blocked_by -> [{number,state}]
+    #   repos/OWNER/REPO/issues/N/comments               -> [{body}]  (paginated
+    #     claim-window arbitration; --paginate is a no-op here — the whole thread
+    #     is returned in one array, in server order, which is all kraken.py's
+    #     line scan needs).
     case "$endpoint" in
+      */issues/*/comments)
+        n="$(printf '%s' "$endpoint" | sed -n 's#.*/issues/\([0-9][0-9]*\)/comments#\1#p')"
+        d="$STATE/issues/$n"
+        [ -d "$d" ] || { echo "gh-stub: no such issue $n" >&2; exit 1; }
+        bodies=""
+        for f in "$d"/comments/*.md; do
+          [ -f "$f" ] || continue
+          bodies="${bodies}$(jq -Rs '{body: .}' < "$f")"
+        done
+        emit "$(printf '%s' "$bodies" | jq -s .)"
+        ;;
       */issues/*/dependencies/blocked_by)
         n="$(printf '%s' "$endpoint" | sed -n 's#.*/issues/\([0-9][0-9]*\)/dependencies/blocked_by#\1#p')"
         d="$STATE/issues/$n"

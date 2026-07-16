@@ -76,32 +76,35 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
 
 ## Bundled transition scripts
 
-The queue's state transitions are executed by small scripts shipped in this skill's
-folder, next to this SKILL.md. You decide **what** (which task to take, what to
-report); they execute **how** — the exact label/comment dance, identically every
+The queue's state transitions are executed by `kraken.py`, one stdlib-only
+program shipped in this skill's folder, next to this SKILL.md. It exposes a
+subcommand per transition. You decide **what** (which task to take, what to
+report); it executes **how** — the exact label/comment dance, identically every
 time:
 
-| Script | Does |
+| Command | Does |
 | --- | --- |
-| `list-startable.sh OWNER/tasks <project>` | (read-only) startable candidates, oldest first |
-| `claim.sh OWNER/tasks <issue> <worker-name>` | queued → `in-progress`: guard, label, claim comment, tiebreaker |
-| `heartbeat.sh OWNER/tasks <issue> <worker-name> "<progress>"` | liveness comment — keeps the reaper away, resets nothing |
-| `escalate.sh OWNER/tasks <issue> <worker-name> <question-file>` | `in-progress` → `needs-decision`: question posted, labels swapped |
-| `deliver.sh OWNER/tasks <issue> <worker-name> <result-file> [pr-url]` | `in-progress` → `awaiting-merge`: result posted, labels swapped |
-| `release.sh OWNER/tasks <issue> <worker-name> [reason]` | `in-progress` → queued, honestly (`released:` closes the claim window) |
+| `kraken.py list-startable OWNER/tasks <project>` | (read-only) startable candidates, oldest first |
+| `kraken.py claim OWNER/tasks <issue> <worker-name>` | queued → `in-progress`: guard, label, claim comment, tiebreaker |
+| `kraken.py heartbeat OWNER/tasks <issue> <worker-name> "<progress>"` | liveness comment — keeps the reaper away, resets nothing |
+| `kraken.py escalate OWNER/tasks <issue> <worker-name> <question-file>` | `in-progress` → `needs-decision`: question posted, labels swapped |
+| `kraken.py deliver OWNER/tasks <issue> <worker-name> <result-file> [pr-url]` | `in-progress` → `awaiting-merge`: result posted, labels swapped |
+| `kraken.py release OWNER/tasks <issue> <worker-name> [reason]` | `in-progress` → queued, honestly (`released:` closes the claim window) |
 
-- Run them with `bash "<this skill's folder>/<script>"`. Do **not** inline rewritten
-  `gh` commands for a transition a script covers — the bundled scripts are versioned
-  with the plugin, and a hand-rolled variant is exactly the drift they exist to
-  prevent.
-- **Branch on their exit codes** — each script documents its own; `20` always means
-  gh/network failure with the write possibly half-landed: re-check the issue's real
-  state before retrying, and never move on while a claim is ambiguous.
-- They compose the attribution disclaimer and the machine-readable lines
+- Run it with `python3 "<this skill's folder>/kraken.py" <subcommand> …` (the
+  historical `<name>.sh` shims still work — they just `exec` into it). Do **not**
+  inline rewritten `gh` commands for a transition a subcommand covers — `kraken.py`
+  is versioned with the plugin, and a hand-rolled variant is exactly the drift it
+  exists to prevent.
+- **Branch on its exit codes** — each subcommand documents its own; `20` always
+  means gh/network failure with the write possibly half-landed: re-check the
+  issue's real state before retrying, and never move on while a claim is
+  ambiguous.
+- It composes the attribution disclaimer and the machine-readable lines
   (`claimed-by:`, `heartbeat:`, `needs-decision:`, `delivered:`, `released:`)
-  themselves — never hand-write those. The escalation question and the result
+  itself — never hand-write those. The escalation question and the result
   comment stay yours to write: put the body in a file and hand the file to the
-  script.
+  subcommand.
 
 ## Protocol
 
@@ -113,7 +116,7 @@ time:
    oldest first, one `<number> <title>` per line:
 
    ```
-   bash "<this skill's folder>/list-startable.sh" OWNER/tasks <name>
+   python3 "<this skill's folder>/kraken.py" list-startable OWNER/tasks <name>
    ```
 
    Pass `<name>` bare — the script prepends the `project:` prefix itself. No
@@ -122,11 +125,11 @@ time:
 2. **Trust the lister.** Every line it prints is startable — labels checked,
    blocked-by relationships checked, server-side. There is nothing left to
    re-verify before claiming; the whole "is this really unblocked" judgment
-   lives in `list-startable.sh` (`PROTOCOL.md` §3), not here.
+   lives in `kraken.py list-startable` (`PROTOCOL.md` §3), not here.
 3. **Claim** with the bundled claimer:
 
    ```
-   bash "<this skill's folder>/claim.sh" OWNER/tasks <issue> <worker-name>
+   python3 "<this skill's folder>/kraken.py" claim OWNER/tasks <issue> <worker-name>
    ```
 
    The whole contended sequence — held-label guard (never stack a state label),
@@ -154,7 +157,7 @@ time:
    `needs-decision` / `failed`), PR URL, and one line. Still **one task at a time**
    — the subagent is for context isolation, never for parallelism. If it errors out,
    leave the task labeled honestly — either keep it `in-progress` for triage or hand
-   it back with `release.sh` (which posts the `released:` line that closes the claim
+   it back with `kraken.py release` (which posts the `released:` line that closes the claim
    window; never just strip the label) — and continue the loop.
 
    Inside the subagent:
@@ -164,7 +167,7 @@ time:
       your recommendation) to a file and run
 
       ```
-      bash "<this skill's folder>/escalate.sh" OWNER/tasks <issue> <worker-name> <question-file>
+      python3 "<this skill's folder>/kraken.py" escalate OWNER/tasks <issue> <worker-name> <question-file>
       ```
 
       (it posts the `needs-decision:` comment and swaps the labels), then return
@@ -176,7 +179,7 @@ time:
       **heartbeat** at least every ~2 hours:
 
       ```
-      bash "<this skill's folder>/heartbeat.sh" OWNER/tasks <issue> <worker-name> "<one line of progress>"
+      python3 "<this skill's folder>/kraken.py" heartbeat OWNER/tasks <issue> <worker-name> "<one line of progress>"
       ```
 
       The coordination repo's reaper workflow moves silent `in-progress` issues to
@@ -188,7 +191,7 @@ time:
       how it was validated, links to the draft PR/commits) to a file and run
 
       ```
-      bash "<this skill's folder>/deliver.sh" OWNER/tasks <issue> <worker-name> <result-file> <pr-url>
+      python3 "<this skill's folder>/kraken.py" deliver OWNER/tasks <issue> <worker-name> <result-file> <pr-url>
       ```
 
       It posts the result with the `delivered:` line and **swaps `in-progress` for
@@ -205,14 +208,14 @@ time:
    end the turn. Otherwise, continue to step 6.
 
 6. **Arm the watcher and go quiet.** Use the **Monitor tool** — `persistent: true`,
-   running this skill's bundled `watch-queue.sh` (it lives in the same folder as this
+   running this skill's bundled `kraken.py watch` (it lives in the same folder as this
    SKILL.md; if the Monitor tool is not in your tool list, load it first — some
    harnesses defer tool schemas). Skip this if a watcher from a previous drain is
    already armed — one per worker, never two:
 
    ```
    Monitor(
-     command:     bash "<this skill's folder>/watch-queue.sh" OWNER/tasks <name>
+     command:     python3 "<this skill's folder>/kraken.py" watch OWNER/tasks <name>
      description: kraken queue: project:<name> for <alias>
      persistent:  true
    )
@@ -221,7 +224,7 @@ time:
    Pass `<name>` bare — the script prepends the `project:` prefix itself. It polls
    every 60s with a free `gh` call and prints one `kraken-queue:` line only when the
    queue snapshot changes and at least one task is startable (it delegates the filter
-   to `list-startable.sh` — literally the same file as step 1) — an idle queue never
+   to `kraken.py list-startable` — literally the same subcommand as step 1) — an idle queue never
    invokes the model. Do not inline a rewritten
    script — the bundled one is versioned with the plugin. Cannot arm it (no Monitor
    tool, script missing)? Say so, offer `/loop /kraken:unleash ... --once` as the

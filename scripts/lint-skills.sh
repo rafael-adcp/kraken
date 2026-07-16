@@ -16,13 +16,18 @@ README="README.md"
 PROTOCOL="PROTOCOL.md"
 TEMPLATE="skills/unleash/task-template.yml"
 REAPER="skills/unleash/reclaim-stale.yml"
-WATCHER="skills/unleash/watch-queue.sh" # label filter delegated to $LISTER
-LISTER="skills/unleash/list-startable.sh"
-CLAIM="skills/unleash/claim.sh"
-RELEASE="skills/unleash/release.sh"
-ESCALATE="skills/unleash/escalate.sh"
-DELIVER="skills/unleash/deliver.sh"
-HEARTBEAT="skills/unleash/heartbeat.sh" # comments only — touches no labels
+# The seven transition scripts were consolidated into one stdlib-only program;
+# the *.sh files are now thin shims that exec into it. Every label / machine-line
+# / disclaimer emitter therefore lives in kraken.py, so all the per-emitter
+# checks below resolve to that single module.
+KRAKEN="skills/unleash/kraken.py"
+WATCHER="$KRAKEN" # label filter delegated to $LISTER
+LISTER="$KRAKEN"
+CLAIM="$KRAKEN"
+RELEASE="$KRAKEN"
+ESCALATE="$KRAKEN"
+DELIVER="$KRAKEN"
+HEARTBEAT="$KRAKEN" # comments only — touches no labels
 
 fail=0
 err() { printf '  \033[31mx\033[0m %s\n' "$1"; fail=$((fail+1)); } # count, so per-section fail_before diffs stay accurate
@@ -64,9 +69,9 @@ check_label "stale-claim:"    "$PROTOCOL" "$REAPER" "$CLAIM"
 [ "$fail" -eq "$fail_before" ] && note "6 machine lines aligned across spec, skill, and emitters"
 
 # --- 1c. Attribution disclaimer: byte-identical everywhere -------------------
-# The blockquote is hard-coded in every emitting script (self-contained by
-# design, no lib.sh) plus the skill and the spec. Normalize the script form
-# (\` escapes, ${WORKER}) to the doc form and require equality.
+# The blockquote is defined once in kraken.py (the single emitter) plus the
+# skill and the spec. Normalize the code form (the {worker} placeholder, a
+# trailing string-literal quote) to the doc form and require equality.
 echo "[1c] attribution disclaimer consistency"
 fail_before=$fail
 canon_disclaimer() {
@@ -74,7 +79,9 @@ canon_disclaimer() {
   # (U+1F419) under a UTF-8 locale, so a local run false-fails "no disclaimer
   # found" on prose that has it. The disclaimer is a fixed byte string, so
   # bytewise matching is exact (and matches how CI's newer grep behaves).
-  LC_ALL=C grep -m1 -o '> 🐙 .*' "$1" | sed -e 's/\\`/`/g' -e 's/${WORKER}/<worker-name>/g' -e 's/\r$//'
+  LC_ALL=C grep -m1 -o '> 🐙 .*' "$1" \
+    | sed -e 's/\\`/`/g' -e 's/${WORKER}/<worker-name>/g' \
+          -e 's/{worker}/<worker-name>/g' -e 's/"$//' -e 's/\r$//'
 }
 ref="$(canon_disclaimer "$SKILL")"
 if [ -z "$ref" ]; then
@@ -84,15 +91,15 @@ else
     [ "$(canon_disclaimer "$f")" = "$ref" ] || err "attribution disclaimer drift in $f"
   done
 fi
-[ "$fail" -eq "$fail_before" ] && note "disclaimer identical across skill, spec, and 5 emitting scripts"
+[ "$fail" -eq "$fail_before" ] && note "disclaimer identical across skill, spec, and kraken.py"
 
 # --- 1d. Claim-window resets: code never ahead of the spec -------------------
-# Every keyword claim.sh treats as a window reset must appear as a machine line
+# Every keyword kraken.py treats as a window reset must appear as a machine line
 # in PROTOCOL.md's table. Catches the dangerous drift direction: a new reset
 # added to the implementation without the contract learning about it.
-echo "[1d] claim-window reset keywords (claim.sh vs PROTOCOL.md)"
+echo "[1d] claim-window reset keywords (kraken.py vs PROTOCOL.md)"
 fail_before=$fail
-reset_line="$(grep -E 'released:\*' "$CLAIM")"
+reset_line="$(grep -E 'WINDOW_RESET_PREFIXES *=' "$CLAIM")"
 resets="$(printf '%s' "$reset_line" | grep -oE '[a-z-]+:')"
 if [ -z "$resets" ]; then
   err "could not extract the reset case pattern from $CLAIM"
@@ -100,7 +107,7 @@ else
   n=0
   for kw in $resets; do
     n=$((n+1))
-    grep -qF -- "\`${kw}" "$PROTOCOL" || err "claim-window reset '$kw' in claim.sh missing from PROTOCOL.md"
+    grep -qF -- "\`${kw}" "$PROTOCOL" || err "claim-window reset '$kw' in kraken.py missing from PROTOCOL.md"
   done
 fi
 [ "$fail" -eq "$fail_before" ] && note "$n reset keyword(s) in claim.sh all specified in PROTOCOL.md"
@@ -154,6 +161,12 @@ for sh in scripts/*.sh skills/*/*.sh tests/*.sh tests/t/*.sh tests/gh-stub/gh; d
   [ -f "$sh" ] || continue
   bash -n "$sh" 2>/dev/null || err "$sh has a bash syntax error"
 done
+if command -v python3 >/dev/null 2>&1; then
+  for py in skills/*/*.py tests/unit/*.py; do
+    [ -f "$py" ] || continue
+    python3 -m py_compile "$py" 2>/dev/null || err "$py has a python syntax error"
+  done
+fi
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
   for y in "$TEMPLATE" "$REAPER" .github/workflows/*.yml; do
     [ -f "$y" ] || continue

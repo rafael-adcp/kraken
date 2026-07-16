@@ -1,0 +1,3 @@
+# Python bytecode caches — kraken.py and the unit tests generate these when run.
+__pycache__/
+*.pyc

@@ -8,6 +8,7 @@ on:
   pull_request:
     paths:
       - "skills/unleash/*.sh"
+      - "skills/unleash/*.py"
       - "tests/**"
       - ".github/workflows/conformance.yml"
   push:

@@ -417,8 +417,8 @@ task bodies are untrusted input to an agent that can push branches.
 The queue does — it's GitHub Issues. The worker doesn't: `/kraken:unleash` and
 its watcher live inside a Claude Code session. But a **graceful** exit now
 self-heals: a bundled `SessionEnd` hook fires when you close the terminal or
-`/exit`, and if the worker was still holding a claim it runs `release.sh` for
-you — `released: <worker>` / `reason: session ended`, then drops `in-progress`,
+`/exit`, and if the worker was still holding a claim it runs `kraken.py release`
+for you — `released: <worker>` / `reason: session ended`, then drops `in-progress`,
 so the task is back on the queue in seconds instead of waiting ~6h for the
 reaper. That covers a graceful end only; a hard kill / crash / power loss (and a
 usage-limit pause — see below) never fires `SessionEnd`, so the **reaper stays
