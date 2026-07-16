@@ -101,19 +101,18 @@ contribution — the queue is the front door, and a named worker may pick it up.
 
 ## Releasing (maintainers)
 
-Releasing is a two-step, PR-gated flow — `main` is protected, so nothing
-publishes without a merge:
+Releasing is a PR-gated flow — `main` is protected, so nothing publishes
+without a merge:
 
-1. **Update the changelog.** Before cutting a release, move the accumulated
-   entries under `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md) into a new
-   versioned heading (`## [X.Y.Z] - YYYY-MM-DD`) and add the matching compare
-   link at the bottom. Call out protocol-affecting changes explicitly (e.g.
-   "implements kraken-protocol/1"), because the `kraken@<version>` commit
-   trailer maps back to a protocol revision through this file.
-2. **Cut the release.** Run **Actions → Release → Run workflow** and pick the
+1. **Cut the release.** Run **Actions → Release → Run workflow** and pick the
    bump type (patch / minor / major). That opens a `release/vX.Y.Z` PR bumping
    `.claude-plugin/plugin.json`. Merging it (the human approval) triggers
-   `tag-release.yml`, which tags and publishes the GitHub Release.
+   `tag-release.yml`, which tags and publishes the [GitHub
+   Release](https://github.com/rafael-adcp/kraken/releases) with notes
+   auto-generated from the PRs merged since the last tag.
 
-Keep the changelog step and the version bump in lockstep so the two never
-drift.
+What changed between versions lives entirely in the GitHub Releases — there is
+no hand-maintained changelog file. Because release notes come from PR titles,
+write clear, descriptive PR titles, and call out protocol-affecting changes
+explicitly (e.g. "implements kraken-protocol/1") so the `kraken@<version>`
+commit trailer stays traceable to a protocol revision.
