@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# claim.sh on a clear task: exit 0, in-progress added, disclaimer + claimed-by posted.
+# kraken.py claim on a clear task: exit 0, in-progress added, disclaimer + claimed-by posted.
 . "$ROOT/tests/lib.sh"
 
 mk_issue 7 "a task" kraken-task "project:app"
 
-out="$(bash "$SCRIPTS/claim.sh" OWNER/tasks 7 w1)"
+out="$(python3 "$SCRIPTS/kraken.py" claim OWNER/tasks 7 w1)"
 assert_rc $? 0 "clean claim exit"
 assert_eq "$out" "claim: claimed issue=7 worker=w1" "machine line"
 

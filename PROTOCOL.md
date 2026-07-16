@@ -281,18 +281,22 @@ improvisation.
 
 ## 12. Conformance
 
-The **reference implementation** of the worker side is the bundled transition
-scripts in [`skills/unleash/`](skills/unleash/) — `list-startable.sh`,
-`claim.sh`, `heartbeat.sh`, `escalate.sh`, `deliver.sh`, `release.sh` — driven
-by a Claude Code skill ([`skills/unleash/SKILL.md`](skills/unleash/SKILL.md))
-that supplies the judgment between transitions.
+The **reference implementation** of the worker side is
+[`skills/unleash/kraken.py`](skills/unleash/kraken.py) — one stdlib-only program
+with a subcommand per transition (`list-startable`, `claim`, `heartbeat`,
+`escalate`, `deliver`, `release`, `watch`), driven by a Claude Code skill
+([`skills/unleash/SKILL.md`](skills/unleash/SKILL.md)) that supplies the
+judgment between transitions. `gh` remains the transport, so it runs against any
+authenticated `gh`.
 
 The **conformance suite** in [`tests/`](tests/) exercises the contract's
 invariants against a stateful GitHub stub — the claim guard, the claim race
 (exactly one winner), claim-window arbitration including the review-bounce
-reset, honest release, and failure staging. A third-party implementation MAY
-validate itself by pointing the suite's stub at its own transition
-executables; matching the reference scripts' exit-code contract
+reset, honest release, and failure staging — plus `kraken.py` unit tests
+([`tests/unit/`](tests/unit/)) that cover the arbitration grammar, machine-line
+parsing, and comment pagination past 100 in isolation. A third-party
+implementation MAY validate itself by pointing the suite's stub at its own
+transition executables; matching `kraken.py`'s exit-code contract
 (`0` success / `10` lost tiebreaker / `11` no longer clear / `20` transport
 failure) is RECOMMENDED but the wire contract — labels, machine lines,
 ordering — is what conformance means.

@@ -130,7 +130,7 @@ The coordination contract — task shape, state machine, machine-readable commen
 lines, the claim algorithm — is normatively specified in
 [`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/1`); it is agent-agnostic, so any
 tool that follows it can be a tentacle on the same queue. How a Claude Code worker
-executes it — subagents, the watcher, the bundled transition scripts — lives in
+executes it — subagents, the watcher, the bundled transition program — lives in
 [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md).
 
 ## The full walkthrough
@@ -417,8 +417,8 @@ task bodies are untrusted input to an agent that can push branches.
 The queue does — it's GitHub Issues. The worker doesn't: `/kraken:unleash` and
 its watcher live inside a Claude Code session. But a **graceful** exit now
 self-heals: a bundled `SessionEnd` hook fires when you close the terminal or
-`/exit`, and if the worker was still holding a claim it runs `release.sh` for
-you — `released: <worker>` / `reason: session ended`, then drops `in-progress`,
+`/exit`, and if the worker was still holding a claim it runs `kraken.py release`
+for you — `released: <worker>` / `reason: session ended`, then drops `in-progress`,
 so the task is back on the queue in seconds instead of waiting ~6h for the
 reaper. That covers a graceful end only; a hard kill / crash / power loss (and a
 usage-limit pause — see below) never fires `SessionEnd`, so the **reaper stays
@@ -452,7 +452,7 @@ anywhere else.
 ## Contributing
 
 Kraken is a small, protocol-first tool. The spec ([`PROTOCOL.md`](PROTOCOL.md))
-wins on any disagreement, the skills are prompts, and the scripts are the
+wins on any disagreement, the skills are prompts, and `kraken.py` is the
 mechanics. Dev setup, PR conventions, the release flow, and where design
 discussion happens are all in [`CONTRIBUTING.md`](CONTRIBUTING.md); what changed
 between versions lives in the [GitHub
