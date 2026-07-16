@@ -20,6 +20,17 @@ behavior say so explicitly ("implements kraken-protocol/1").
 
 ### Added
 
+- `requeue-on-reply.yml` coordination-repo workflow (installed by `/kraken:init`):
+  an `issue_comment`-triggered requeue that collapses the operator's gesture from
+  "reply **and** remove the label" to just "reply". A comment lacking PROTOCOL.md
+  §4's 🐙 attribution disclaimer is treated as the operator, so `needs-decision`
+  is removed and the task requeues. No-op on worker comments (disclaimer present),
+  unheld issues, and bot/self comments (`user.type == Bot`, which keeps the
+  reaper's own `stale-claim:` comment from undoing its escalation).
+  `awaiting-merge` is handled conservatively — a delivered task requeues only on
+  an explicit `requeue:` line, never a bare comment. Proven end to end by
+  `tests/t/18-requeue-on-reply.sh`, which runs the shipped `run:` block verbatim
+  against the gh-stub (implements kraken-protocol/1 §6).
 - `SessionEnd` hook (`hooks/hooks.json` + `hooks/session-end-release.sh`): a
   worker that ends its Claude Code session *gracefully* while still holding a
   claim now auto-releases it (`released: <worker>` / `reason: session ended`,

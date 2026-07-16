@@ -1,0 +1,113 @@
+# Auto-requeue for kraken. Copy to .github/workflows/requeue-on-reply.yml in the
+# coordination repo (see SKILL.md).
+#
+# The operator's requeue gesture collapses from "reply AND remove the label" to
+# just "reply". Forgetting the label used to strip a task forever: answer a
+# needs-decision from your phone, forget the label, and the task never rejoins
+# the queue. This workflow watches new comments and, when a genuine OPERATOR
+# comment lands on a held task, removes the holding label so a worker requeues it.
+#
+# The human-vs-tentacle discriminator is PROTOCOL.md §4's attribution disclaimer:
+# every worker-posted comment MUST open with the `> 🐙 **Kraken worker ...`
+# blockquote, so a comment WITHOUT it is (by the protocol's own contract) a human.
+# The blockquote pattern below is kept byte-identical to the one the transition
+# scripts emit (skills/unleash/*.sh) and the test helper asserts
+# (tests/lib.sh assert_disclaimer) — a format drift there silently breaks this
+# filter, so the two MUST move together.
+#
+# Two held states, handled asymmetrically (see the issue's Notes):
+#   - needs-decision: a human comment is almost always the answer, so ANY bare
+#     operator comment requeues. Worst case ("let me think") self-corrects: the
+#     worker re-escalates.
+#   - awaiting-merge: the task is already DELIVERED. Requeuing on a bare comment
+#     ("I'll merge tomorrow") would bounce a ready branch back to a worker. So it
+#     is left held UNLESS the comment carries an explicit `requeue:` line.
+#
+# No-ops, all proven by tests/t/18-requeue-on-reply.sh:
+#   - worker comments (disclaimer present),
+#   - comments on issues carrying no held label,
+#   - bot/self comments (the reaper's stale-claim: comment, or this workflow's
+#     own confirmation comment) — user.type == Bot.
+#
+# Debounce is structural, not timed: removing the holding label is idempotent, so
+# a burst of N operator comments requeues once — the first drops the label and the
+# rest find nothing held. A per-issue concurrency group serializes the burst so
+# two racing runs don't both post a confirmation.
+name: Requeue on operator reply
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: requeue-on-reply-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  requeue:
+    # Coordination-repo task issues only; never PR comments; skip bots at the
+    # gate too (the run: block re-checks, so the stub test can prove the no-op).
+    if: >
+      github.event.issue.pull_request == null &&
+      github.event.comment.user.type != 'Bot' &&
+      contains(github.event.issue.labels.*.name, 'kraken-task')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      NUM: ${{ github.event.issue.number }}
+      # Pass the untrusted comment body through env, never inlined into the
+      # script — an inlined ${{ github.event.comment.body }} is a shell-injection
+      # vector (a comment could contain $(...) or backticks).
+      COMMENT_BODY: ${{ github.event.comment.body }}
+      COMMENT_AUTHOR_TYPE: ${{ github.event.comment.user.type }}
+    steps:
+      - name: Requeue the task if a genuine operator comment arrived
+        run: |
+          set -euo pipefail
+
+          # Self/bot comments (the reaper's stale-claim:, this workflow's own
+          # confirmation) never requeue — they carry no disclaimer but are not
+          # human. A human worker authenticating as the operator is caught by the
+          # disclaimer check below, not here (its token reads as a User).
+          if [ "${COMMENT_AUTHOR_TYPE:-}" = "Bot" ]; then
+            echo "requeue: bot/self comment on #$NUM — no-op"
+            exit 0
+          fi
+
+          # Worker comments open with PROTOCOL.md §4's attribution blockquote.
+          # LC_ALL=C matches the disclaimer's astral-plane 🐙 (U+1F419) bytewise —
+          # GNU grep 3.1 misses it under a UTF-8 locale (see tests/lib.sh) — and
+          # the pattern is name-agnostic (matches up to the worker-name backtick).
+          if printf '%s' "$COMMENT_BODY" | LC_ALL=C grep -q '^> 🐙 \*\*Kraken worker `'; then
+            echo "requeue: worker comment (disclaimer present) on #$NUM — no-op"
+            exit 0
+          fi
+
+          labels="$(gh issue view "$NUM" -R "$REPO" --json labels --jq '.labels[].name')"
+
+          # needs-decision: any bare operator comment is the answer — requeue.
+          if printf '%s\n' "$labels" | grep -qx 'needs-decision'; then
+            gh issue edit "$NUM" -R "$REPO" --remove-label needs-decision
+            gh issue comment "$NUM" -R "$REPO" \
+              --body "requeue: operator reply detected — needs-decision removed, the task rejoins the queue with its full thread as context."
+            echo "requeue: needs-decision removed on #$NUM"
+            exit 0
+          fi
+
+          # awaiting-merge: DELIVERED work — never requeue on a bare comment. Only
+          # an explicit `requeue:` line (its own line) bounces it back for rework.
+          if printf '%s\n' "$labels" | grep -qx 'awaiting-merge'; then
+            if printf '%s' "$COMMENT_BODY" | grep -qiE '^[[:space:]]*requeue:'; then
+              gh issue edit "$NUM" -R "$REPO" --remove-label awaiting-merge
+              gh issue comment "$NUM" -R "$REPO" \
+                --body "requeue: explicit \`requeue:\` on a delivered task — awaiting-merge removed, the worker continues on the existing branch."
+              echo "requeue: awaiting-merge removed on #$NUM (explicit requeue: keyword)"
+              exit 0
+            fi
+            echo "requeue: awaiting-merge on #$NUM left held (no explicit requeue: keyword) — no-op"
+            exit 0
+          fi
+
+          echo "requeue: #$NUM carries no held label — no-op"

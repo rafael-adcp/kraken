@@ -115,7 +115,7 @@ flowchart LR
     P -->|deliver — draft PR or analysis| M[awaiting-merge]
     P -->|blocking question| D[needs-decision]
     P -->|silent for 6h — the reaper| D
-    D -->|you answer + remove the label| Q
+    D -->|you reply — the requeue workflow drops the label| Q
     M -->|review asks changes + remove the label| Q
     M -->|PR merges — the task closes| E(((closed)))
 ```
@@ -264,8 +264,8 @@ everything else:
 | Queue a task                 | Open an issue from the task template + `project:<name>` label                  | ✅ web + mobile                   |
 | Chain tasks                  | `gh -R OWNER/tasks issue edit <n> --add-blocked-by <m>`                         | ✅ web — Relationships sidebar    |
 | See the queues               | `/kraken:status OWNER/tasks`                                                    | ✅ filter issues by label         |
-| Answer a decision            | Reply on the issue, then **remove `needs-decision`**                            | ✅ web + mobile                   |
-| Send work back after review  | Comment the feedback, then **remove `awaiting-merge`**                          | ✅ web + mobile                   |
+| Answer a decision            | **Reply on the issue** — the requeue workflow drops `needs-decision` for you   | ✅ web + mobile                   |
+| Send work back after review  | Comment the feedback, then **remove `awaiting-merge`** (or start a line `requeue:`) | ✅ web + mobile                   |
 | Land the work                | Merge the draft PR — its `Closes` line closes the task and unblocks dependents  | ✅ web + mobile                   |
 | Cancel a task                | Close the issue                                                                 | ✅ web + mobile                   |
 | Add capacity                 | Launch one more worker into one more prepared environment                       | ❌ a worker is a terminal session |
@@ -344,16 +344,24 @@ work repos, and a fan-out of named, audited workers. The honest side-by-side is
 <details>
 <summary><b>A task landed in <code>needs-decision</code> — what do I do?</b></summary>
 
-Reply on the issue ("option B, go") **and remove the label** — the task rejoins
-the queue, and whoever claims it inherits the full thread as context.
+Just **reply on the issue** ("option B, go"). The coordination repo's
+requeue-on-reply workflow sees a human comment (no 🐙 attribution disclaimer)
+and removes `needs-decision` for you, so the task rejoins the queue and whoever
+claims it inherits the full thread as context. Forgot nothing to remove — the
+old "reply *and* remove the label" gesture still works if you prefer, and
+removing the label by hand is always fine.
 
 </details>
 
 <details>
 <summary><b>A review asked for changes — how does the task go back?</b></summary>
 
-Same gesture: comment the feedback and remove `awaiting-merge`. The next claim
-continues on the existing branch with the whole discussion in hand.
+Comment the feedback and **remove `awaiting-merge`**. Unlike `needs-decision`, a
+bare comment does **not** auto-requeue a delivered task — bouncing an
+already-ready branch back on an "I'll merge tomorrow" would be worse than
+leaving it. To requeue by comment alone, start a line with `requeue:`; otherwise
+remove the label. The next claim continues on the existing branch with the whole
+discussion in hand.
 
 </details>
 

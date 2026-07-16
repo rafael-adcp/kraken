@@ -91,8 +91,9 @@ Legal transitions and who performs them:
 | `in-progress` → `needs-decision` | reaper | staleness (§6) |
 | `in-progress` → `awaiting-merge` | worker | delivery (§8) |
 | `in-progress` → queued | worker | release (§9) |
-| `needs-decision` → queued | operator | answer on the thread, then remove the label |
-| `awaiting-merge` → queued | operator | review feedback on the thread, then remove the label |
+| `needs-decision` → queued | operator | reply on the thread — the requeue workflow (§6) drops the label; or remove it by hand |
+| `needs-decision` → queued | requeue workflow | a non-tentacle comment arrives (§4 disclaimer absent) |
+| `awaiting-merge` → queued | operator | review feedback on the thread, then remove the label (a bare comment does NOT requeue — see §6) |
 | `awaiting-merge` → closed | merge | the PR's `Closes` reference (§8), or a manual close |
 
 Workers MUST NOT close task issues: "done" for a worker means *delivered for
@@ -184,6 +185,23 @@ network failure — re-check first).
   alive. An `in-progress` issue with no `claimed-by:`/`heartbeat:` line at all
   is treated as infinitely stale and reclaimed. (`delivered:` / `released:`
   already remove `in-progress`, so they never anchor a still-held claim.)
+- The coordination repo also runs the **requeue-on-reply** workflow
+  ([`skills/unleash/requeue-on-reply.yml`](skills/unleash/requeue-on-reply.yml)):
+  on a new comment, it removes the holding label so the task requeues — so the
+  operator's gesture collapses from "reply **and** remove the label" to just
+  "reply". The human-vs-tentacle discriminator is §4's attribution disclaimer:
+  a comment that does **not** open with the `> 🐙 **Kraken worker …`
+  blockquote is treated as the operator. It is a **no-op** on worker comments
+  (disclaimer present), on issues carrying no held label, and on bot/self
+  comments (`user.type == Bot`) — which is what keeps the reaper's own
+  `stale-claim:` comment from instantly undoing the escalation it just posted.
+  The two held states are handled asymmetrically: a bare operator comment
+  requeues **`needs-decision`** (a human comment is almost always the answer;
+  a "let me think" self-corrects via re-escalation), but **`awaiting-merge`**
+  is already *delivered* and is left held unless the comment carries an
+  explicit `requeue:` line — a bare comment there would bounce a ready branch
+  back to a worker. Requeuing is idempotent, so a burst of comments requeues
+  once (the first drops the label; the rest find nothing held).
 
 ## 7. Escalation
 
@@ -195,8 +213,9 @@ recommendation — with the `needs-decision: <worker>` machine line, then swap
 swap, so a half-executed escalation leaves the task held rather than
 re-claimable with a closed window.
 
-The operator answers on the thread and removes the label; the task requeues,
-and whoever claims it inherits the full thread as context.
+The operator answers on the thread; the requeue-on-reply workflow (§6) removes
+the label (or the operator removes it by hand), the task requeues, and whoever
+claims it inherits the full thread as context.
 
 ## 8. Delivery
 
