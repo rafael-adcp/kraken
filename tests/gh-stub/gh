@@ -75,7 +75,7 @@ while [ $# -gt 0 ]; do
     --title)        title="$2"; shift 2 ;;
     --head)         head="$2"; shift 2 ;;
     --base)         base="$2"; shift 2 ;;
-    --draft)        draft=1; shift ;;
+    --draft | -d)   draft=1; shift ;;
     --body)         body="$2"; shift 2 ;;
     --body-file)    body="$(cat "$2")"; shift 2 ;;
     --limit)        limit="$2"; shift 2 ;;
