@@ -7,7 +7,7 @@
 mk_issue 7 "long task" kraken-task "project:app" in-progress
 mk_comment 7 "claimed-by: w1"
 
-out="$(bash "$SCRIPTS/heartbeat.sh" OWNER/tasks 7 w1 "tests green, writing docs")"
+out="$(python3 "$SCRIPTS/kraken.py" heartbeat OWNER/tasks 7 w1 "tests green, writing docs")"
 assert_rc $? 0 "heartbeat exit"
 assert_eq "$out" "heartbeat: posted issue=7 worker=w1" "machine line"
 
@@ -20,6 +20,6 @@ grep -q 'issue edit' "$STATE/log" && fail "heartbeat ran an issue edit"
 
 # Window invariant: w1's claim still wins after its own heartbeat.
 echo "kraken-task" > "$STATE/issues/7/labels"; echo "project:app" >> "$STATE/issues/7/labels"
-out="$(bash "$SCRIPTS/claim.sh" OWNER/tasks 7 w2)"
+out="$(python3 "$SCRIPTS/kraken.py" claim OWNER/tasks 7 w2)"
 assert_rc $? 10 "claim against heartbeated window"
 assert_eq "$out" "claim: lost-tiebreaker issue=7 winner=w1" "heartbeat did not reset the window"

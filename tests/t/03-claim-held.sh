@@ -8,7 +8,7 @@ for held in in-progress needs-decision awaiting-merge; do
   n=$((n + 1))
   mk_issue "$n" "held by $held" kraken-task "project:app" "$held"
 
-  out="$(bash "$SCRIPTS/claim.sh" OWNER/tasks "$n" w1)"
+  out="$(python3 "$SCRIPTS/kraken.py" claim OWNER/tasks "$n" w1)"
   rc=$?
   assert_rc "$rc" 11 "claim on $held exit"
   assert_eq "$out" "claim: held issue=$n label=$held" "machine line for $held"

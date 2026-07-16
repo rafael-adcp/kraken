@@ -287,8 +287,7 @@ with a subcommand per transition (`list-startable`, `claim`, `heartbeat`,
 `escalate`, `deliver`, `release`, `watch`), driven by a Claude Code skill
 ([`skills/unleash/SKILL.md`](skills/unleash/SKILL.md)) that supplies the
 judgment between transitions. `gh` remains the transport, so it runs against any
-authenticated `gh`. The bundled `*.sh` files next to it are thin shims that
-`exec` into `kraken.py`, preserving the historical entry points.
+authenticated `gh`.
 
 The **conformance suite** in [`tests/`](tests/) exercises the contract's
 invariants against a stateful GitHub stub — the claim guard, the claim race

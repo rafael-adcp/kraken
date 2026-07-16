@@ -17,8 +17,8 @@ PROTOCOL="PROTOCOL.md"
 TEMPLATE="skills/unleash/task-template.yml"
 REAPER="skills/unleash/reclaim-stale.yml"
 # The seven transition scripts were consolidated into one stdlib-only program;
-# the *.sh files are now thin shims that exec into it. Every label / machine-line
-# / disclaimer emitter therefore lives in kraken.py, so all the per-emitter
+# kraken.py is the single stdlib-only transition program. Every label /
+# machine-line / disclaimer emitter lives in it, so all the per-emitter
 # checks below resolve to that single module.
 KRAKEN="skills/unleash/kraken.py"
 WATCHER="$KRAKEN" # label filter delegated to $LISTER
@@ -110,7 +110,7 @@ else
     grep -qF -- "\`${kw}" "$PROTOCOL" || err "claim-window reset '$kw' in kraken.py missing from PROTOCOL.md"
   done
 fi
-[ "$fail" -eq "$fail_before" ] && note "$n reset keyword(s) in claim.sh all specified in PROTOCOL.md"
+[ "$fail" -eq "$fail_before" ] && note "$n reset keyword(s) in kraken.py all specified in PROTOCOL.md"
 
 # --- 2. Every "step N" reference points at a step that exists ---------------
 echo "[2] step references (in $SKILL)"

@@ -91,11 +91,10 @@ time:
 | `kraken.py deliver OWNER/tasks <issue> <worker-name> <result-file> [pr-url]` | `in-progress` → `awaiting-merge`: result posted, labels swapped |
 | `kraken.py release OWNER/tasks <issue> <worker-name> [reason]` | `in-progress` → queued, honestly (`released:` closes the claim window) |
 
-- Run it with `python3 "<this skill's folder>/kraken.py" <subcommand> …` (the
-  historical `<name>.sh` shims still work — they just `exec` into it). Do **not**
-  inline rewritten `gh` commands for a transition a subcommand covers — `kraken.py`
-  is versioned with the plugin, and a hand-rolled variant is exactly the drift it
-  exists to prevent.
+- Run it with `python3 "<this skill's folder>/kraken.py" <subcommand> …`. Do
+  **not** inline rewritten `gh` commands for a transition a subcommand covers —
+  `kraken.py` is versioned with the plugin, and a hand-rolled variant is exactly
+  the drift it exists to prevent.
 - **Branch on its exit codes** — each subcommand documents its own; `20` always
   means gh/network failure with the write possibly half-landed: re-check the
   issue's real state before retrying, and never move on while a claim is

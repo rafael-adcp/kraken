@@ -16,7 +16,7 @@ mk_issue 1 "blocker (other project)" kraken-task "project:other"
 mk_issue 2 "blocked candidate"       kraken-task "project:app"
 mk_blocked_by 2 1
 
-snapshot="$(bash "$SCRIPTS/list-startable.sh" OWNER/tasks app --snapshot)"
+snapshot="$(python3 "$SCRIPTS/kraken.py" list-startable OWNER/tasks app --snapshot)"
 assert_rc $? 0 "snapshot exit (blocked-only queue)"
 assert_eq "$snapshot" "2:held" "blocked-only queue snapshot has no startable line"
 
@@ -27,7 +27,7 @@ assert_eq "$startable_count" "0" \
 # Closing the blocker flips the candidate to startable in the snapshot — the
 # change watch-queue's loop compares against its previous snapshot and wakes on.
 echo "closed" > "$STATE/issues/1/state"
-snapshot="$(bash "$SCRIPTS/list-startable.sh" OWNER/tasks app --snapshot)"
+snapshot="$(python3 "$SCRIPTS/kraken.py" list-startable OWNER/tasks app --snapshot)"
 assert_rc $? 0 "snapshot exit (blocker closed)"
 assert_eq "$snapshot" "2:startable" "closing the blocker flips the candidate to startable"
 

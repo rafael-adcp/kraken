@@ -12,7 +12,7 @@ export KRAKEN_STATE_DIR="$STATE/kraken"
 
 # --- session ends WITH a claim open: release.sh drives the requeue -----------
 mk_issue 7 "abandoned-on-exit task" kraken-task "project:app"
-bash "$SCRIPTS/claim.sh" OWNER/tasks 7 w1 >/dev/null
+python3 "$SCRIPTS/kraken.py" claim OWNER/tasks 7 w1 >/dev/null
 [ -f "$KRAKEN_STATE_DIR/claim-w1.json" ] || fail "setup: claim did not write state file"
 before="$(comment_count 7)"
 
@@ -29,7 +29,7 @@ printf '%s' "$c" | grep -q '^reason: session ended$' || fail "hook did not post 
 [ "$(comment_count 7)" -gt "$before" ] || fail "hook posted no release comment"
 
 # The released task is claimable again — end to end, proving the window closed.
-out="$(bash "$SCRIPTS/claim.sh" OWNER/tasks 7 w2)"
+out="$(python3 "$SCRIPTS/kraken.py" claim OWNER/tasks 7 w2)"
 assert_rc $? 0 "task re-claimable after the hook released it"
 
 # --- no state file: strict no-op (no writes at all) --------------------------
@@ -44,7 +44,7 @@ assert_eq "$(comment_count 8)" "$before8" "no-op hook wrongly posted a comment"
 
 # --- best-effort: a failing release never fails the hook ---------------------
 mk_issue 9 "release-fails task" kraken-task "project:app"
-bash "$SCRIPTS/claim.sh" OWNER/tasks 9 w3 >/dev/null
+python3 "$SCRIPTS/kraken.py" claim OWNER/tasks 9 w3 >/dev/null
 [ -f "$KRAKEN_STATE_DIR/claim-w3.json" ] || fail "setup: claim did not write state file for w3"
 # Force every gh call inside release.sh to fail; the hook must still exit 0.
 out="$(printf '%s' '{"hook_event_name":"SessionEnd","reason":"exit"}' \

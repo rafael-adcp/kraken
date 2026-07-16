@@ -12,18 +12,18 @@ mk_issue 7 "closed" kraken-task "project:app"
 echo "closed" > "$STATE/issues/7/state"
 
 # Default mode: startable only, oldest first, number<TAB>title.
-out="$(bash "$SCRIPTS/list-startable.sh" OWNER/tasks app)"
+out="$(python3 "$SCRIPTS/kraken.py" list-startable OWNER/tasks app)"
 assert_rc $? 0 "default mode exit"
 expected="$(printf '1\told startable\n4\tyoung startable')"
 assert_eq "$out" "$expected" "default mode output"
 
 # Snapshot mode: every open task in the project, sorted by number, with state.
-out="$(bash "$SCRIPTS/list-startable.sh" OWNER/tasks app --snapshot)"
+out="$(python3 "$SCRIPTS/kraken.py" list-startable OWNER/tasks app --snapshot)"
 assert_rc $? 0 "snapshot mode exit"
 expected="$(printf '1:startable\n2:held\n4:startable\n5:held\n6:held')"
 assert_eq "$out" "$expected" "snapshot mode output"
 
 # Empty queue: exit 0, no output.
-out="$(bash "$SCRIPTS/list-startable.sh" OWNER/tasks nothing-here)"
+out="$(python3 "$SCRIPTS/kraken.py" list-startable OWNER/tasks nothing-here)"
 assert_rc $? 0 "empty queue exit"
 assert_eq "$out" "" "empty queue output"

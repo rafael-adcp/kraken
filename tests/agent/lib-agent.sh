@@ -146,7 +146,7 @@ has_label() { grep -qxF -- "$2" "$GH_STUB_STATE/issues/$1/labels" 2>/dev/null; }
 no_label()  { ! has_label "$1" "$2"; }
 
 # Concatenated comment bodies in server order — the machine-line assertion
-# surface, exactly what claim.sh's arbitration reads.
+# surface, exactly what kraken.py's arbitration reads.
 comment_stream() {
   local f
   for f in "$GH_STUB_STATE/issues/$1/comments"/*.md; do

@@ -11,7 +11,7 @@ state_file="$KRAKEN_STATE_DIR/claim-w1.json"
 
 # --- claim writes the state file on exit 0 ----------------------------------
 mk_issue 7 "a task" kraken-task "project:app"
-out="$(bash "$SCRIPTS/claim.sh" OWNER/tasks 7 w1)"
+out="$(python3 "$SCRIPTS/kraken.py" claim OWNER/tasks 7 w1)"
 assert_rc $? 0 "clean claim exit"
 [ -f "$state_file" ] || fail "claim did not write the state file"
 # Contents: repo, issue, worker all recorded (the hook reads them back).
@@ -23,7 +23,7 @@ grep -q 'w1'         "$state_file" || fail "state file did not record the worker
 
 # --- a lost/held claim writes NO state file ---------------------------------
 mk_issue 8 "held task" kraken-task "project:app" in-progress
-out="$(bash "$SCRIPTS/claim.sh" OWNER/tasks 8 w1)"
+out="$(python3 "$SCRIPTS/kraken.py" claim OWNER/tasks 8 w1)"
 assert_rc $? 11 "held claim exit"
 [ -f "$KRAKEN_STATE_DIR/claim-w1.json" ] && [ ! -f "$state_file" ] \
   && fail "impossible: file check confusion" # keep w1's real file from issue 7 intact
@@ -31,27 +31,27 @@ assert_rc $? 11 "held claim exit"
 [ -f "$state_file" ] || fail "guard/skip wrongly removed an unrelated claim state file"
 
 # --- release removes it ------------------------------------------------------
-out="$(bash "$SCRIPTS/release.sh" OWNER/tasks 7 w1 "backing out")"
+out="$(python3 "$SCRIPTS/kraken.py" release OWNER/tasks 7 w1 "backing out")"
 assert_rc $? 0 "release exit"
 [ -f "$state_file" ] && fail "release did not remove the state file"
 
 # --- escalate removes it -----------------------------------------------------
 mk_issue 9 "blocked task" kraken-task "project:app"
-bash "$SCRIPTS/claim.sh" OWNER/tasks 9 w1 >/dev/null
+python3 "$SCRIPTS/kraken.py" claim OWNER/tasks 9 w1 >/dev/null
 esf="$KRAKEN_STATE_DIR/claim-w1.json"
 [ -f "$esf" ] || fail "re-claim for escalate test did not write state file"
 q="$STATE/q.md"; echo "which way?" > "$q"
-out="$(bash "$SCRIPTS/escalate.sh" OWNER/tasks 9 w1 "$q")"
+out="$(python3 "$SCRIPTS/kraken.py" escalate OWNER/tasks 9 w1 "$q")"
 assert_rc $? 0 "escalate exit"
 [ -f "$esf" ] && fail "escalate did not remove the state file"
 
 # --- deliver removes it ------------------------------------------------------
 mk_issue 10 "shipped task" kraken-task "project:app"
-bash "$SCRIPTS/claim.sh" OWNER/tasks 10 w1 >/dev/null
+python3 "$SCRIPTS/kraken.py" claim OWNER/tasks 10 w1 >/dev/null
 dsf="$KRAKEN_STATE_DIR/claim-w1.json"
 [ -f "$dsf" ] || fail "re-claim for deliver test did not write state file"
 r="$STATE/r.md"; echo "done, validated" > "$r"
-out="$(bash "$SCRIPTS/deliver.sh" OWNER/tasks 10 w1 "$r" "https://x/pr/1")"
+out="$(python3 "$SCRIPTS/kraken.py" deliver OWNER/tasks 10 w1 "$r" "https://x/pr/1")"
 assert_rc $? 0 "deliver exit"
 [ -f "$dsf" ] && fail "deliver did not remove the state file"
 

@@ -9,9 +9,9 @@
 mk_issue 7 "contested task" kraken-task "project:app"
 export GH_STUB_BARRIER=2
 
-bash "$SCRIPTS/claim.sh" OWNER/tasks 7 w-a >/dev/null 2>&1 &
+python3 "$SCRIPTS/kraken.py" claim OWNER/tasks 7 w-a >/dev/null 2>&1 &
 pid_a=$!
-bash "$SCRIPTS/claim.sh" OWNER/tasks 7 w-b >/dev/null 2>&1 &
+python3 "$SCRIPTS/kraken.py" claim OWNER/tasks 7 w-b >/dev/null 2>&1 &
 pid_b=$!
 wait "$pid_a"; rc_a=$?
 wait "$pid_b"; rc_b=$?

@@ -31,7 +31,7 @@ done
 # Default mode: the three oldest startable tasks must survive. Under the old
 # `--limit 100`, newest-first truncation keeps the 100 youngest held tasks and
 # drops these three entirely -> empty output.
-out="$(bash "$SCRIPTS/list-startable.sh" OWNER/tasks app)"
+out="$(python3 "$SCRIPTS/kraken.py" list-startable OWNER/tasks app)"
 assert_rc $? 0 "default mode exit (queue > 100)"
 expected="$(printf '1\toldest startable\n2\tsecond startable\n3\tthird startable')"
 assert_eq "$out" "$expected" \
@@ -39,7 +39,7 @@ assert_eq "$out" "$expected" \
 
 # Snapshot mode shares the same query, so it inherits the fix: all 105 open
 # tasks appear, none silently dropped at the 100 boundary.
-snap="$(bash "$SCRIPTS/list-startable.sh" OWNER/tasks app --snapshot)"
+snap="$(python3 "$SCRIPTS/kraken.py" list-startable OWNER/tasks app --snapshot)"
 assert_rc $? 0 "snapshot mode exit (queue > 100)"
 
 snap_lines="$(printf '%s\n' "$snap" | grep -c '.')"
