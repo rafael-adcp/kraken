@@ -11,5 +11,5 @@ assert_eq "$out" "claim: claimed issue=7 worker=w1" "machine line"
 has_label 7 in-progress || fail "in-progress label missing after claim"
 assert_eq "$(comment_count 7)" "1" "exactly one comment posted"
 c="$(last_comment 7)"
-printf '%s' "$c" | grep -q '^> 🐙 \*\*Kraken worker `w1`\*\*' || fail "disclaimer blockquote missing"
+assert_disclaimer 7 w1
 printf '%s' "$c" | grep -q '^claimed-by: w1$' || fail "claimed-by machine line missing"

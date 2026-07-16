@@ -22,29 +22,46 @@ out of step. The linter enforces a lot of this mechanically.
 
 ## Dev setup
 
-No build, no package manager — just `bash` and two checks. Both are token-free
-(no model calls, no network) and run in CI on every PR:
+No build, no package manager — just `bash` and `jq`. A `Makefile` fronts the
+checks. These two are token-free (no model calls, no network) and run in CI on
+every PR:
 
 ```bash
-bash tests/run-tests.sh      # conformance suite — needs `jq` (absent jq = skip)
-bash scripts/lint-skills.sh  # deterministic skill lint
+make test    # conformance suite (bash tests/run-tests.sh) — needs jq
+make lint    # deterministic skill lint (bash scripts/lint-skills.sh)
+make check   # both of the above
 ```
 
-- **`tests/run-tests.sh`** runs the conformance suite: each case drives the
-  bundled transition scripts against a stateful `gh` stub, proving the queue
-  protocol mechanically (the claim race, claim-window arbitration, honest
-  release, …). It **requires `jq`**; without it the suite skips cleanly (exit 0),
-  so it's safe on a minimal machine, but install `jq` to actually exercise it.
-- **`scripts/lint-skills.sh`** is the deterministic guard against the silent
-  breakage a prose skill is exposed to: label drift across files, orphan
-  "step N" references, task-template field drift, broken relative links/images,
-  and unparseable shell/YAML/JSON snippets.
+- **`make test`** runs the conformance suite: each case drives the bundled
+  transition scripts against a stateful `gh` stub, proving the queue protocol
+  mechanically (the claim race, claim-window arbitration, honest release, …). It
+  **requires `jq`**; without it the suite skips cleanly (exit 0), so it's safe on
+  a minimal machine, but install `jq` to actually exercise it.
+- **`make lint`** is the deterministic guard against the silent breakage a prose
+  skill is exposed to: label drift across files, orphan "step N" references,
+  task-template field drift, broken relative links/images, and unparseable
+  shell/YAML/JSON snippets.
 
-A second, **semantic** review layer runs locally via the pre-push hook
+### The agent-behavior harness (run by hand)
+
+`make test-agent` drives **real** `/kraken:unleash --once` runs (headless
+`claude -p`) against the `gh` stub and asserts on artifacts — the skill's
+*judgment*, not just the scripts. It is slow (several model runs) and **spends
+tokens**, so it is deliberately **not** wired into any hook or CI. Run it by
+hand when you change `skills/**` or `tests/agent/**`:
+
+```bash
+make test-agent   # KRAKEN_AGENT_ASSUME_AUTH=1 bash tests/agent/run-agent-tests.sh
+```
+
+It uses your logged-in Claude Code subscription (no paid API key) and self-skips
+cleanly when it can't run for real (no `claude` on PATH, a spend/rate limit, or
+the stub can't be reached).
+
+A lighter **semantic** review still runs locally via the pre-push hook
 (`.githooks/pre-push`): when a push touches `skills/**` or `README.md`, it asks
-your logged-in `claude` CLI to review the diff against the skill invariants, and
-runs the agent-behavior harness. It costs no API bill (it uses your Claude Code
-subscription). Enable it once per clone with:
+your logged-in `claude` CLI to review the diff against the skill invariants. It
+costs no API bill. Enable it once per clone with:
 
 ```bash
 git config core.hooksPath .githooks

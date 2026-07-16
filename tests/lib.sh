@@ -64,3 +64,14 @@ has_label() { grep -qxF -- "$2" "$STATE/issues/$1/labels"; }
 comment_count() { ls "$STATE/issues/$1/comments"/*.md 2>/dev/null | wc -l | tr -d ' '; }
 
 last_comment() { cat "$STATE/issues/$1/comments/$(printf '%04d' "$(comment_count "$1")").md"; }
+
+# assert_disclaimer ISSUE WORKER — the 🐙 attribution blockquote heads the
+# issue's latest comment. LC_ALL=C forces byte matching: GNU grep 3.1 (Git
+# Bash's bundled build) fails to match the astral-plane 🐙 (U+1F419) under a
+# UTF-8 locale, so a UTF-8-locale run false-fails on a disclaimer that is in
+# fact present. The disclaimer is a fixed byte string, so bytewise is exact.
+assert_disclaimer() {
+  printf '%s' "$(last_comment "$1")" \
+    | LC_ALL=C grep -q "^> 🐙 \*\*Kraken worker \`$2\`\*\*" \
+    || fail "disclaimer blockquote missing"
+}

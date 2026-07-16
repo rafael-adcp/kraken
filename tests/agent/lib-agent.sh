@@ -125,6 +125,15 @@ ${extra_ctx}"
   if [ "$rc" -eq 124 ] && [ ! -s "$SCRATCH/agent.log" ]; then
     skip_scenario "the nested claude -p timed out before producing any output (${CLAUDE_AGENT_TIMEOUT}s). No judgment was exercised."
   fi
+  # The stub logs every invocation, so an empty log after the run is artifact
+  # proof the model never reached it: every `gh` resolved to the REAL gh against
+  # the placeholder coordination repo, so no judgment was exercised against the
+  # seeded queue. That is an environment SKIP, never a false FAIL — assert-on-
+  # artifacts cuts both ways. A run that reached the stub even once logs
+  # something, so a genuine misjudgment still FAILs.
+  if [ ! -s "$GH_STUB_STATE/log" ]; then
+    skip_scenario "the nested claude never reached the gh-stub (its invocation log is empty): the stub's dir was not in front of the real 'gh' for the nested tool shell, so the model judged against the real gh, not the seeded queue. No judgment was exercised — an environment gap, not a skill fault."
+  fi
   return "$rc"
 }
 

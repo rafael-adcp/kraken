@@ -13,7 +13,7 @@ assert_eq "$out" "heartbeat: posted issue=7 worker=w1" "machine line"
 
 has_label 7 in-progress || fail "heartbeat touched the labels"
 c="$(last_comment 7)"
-printf '%s' "$c" | grep -q '^> 🐙 \*\*Kraken worker `w1`\*\*' || fail "disclaimer blockquote missing"
+assert_disclaimer 7 w1
 printf '%s' "$c" | grep -q '^heartbeat: w1$' || fail "heartbeat machine line missing"
 printf '%s' "$c" | grep -q '^tests green, writing docs$' || fail "progress message missing"
 grep -q 'issue edit' "$STATE/log" && fail "heartbeat ran an issue edit"

@@ -11,7 +11,7 @@ assert_eq "$out" "release: released issue=7 worker=w1" "machine line"
 
 has_label 7 in-progress && fail "in-progress label still present after release"
 c="$(last_comment 7)"
-printf '%s' "$c" | grep -q '^> 🐙 \*\*Kraken worker `w1`\*\*' || fail "disclaimer blockquote missing"
+assert_disclaimer 7 w1
 printf '%s' "$c" | grep -q '^released: w1$' || fail "released: machine line missing"
 printf '%s' "$c" | grep -q '^reason: environment cannot host the task$' || fail "reason line missing"
 
