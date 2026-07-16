@@ -130,7 +130,7 @@ The coordination contract — task shape, state machine, machine-readable commen
 lines, the claim algorithm — is normatively specified in
 [`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/1`); it is agent-agnostic, so any
 tool that follows it can be a tentacle on the same queue. How a Claude Code worker
-executes it — subagents, the watcher, the bundled transition scripts — lives in
+executes it — subagents, the watcher, the bundled transition program — lives in
 [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md).
 
 ## The full walkthrough
@@ -452,7 +452,7 @@ anywhere else.
 ## Contributing
 
 Kraken is a small, protocol-first tool. The spec ([`PROTOCOL.md`](PROTOCOL.md))
-wins on any disagreement, the skills are prompts, and the scripts are the
+wins on any disagreement, the skills are prompts, and `kraken.py` is the
 mechanics. Dev setup, PR conventions, the release flow, and where design
 discussion happens are all in [`CONTRIBUTING.md`](CONTRIBUTING.md); what changed
 between versions lives in the [GitHub

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# list-startable.sh owns the blocked-by check too: a candidate with an open
+# kraken.py list-startable owns the blocked-by check too: a candidate with an open
 # native blocker (or, as a fallback, an open `depends-on: #N` target) must
 # never list as startable in either mode — closing the blocker un-blocks it.
 . "$ROOT/tests/lib.sh"

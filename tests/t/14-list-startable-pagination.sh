@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# list-startable.sh must never silently truncate the queue. The shared
+# kraken.py list-startable must never silently truncate the queue. The shared
 # `gh issue list` call once passed `--limit 100`; gh page-fetches newest-first
 # up to that ceiling and stops, so an over-100 queue silently lost its OLDEST
 # tasks — the drain never saw them, "oldest first" sorted a truncated set, and

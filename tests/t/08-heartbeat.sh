@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# heartbeat.sh: progress comment posted, no label changes — and the heartbeat:
+# kraken.py heartbeat: progress comment posted, no label changes — and the heartbeat:
 # line must NOT reset the claim window (a worker heartbeating must never make
 # its own claim re-claimable).
 . "$ROOT/tests/lib.sh"

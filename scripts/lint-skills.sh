@@ -16,7 +16,6 @@ README="README.md"
 PROTOCOL="PROTOCOL.md"
 TEMPLATE="skills/unleash/task-template.yml"
 REAPER="skills/unleash/reclaim-stale.yml"
-# The seven transition scripts were consolidated into one stdlib-only program;
 # kraken.py is the single stdlib-only transition program. Every label /
 # machine-line / disclaimer emitter lives in it, so all the per-emitter
 # checks below resolve to that single module.

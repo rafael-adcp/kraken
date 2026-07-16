@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Conformance suite for the bundled transition scripts — proves the queue
-# protocol mechanically, no LLM involved. Each tests/t/*.sh runs in its own
+# Conformance suite for the bundled transition program (kraken.py) — proves the
+# queue protocol mechanically, no LLM involved. Each tests/t/*.sh runs in its own
 # process against a fresh gh-stub state; the stub directory is prepended to
-# PATH so the scripts under test call the stub, never the real gh. The
-# scripts-under-test are thin shims into skills/unleash/kraken.py, so the shipped
+# PATH so the program under test calls the stub, never the real gh. Tests invoke
+# `python3 skills/unleash/kraken.py <subcommand>` directly, so the shipped
 # Python implementation is what the suite actually exercises.
 #
-# Requires `jq` (the stub evaluates the scripts' own --jq expressions with it)
+# Requires `jq` (the stub evaluates kraken.py's own --jq expressions with it)
 # and `python3` (kraken.py). Absent either = skip with exit 0, so the suite is
 # safe on minimal machines; CI always has both. The kraken.py unit tests
 # (tests/unit) run last — they cover the arbitration/parsing/pagination logic in

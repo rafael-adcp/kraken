@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# list-startable.sh: startable filter, oldest-first ordering, snapshot mode.
+# kraken.py list-startable: startable filter, oldest-first ordering, snapshot mode.
 . "$ROOT/tests/lib.sh"
 
 mk_issue 1 "old startable"  kraken-task "project:app"

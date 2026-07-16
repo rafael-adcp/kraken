@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claim.sh on a clear task: exit 0, in-progress added, disclaimer + claimed-by posted.
+# kraken.py claim on a clear task: exit 0, in-progress added, disclaimer + claimed-by posted.
 . "$ROOT/tests/lib.sh"
 
 mk_issue 7 "a task" kraken-task "project:app"

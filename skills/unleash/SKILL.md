@@ -56,8 +56,8 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
 - Use `gh -R OWNER/REPO ...` for every queue operation. The coordination repo holds
   issues only, never work code.
 - **Attribution disclaimer.** Every worker authenticates as me, so a worker's
-  comment reads exactly like one I typed. The transition scripts compose the
-  disclaimer themselves; prepend it to any coordination-repo comment you write
+  comment reads exactly like one I typed. `kraken.py` composes the
+  disclaimer itself; prepend it to any coordination-repo comment you write
   **by hand** (assumptions, free-form notes):
 
   ```
@@ -74,7 +74,7 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
   project (`--project` filters on it). A task without one is invisible to every
   worker — fix the label, don't improvise.
 
-## Bundled transition scripts
+## Bundled transition program
 
 The queue's state transitions are executed by `kraken.py`, one stdlib-only
 program shipped in this skill's folder, next to this SKILL.md. It exposes a
@@ -149,7 +149,7 @@ time:
    discarded when it returns, so the driver's window stays ~O(1) per task no matter how
    long the drain runs. Brief it in full — the task pointer `{issue, repo, project,
    worker-name}` **and** the rules it must honor (steps a–d below, *Conventions* —
-   including the attribution disclaimer — *Bundled transition scripts*, *Delivering
+   including the attribution disclaimer — *Bundled transition program*, *Delivering
    the work*, *Authorization boundaries*); my global rules carry over too. "Compact" is what the
    *driver* keeps, not how the subagent runs: it works under the whole skill and returns
    only a **compact result** — task number, final label (`awaiting-merge` /

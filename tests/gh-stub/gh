@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Programmable `gh` stub for the kraken conformance suite (tests/run-tests.sh
 # puts this directory first on PATH). It models just enough of GitHub for the
-# bundled transition scripts: issue state, labels, and — the part that matters —
+# bundled transition program (kraken.py): issue state, labels, and — the part that matters —
 # server-side comment ordering. The scripts' own --jq expressions are evaluated
 # by the real `jq`, so the filters under test are the shipped ones, never a
 # reimplementation.
@@ -52,9 +52,9 @@ lock() {
 }
 unlock() { rmdir "$STATE/.lock"; }
 
-# --- argument parsing (only the shapes the transition scripts use) -----------
+# --- argument parsing (only the shapes kraken.py uses) -----------
 # `pr` is here only for the agent-behavior harness (tests/agent): the unleash
-# skill opens the delivery PR with `gh pr create`, which no transition script
+# skill opens the delivery PR with `gh pr create`, which kraken.py never
 # calls, so the conformance suite never reaches this branch. We record the PR
 # as an artifact (pr/NNNN.json) instead of talking to GitHub, and capture -R's
 # repo (the conformance paths ignore it) so a PR is attributable to a repo.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Agent-behavior harness: drives headless Claude Code against the gh-stub to test
 # the SKILL's judgment (the contract MUSTs that live in the model's behavior),
-# not just the transition scripts. Each tests/agent/scenarios/*.sh seeds one
+# not just the transition program. Each tests/agent/scenarios/*.sh seeds one
 # crafted queue + task body, runs a real `claude -p "/kraken:unleash ... --once"`,
 # and asserts on ARTIFACTS: the stub's final state (labels, machine lines) and a
 # real local work repo (branch pushed? trailers? default branch untouched?).

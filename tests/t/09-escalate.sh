@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# escalate.sh: question posted with the needs-decision: line, labels swapped in
+# kraken.py escalate: question posted with the needs-decision: line, labels swapped in
 # one call — and after the human requeues, ANY worker wins the fresh window.
 . "$ROOT/tests/lib.sh"
 

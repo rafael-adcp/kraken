@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deliver.sh: result posted with delivered: + pr: lines, labels swapped — and
+# kraken.py deliver: result posted with delivered: + pr: lines, labels swapped — and
 # after a review bounce (human removes awaiting-merge), ANY worker wins the
 # fresh window. That last part is the review-bounce gap: without delivered: as
 # a window reset, the original claimed-by: would win every future arbitration

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# watch-queue.sh's entire emit gate is `count -gt 0` on
-# `list-startable.sh --snapshot`'s ":startable$" lines (see the script: it has
-# no filter logic of its own since this task made list-startable.sh the sole
+# kraken.py watch's entire emit gate is `count > 0` on
+# `kraken.py list-startable --snapshot`'s ":startable$" lines (it has
+# no filter logic of its own since this task made list-startable the sole
 # owner of "startable"). So proving a blocked-only queue's snapshot carries
 # zero ":startable" lines IS the no-wake proof — that count is the exact
-# expression watch-queue's loop tests every poll. (Driving the loop itself
+# expression watch's loop tests every poll. (Driving the loop itself
 # needs real backgrounding + signal delivery across nested bash processes,
 # which is not reliable in this harness/OS combination — the stub-based
 # snapshot check is the deterministic seam.)
@@ -34,10 +34,10 @@ assert_eq "$snapshot" "2:startable" "closing the blocker flips the candidate to 
 startable_count="$(printf '%s\n' "$snapshot" | grep -c ':startable$')" || true
 assert_eq "$startable_count" "1" "once the blocker closes, the snapshot has exactly the newly-clear task startable"
 
-# The watch gate is textually verifiable too. `watch` now lives in kraken.py
-# (the watch-queue.sh shim just execs it), so assert against the module: it must
-# not carry the false-alarm re-emission timer this task removed, and it must
-# gate emission on count>0 AND the snapshot changing — nothing else.
+# The watch gate is textually verifiable too. `watch` lives in kraken.py, so
+# assert against the module: it must not carry the false-alarm re-emission timer
+# this task removed, and it must gate emission on count>0 AND the snapshot
+# changing — nothing else.
 grep -q 'REMIND_SECONDS' "$SCRIPTS/kraken.py" && fail "kraken.py watch must not retain the 30-min re-emission safety net"
 grep -q 'count > 0 and snapshot != prev' "$SCRIPTS/kraken.py" \
   || fail "kraken.py watch must gate emission on count>0 AND snapshot changed, nothing else"

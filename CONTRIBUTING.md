@@ -14,7 +14,7 @@ have a strict hierarchy when they disagree:
 | --- | --- | --- |
 | **The spec** | [`PROTOCOL.md`](PROTOCOL.md) | The normative, agent-agnostic contract (`kraken-protocol/1`): task shape, the label state machine, machine lines, the claim algorithm. **It wins on any disagreement.** |
 | **The skills** | `skills/*/SKILL.md` | Prompts — markdown interpreted at runtime by an LLM. Prose here is *executable*: a subtle wording change can silently change an agent's behavior. |
-| **The mechanics** | `skills/unleash/*.sh`, `scripts/`, `tests/` | The deterministic parts — the bundled transition scripts (the reference implementation of the worker side), the linter, and the conformance suite. |
+| **The mechanics** | `skills/unleash/kraken.py`, `scripts/`, `tests/` | The deterministic parts — the bundled transition program (the reference implementation of the worker side, one stdlib-only module with a subcommand per transition), the linter, and the conformance suite. |
 
 If a change to a skill and the spec ever conflict, the spec is the source of
 truth; fix the skill (or amend the spec by PR — see below), never leave them
@@ -33,7 +33,7 @@ make check   # both of the above
 ```
 
 - **`make test`** runs the conformance suite: each case drives the bundled
-  transition scripts against a stateful `gh` stub, proving the queue protocol
+  transition program against a stateful `gh` stub, proving the queue protocol
   mechanically (the claim race, claim-window arbitration, honest release, …). It
   **requires `jq`**; without it the suite skips cleanly (exit 0), so it's safe on
   a minimal machine, but install `jq` to actually exercise it.

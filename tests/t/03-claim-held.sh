@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claim.sh guard: a held task is skipped with exit 11 and ZERO writes —
+# kraken.py claim guard: a held task is skipped with exit 11 and ZERO writes —
 # stacking in-progress on awaiting-merge is the corruption class the guard exists for.
 . "$ROOT/tests/lib.sh"
 

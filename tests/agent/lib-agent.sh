@@ -2,7 +2,7 @@
 # Shared helpers for the agent-behavior scenarios (tests/agent/scenarios/*.sh) —
 # source, don't execute.
 #
-# Where the conformance suite (tests/) proves the transition SCRIPTS mechanically
+# Where the conformance suite (tests/) proves the transition PROGRAM mechanically
 # with no model, this harness proves the SKILL's judgment: it drives a real
 # headless `claude -p "/kraken:unleash ..."` against the same gh-stub and asserts
 # on ARTIFACTS — the stub's final state (labels, machine lines in server order)

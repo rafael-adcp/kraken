@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The claim state file lifecycle: claim.sh writes
+# The claim state file lifecycle: kraken.py claim writes
 # ${KRAKEN_STATE_DIR}/claim-<worker>.json on a won claim (exit 0), and every
 # terminal worker transition — deliver, escalate, release — removes it. This is
 # the primitive the SessionEnd auto-release hook reads to know a claim is open.
