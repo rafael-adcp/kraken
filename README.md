@@ -455,7 +455,8 @@ Kraken is a small, protocol-first tool. The spec ([`PROTOCOL.md`](PROTOCOL.md))
 wins on any disagreement, the skills are prompts, and the scripts are the
 mechanics. Dev setup, PR conventions, the release flow, and where design
 discussion happens are all in [`CONTRIBUTING.md`](CONTRIBUTING.md); what changed
-between versions lives in [`CHANGELOG.md`](CHANGELOG.md).
+between versions lives in the [GitHub
+Releases](https://github.com/rafael-adcp/kraken/releases).
 
 ## Origins
 
