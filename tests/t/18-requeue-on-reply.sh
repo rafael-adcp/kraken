@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Auto-requeue conformance: proves requeue-on-reply.yml's shipped run: block by
+# extracting and running it verbatim against the gh-stub (mirrors tests/t/17).
+. "$ROOT/tests/lib.sh"
+
+WF="$ROOT/skills/unleash/requeue-on-reply.yml"
+
+extract_run() {
+  awk '
+    /^[[:space:]]*run: \|[[:space:]]*$/ {
+      match($0, /^[[:space:]]*/); key = RLENGTH; grab = 1; next
+    }
+    grab {
+      if ($0 ~ /[^[:space:]]/) {
+        match($0, /^[[:space:]]*/)
+        if (RLENGTH <= key) { grab = 0; next }
+      }
+      print
+    }
+  ' "$1" | sed 's/^          //' | tr -d '\r'
+}
+
+RUN="$STATE/requeue.sh"
+extract_run "$WF" > "$RUN"
+[ -s "$RUN" ] || fail "could not extract the run block from $WF"
+
+export REPO="OWNER/tasks"
+DISCLAIMER='> 🐙 **Kraken worker `w1`** — automated comment from a Claude Code tentacle, not a human.'
+
+run_case() { export NUM="$1" COMMENT_BODY="$2" COMMENT_AUTHOR_TYPE="$3"; bash "$RUN"; }
+
+mk_issue 1 "decision answered by a bare reply" kraken-task "project:app" needs-decision
+run_case 1 "option B, go" "User"
+assert_rc $? 0 "#1 run"
+has_label 1 needs-decision && fail "#1 needs-decision not removed on a human reply"
+last_comment 1 | grep -q '^requeue: ' || fail "#1 missing requeue confirmation comment"
+
+mk_issue 2 "worker comment must not requeue" kraken-task "project:app" needs-decision
+run_case 2 "$(printf '%s\n\nneeds-decision: w1\n\nwhich option?' "$DISCLAIMER")" "User"
+assert_rc $? 0 "#2 run"
+has_label 2 needs-decision || fail "#2 worker comment wrongly requeued (disclaimer ignored)"
+assert_eq "$(comment_count 2)" "0" "#2 got a comment it should not have"
+
+mk_issue 3 "no held label" kraken-task "project:app"
+run_case 3 "nice work everyone" "User"
+assert_rc $? 0 "#3 run"
+assert_eq "$(comment_count 3)" "0" "#3 got a comment on an unheld issue"
+
+mk_issue 4 "bot comment must not requeue" kraken-task "project:app" needs-decision
+run_case 4 "stale-claim: no worker heartbeat for 8h — the worker likely died." "Bot"
+assert_rc $? 0 "#4 run"
+has_label 4 needs-decision || fail "#4 bot comment wrongly requeued needs-decision"
+assert_eq "$(comment_count 4)" "0" "#4 bot comment produced output"
+
+mk_issue 5 "awaiting-merge, bare comment stays held" kraken-task "project:app" awaiting-merge
+run_case 5 "I'll merge this tomorrow, looks good" "User"
+assert_rc $? 0 "#5 run"
+has_label 5 awaiting-merge || fail "#5 awaiting-merge wrongly requeued on a bare comment"
+assert_eq "$(comment_count 5)" "0" "#5 got a comment it should not have"
+
+mk_issue 6 "awaiting-merge, explicit requeue keyword" kraken-task "project:app" awaiting-merge
+run_case 6 "requeue: please fix the typo in the README before I merge" "User"
+assert_rc $? 0 "#6 run"
+has_label 6 awaiting-merge && fail "#6 awaiting-merge not removed on an explicit requeue: keyword"
+last_comment 6 | grep -q '^requeue: ' || fail "#6 missing requeue confirmation comment"
+
+run_case 1 "and one more thing" "User"
+assert_rc $? 0 "#7 run"
+assert_eq "$(comment_count 1)" "1" "#7 a second comment requeued/commented again (no debounce)"
+
+exit 0
