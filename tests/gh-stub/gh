@@ -30,6 +30,17 @@
 # native blocked-by relationships: emits a JSON array of {number, state},
 # state read from each blocker's own issues/<n>/state file, so closing a
 # blocker in the stub is exactly `echo closed > issues/<n>/state`.
+#
+# `gh api graphql -f query=...` models the two shapes kraken.py's batched
+# listing sends (real GraphQL enum state comes back UPPERCASE, unlike the
+# REST endpoints above, so both shapes below emit OPEN/CLOSED):
+#   issues(states: OPEN, labels: [...], first: N[, after: "cursor"])
+#     -> a page of {number,title,createdAt,body,labels,blockedBy} nodes, real
+#        cursor pagination (pageInfo.hasNextPage/endCursor) so an over-100
+#        queue still takes the number of calls its page count needs.
+#   aliased `iN: issue(number: N) { state }` fields (the depends-on fallback's
+#     batched target-state lookup) -> one {data:{repository:{iN:{state}}}} per
+#     alias, in a single round trip regardless of how many aliases are asked.
 set -u
 
 STATE="${GH_STUB_STATE:?gh stub: GH_STUB_STATE not set}"
@@ -59,7 +70,7 @@ unlock() { rmdir "$STATE/.lock"; }
 # as an artifact (pr/NNNN.json) instead of talking to GitHub, and capture -R's
 # repo (the conformance paths ignore it) so a PR is attributable to a repo.
 sub="" issue="" jsonf="" jqexpr="" add_label="" remove_label="" body="" endpoint="" limit=""
-repo="" pr_sub="" title="" head="" base="" draft=0
+repo="" pr_sub="" title="" head="" base="" draft=0 gql_query=""
 label_filters=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -80,6 +91,7 @@ while [ $# -gt 0 ]; do
     --body-file)    body="$(cat "$2")"; shift 2 ;;
     --limit)        limit="$2"; shift 2 ;;
     --state)        shift 2 ;;
+    -f | -F)        case "$2" in query=*) gql_query="${2#query=}" ;; esac; shift 2 ;;
     -*)             shift ;;
     *)              issue="$1"; shift ;;
   esac
@@ -125,6 +137,98 @@ issue_json() { # $1 = issue dir; emit {number,title,createdAt,updatedAt,labels:[
        labels: ($labels | rtrimstr("\n") | split("\n") | map(select(. != "") | {name: .})),
        comments: $comments
      }'
+}
+
+# --- graphql: query-shape dispatch ------------------------------------------
+# kraken.py never uses gh's -F (typed) vs -f (string) distinction meaningfully
+# here — every value it needs (owner, repo, project, labels, cursor) is
+# embedded straight into the query text, one clause per line, so a per-line
+# grep -oE finds each token without a real GraphQL parser.
+
+blocked_by_nodes_json() { # $1 = issue dir; emit [{number,state}] UPPERCASE
+  local d="$1" items="" bn bstate
+  if [ -f "$d/blocked_by" ]; then
+    while IFS= read -r bn; do
+      [ -n "$bn" ] || continue
+      bstate="CLOSED"
+      [ -f "$STATE/issues/$bn/state" ] && bstate="$(cat "$STATE/issues/$bn/state" | tr '[:lower:]' '[:upper:]')"
+      items="${items}$(jq -n --argjson num "$bn" --arg state "$bstate" '{number:$num, state:$state}')"
+    done < "$d/blocked_by"
+  fi
+  printf '%s' "$items" | jq -s .
+}
+
+issue_node_json() { # $1 = issue dir; emit the GraphQL-shaped issue node
+  local d="$1"
+  jq -n \
+    --arg n "$(basename "$d")" \
+    --rawfile title "$d/title" \
+    --rawfile created "$d/createdAt" \
+    --rawfile labels "$d/labels" \
+    --arg body "$([ -f "$d/body" ] && cat "$d/body" || true)" \
+    --argjson blockedby "$(blocked_by_nodes_json "$d")" \
+    '{
+       number: ($n | tonumber),
+       title: ($title | rtrimstr("\n")),
+       createdAt: ($created | rtrimstr("\n")),
+       body: $body,
+       labels: {nodes: ($labels | rtrimstr("\n") | split("\n") | map(select(. != "") | {name: .}))},
+       blockedBy: {nodes: $blockedby}
+     }'
+}
+
+graphql_list_issues() { # $1 = query text; a paginated kraken-task listing page
+  local q="$1" name label_line labels=() first after items="" all count page has_next end_cursor
+  name="$(printf '%s\n' "$q" | grep -oE 'name: "[^"]*"' | head -1 | sed -E 's/^name: "//; s/"$//')"
+  label_line="$(printf '%s\n' "$q" | grep -oE 'labels: \[[^]]*\]' | head -1)"
+  while IFS= read -r l; do labels+=("$l"); done < <(printf '%s' "$label_line" | grep -oE '"[^"]*"' | tr -d '"')
+  first="$(printf '%s\n' "$q" | grep -oE 'first: [0-9]+' | head -1 | grep -oE '[0-9]+')"
+  after="$(printf '%s\n' "$q" | grep -oE 'after: "[^"]*"' | head -1 | sed -E 's/^after: "//; s/"$//')"
+  : "${name:?gh-stub: graphql listing query missing repository name}"
+
+  for d in "$STATE"/issues/*/; do
+    [ -d "$d" ] || continue
+    [ "$(cat "$d/state")" = "open" ] || continue
+    ok=1
+    for lf in ${labels[@]+"${labels[@]}"}; do
+      grep -qxF -- "$lf" "$d/labels" || { ok=0; break; }
+    done
+    [ "$ok" -eq 1 ] || continue
+    items="${items}$(issue_node_json "$d")"
+  done
+  all="$(printf '%s' "$items" | jq -s 'sort_by(.createdAt, .number)')"
+  if [ -n "$after" ]; then
+    all="$(printf '%s' "$all" | jq --argjson after "$after" '[.[] | select(.number > $after)]')"
+  fi
+  count="$(printf '%s' "$all" | jq 'length')"
+  page="$(printf '%s' "$all" | jq --argjson n "${first:-100}" '.[:$n]')"
+  has_next="false"
+  [ "$count" -gt "${first:-100}" ] && has_next="true"
+  end_cursor=""
+  [ "$(printf '%s' "$page" | jq 'length')" -gt 0 ] && end_cursor="$(printf '%s' "$page" | jq -r '.[-1].number')"
+  jq -n --argjson nodes "$page" --argjson hasNext "$has_next" --arg endCursor "$end_cursor" \
+    '{data:{repository:{issues:{pageInfo:{hasNextPage:$hasNext, endCursor:$endCursor}, nodes:$nodes}}}}'
+}
+
+graphql_issue_states() { # $1 = query text; batched `iN: issue(number: N) { state }` aliases
+  local q="$1" m alias num st fields=""
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    alias="$(printf '%s' "$m" | sed -E 's/^([a-zA-Z_][a-zA-Z0-9_]*): issue.*/\1/')"
+    num="$(printf '%s' "$m" | sed -E 's/.*issue\(number: ([0-9]+)\).*/\1/')"
+    st="CLOSED"
+    [ -f "$STATE/issues/$num/state" ] && st="$(cat "$STATE/issues/$num/state" | tr '[:lower:]' '[:upper:]')"
+    fields="${fields}$(jq -n --arg k "$alias" --arg st "$st" '{($k): {state:$st}}')"
+  done < <(printf '%s\n' "$q" | grep -oE '[a-zA-Z_][a-zA-Z0-9_]*: issue\(number: [0-9]+\)')
+  jq -n --argjson repo "$(printf '%s' "$fields" | jq -s 'add // {}')" '{data:{repository:$repo}}'
+}
+
+graphql_dispatch() { # $1 = query text
+  if printf '%s\n' "$1" | grep -q 'issues(states: OPEN'; then
+    graphql_list_issues "$1"
+  else
+    graphql_issue_states "$1"
+  fi
 }
 
 emit() { # $1 = JSON; apply --jq like gh does (raw strings, like jq -r)
@@ -274,6 +378,9 @@ case "$sub" in
           done < "$d/blocked_by"
         fi
         emit "$(printf '%s' "$items" | jq -s .)"
+        ;;
+      graphql)
+        emit "$(graphql_dispatch "$gql_query")"
         ;;
       *)
         echo "gh-stub: unsupported api endpoint '$endpoint'" >&2; exit 1

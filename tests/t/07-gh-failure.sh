@@ -5,14 +5,19 @@
 
 mk_issue 7 "a task" kraken-task "project:app"
 
-# list-startable: the gh call fails.
-out="$(GH_STUB_FAIL='issue list' python3 "$SCRIPTS/kraken.py" list-startable OWNER/tasks app)"
-assert_rc $? 20 "list-startable exit on gh failure"
+# list-startable: the batched listing/native-blocked-by gh graphql call fails.
+out="$(GH_STUB_FAIL='graphql' python3 "$SCRIPTS/kraken.py" list-startable OWNER/tasks app)"
+assert_rc $? 20 "list-startable exit on gh graphql failure"
 
-# list-startable: the blocked-by check's own gh api call fails — a
-# label-clear candidate must still surface 20, not silently list or drop.
-out="$(GH_STUB_FAIL='dependencies/blocked_by' python3 "$SCRIPTS/kraken.py" list-startable OWNER/tasks app)"
-assert_rc $? 20 "list-startable exit on blocked-by gh api failure"
+# list-startable: the depends-on fallback's own batched gh graphql call fails
+# — a candidate needing the fallback must still surface 20, not silently list
+# or drop. 'issue(number:' only appears in that second (singular-issue-alias)
+# call, never in the first (plural `issues(states: ...`) listing call.
+mk_issue 70 "dep target"         kraken-task "project:app"
+mk_issue 71 "fallback candidate" kraken-task "project:app"
+mk_body 71 "depends-on: #70"
+out="$(GH_STUB_FAIL='issue\(number:' python3 "$SCRIPTS/kraken.py" list-startable OWNER/tasks app)"
+assert_rc $? 20 "list-startable exit on depends-on fallback gh graphql failure"
 
 # claim: failure at the guard read — nothing written.
 out="$(GH_STUB_FAIL='issue view' python3 "$SCRIPTS/kraken.py" claim OWNER/tasks 7 w1)"
