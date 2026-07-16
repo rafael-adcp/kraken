@@ -18,6 +18,10 @@ Transport (phase 1): `gh` stays the transport. Every GitHub call shells out to
 `gh api` / `gh issue`, exactly like the scripts did, so the conformance stub
 (which intercepts `gh` on PATH) and the operator's existing auth keep working
 for free. A direct-REST phase 2 is possible later but out of scope here.
+list-startable's queue fetch is the one exception to "shell out per call": it
+batches labels, native blocked-by, and body into a single paginated
+`gh api graphql` walk (classify_queue/fetch_open_tasks below), so an idle
+watch poll costs O(pages), not one REST call per non-held task.
 
 Exit-code contract (PROTOCOL.md §12), preserved verbatim from the scripts:
     0   success
@@ -93,6 +97,12 @@ def gh_json(args):
         return json.loads(out)
     except (ValueError, json.JSONDecodeError):
         return None
+
+
+def graphql(query):
+    """Run a `gh api graphql` call; return the parsed {"data": ...} envelope,
+    or None on transport / decode failure."""
+    return gh_json(["api", "graphql", "-f", f"query={query}"])
 
 
 def comment_bodies(repo, issue):
@@ -194,81 +204,131 @@ def swap_labels(repo, issue, remove=None, add=None):
 
 
 # --- subcommand: list-startable ---------------------------------------------
+#
+# The queue fetch and the blocked-by check are both batched through GraphQL so
+# an idle poll costs a small, queue-size-independent number of round trips —
+# never the old one-REST-call-per-non-held-task.
+#
+# GitHub's GraphQL `issues(labels: [...])` argument is a UNION over multiple
+# values (confirmed against a live repo — unlike the REST `--label` flag's
+# AND), so passing kraken-task and project:<name> there would OR the two
+# label sets together instead of intersecting them. Filtering on the single
+# "kraken-task" label server-side and the project label client-side (against
+# the very labels this same call already returns) sidesteps the ambiguity.
 
-def is_blocked(repo, number):
-    """Return True (blocked), False (clear), or None (transport failure).
+def fetch_open_tasks(repo):
+    """Every OPEN kraken-task issue in the repo, across all projects — number,
+    title, createdAt, body, labels, and native blocked-by, all in one paginated
+    GraphQL walk. Returns the node list, or None on transport failure."""
+    owner, name = repo.split("/", 1)
+    nodes = []
+    cursor = None
+    while True:
+        after = f', after: "{cursor}"' if cursor else ""
+        query = (
+            f'{{ repository(owner: "{owner}", name: "{name}") {{ '
+            f'issues(states: OPEN, labels: ["kraken-task"], first: 100{after}) {{ '
+            f'pageInfo {{ hasNextPage endCursor }} '
+            f'nodes {{ number title createdAt body '
+            f'labels(first: 20) {{ nodes {{ name }} }} '
+            f'blockedBy(first: 50) {{ nodes {{ number state }} }} }} }} }} }}'
+        )
+        resp = graphql(query)
+        if resp is None:
+            return None
+        page = resp["data"]["repository"]["issues"]
+        nodes.extend(page["nodes"])
+        if not page["pageInfo"]["hasNextPage"]:
+            return nodes
+        cursor = page["pageInfo"]["endCursor"]
 
-    Native blocked-by relationships take priority: blocked while any native
-    blocker is still open. Only when a candidate has zero native blockers is a
-    `depends-on: #N` body line consulted as a fallback — blocked while that
-    target issue is open."""
-    blockers = gh_json([
-        "api", f"repos/{repo}/issues/{number}/dependencies/blocked_by",
-    ])
-    if blockers is None:
+
+def resolve_depends_on(repo, targets):
+    """Resolve every `depends-on: #N` fallback target's open/closed state in
+    one batched GraphQL call (one aliased `iN: issue(number: N) { state }`
+    field per distinct target), never one call per candidate. Returns
+    {number: is_open}, or None on transport failure."""
+    if not targets:
+        return {}
+    owner, name = repo.split("/", 1)
+    fields = " ".join(f"i{n}: issue(number: {n}) {{ state }}" for n in targets)
+    resp = graphql(f'{{ repository(owner: "{owner}", name: "{name}") {{ {fields} }} }}')
+    if resp is None:
         return None
-    if len(blockers) > 0:
-        return any(str(b.get("state", "")).lower() == "open" for b in blockers)
+    repo_obj = resp["data"]["repository"]
+    return {
+        n: str((repo_obj.get(f"i{n}") or {}).get("state", "")).upper() == "OPEN"
+        for n in targets
+    }
 
-    body_obj = gh_json(["-R", repo, "issue", "view", str(number), "--json", "body"])
-    if body_obj is None:
-        return None
-    dep = None
-    for line in (body_obj.get("body") or "").split("\n"):
-        m = re.match(r"^depends-on: *#([0-9]+)", line)
-        if m:
-            dep = m.group(1)
-            break
-    if dep is None:
-        return False
 
-    state_obj = gh_json(["-R", repo, "issue", "view", dep, "--json", "state"])
-    if state_obj is None:
+def classify_queue(repo, project):
+    """The shared startable/held classification list-startable and watch's
+    snapshot both read — one code path so the filter can't drift between them.
+    Returns a list of (number, title, createdAt, "startable"|"held") sorted
+    oldest-first, or None on transport failure."""
+    nodes = fetch_open_tasks(repo)
+    if nodes is None:
         return None
-    return str(state_obj.get("state", "")).lower() == "open"
+    project_label = f"project:{project}"
+    nodes = [
+        n for n in nodes
+        if project_label in {l.get("name", "") for l in n.get("labels", {}).get("nodes", [])}
+    ]
+    nodes.sort(key=lambda n: n.get("createdAt", ""))
+
+    rows = []            # [number, title, createdAt, state-or-None]
+    fallback_targets = []  # (row_index, dep_number) needing the depends-on batch
+
+    for node in nodes:
+        number = node["number"]
+        title = node.get("title", "")
+        created = node.get("createdAt", "")
+        label_names = [l.get("name", "") for l in node.get("labels", {}).get("nodes", [])]
+        if any(h in label_names for h in HELD_LABELS):
+            rows.append([number, title, created, "held"])
+            continue
+
+        blockers = node.get("blockedBy", {}).get("nodes", [])
+        if blockers:
+            blocked = any(str(b.get("state", "")).upper() == "OPEN" for b in blockers)
+            rows.append([number, title, created, "held" if blocked else "startable"])
+            continue
+
+        dep = None
+        for line in (node.get("body") or "").split("\n"):
+            m = re.match(r"^depends-on: *#([0-9]+)", line)
+            if m:
+                dep = int(m.group(1))
+                break
+        if dep is None:
+            rows.append([number, title, created, "startable"])
+            continue
+        rows.append([number, title, created, None])
+        fallback_targets.append((len(rows) - 1, dep))
+
+    if fallback_targets:
+        dep_open = resolve_depends_on(repo, sorted({dep for _, dep in fallback_targets}))
+        if dep_open is None:
+            return None
+        for idx, dep in fallback_targets:
+            rows[idx][3] = "held" if dep_open.get(dep, False) else "startable"
+
+    return [tuple(r) for r in rows]
 
 
 def cmd_list_startable(args):
-    repo, project = args.repo, args.project
-    snapshot = args.snapshot
-
-    issues = gh_json([
-        "-R", repo, "issue", "list", "--state", "open",
-        "--limit", "1000000",  # ceiling far above any real queue; gh walks
-        "--label", "kraken-task",  # every page under it, so nothing is dropped.
-        "--label", f"project:{project}",
-        "--json", "number,title,labels,createdAt",
-    ])
-    if issues is None:
+    rows = classify_queue(args.repo, args.project)
+    if rows is None:
         return EXIT_TRANSPORT
 
-    issues.sort(key=lambda it: it.get("createdAt", ""))
-
-    snapshot_rows = []   # (number, "startable"|"held")
-    startable_rows = []  # (number, title) in createdAt order
-
-    for it in issues:
-        number = it["number"]
-        title = it.get("title", "")
-        label_names = [lbl.get("name", "") for lbl in it.get("labels", [])]
-        if any(h in label_names for h in HELD_LABELS):
-            snapshot_rows.append((number, "held"))
-            continue
-        blocked = is_blocked(repo, number)
-        if blocked is None:
-            return EXIT_TRANSPORT
-        if blocked:
-            snapshot_rows.append((number, "held"))
-        else:
-            snapshot_rows.append((number, "startable"))
-            startable_rows.append((number, title))
-
-    if snapshot:
-        for number, state in sorted(snapshot_rows, key=lambda r: r[0]):
+    if args.snapshot:
+        for number, _, _, state in sorted(rows, key=lambda r: r[0]):
             print(f"{number}:{state}")
     else:
-        for number, title in startable_rows:
-            print(f"{number}\t{title}")
+        for number, title, _, state in rows:  # already createdAt-sorted
+            if state == "startable":
+                print(f"{number}\t{title}")
     return EXIT_OK
 
 
@@ -402,30 +462,15 @@ def cmd_release(args):
 
 def snapshot_state(repo, project):
     """Compute the queue snapshot in-process — the same startable/held split
-    list-startable emits in --snapshot mode. Returns the snapshot text, or None
-    on a transport failure (the watcher skips that cycle)."""
-    issues = gh_json([
-        "-R", repo, "issue", "list", "--state", "open",
-        "--limit", "1000000",
-        "--label", "kraken-task",
-        "--label", f"project:{project}",
-        "--json", "number,title,labels,createdAt",
-    ])
-    if issues is None:
+    list-startable emits in --snapshot mode, via the same classify_queue.
+    Returns the snapshot text, or None on a transport failure (the watcher
+    skips that cycle)."""
+    rows = classify_queue(repo, project)
+    if rows is None:
         return None
-    issues.sort(key=lambda it: it.get("createdAt", ""))
-    rows = []
-    for it in issues:
-        number = it["number"]
-        label_names = [lbl.get("name", "") for lbl in it.get("labels", [])]
-        if any(h in label_names for h in HELD_LABELS):
-            rows.append((number, "held"))
-            continue
-        blocked = is_blocked(repo, number)
-        if blocked is None:
-            return None
-        rows.append((number, "held" if blocked else "startable"))
-    return "\n".join(f"{n}:{state}" for n, state in sorted(rows, key=lambda r: r[0]))
+    return "\n".join(
+        f"{n}:{state}" for n, _, _, state in sorted(rows, key=lambda r: r[0])
+    )
 
 
 def cmd_watch(args):
