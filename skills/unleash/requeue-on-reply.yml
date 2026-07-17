@@ -82,11 +82,14 @@ jobs:
             exit 0
           fi
 
-          # Worker comments open with PROTOCOL.md §4's attribution blockquote.
+          # Worker comments MUST *open* with PROTOCOL.md §4's attribution
+          # blockquote, so only the FIRST line counts: head -n 1 before the grep
+          # stops an operator who quotes the disclaimer mid-reply (grep's ^ would
+          # otherwise match the start of ANY line) from being misread as a worker.
           # LC_ALL=C matches the disclaimer's astral-plane 🐙 (U+1F419) bytewise —
           # GNU grep 3.1 misses it under a UTF-8 locale (see tests/lib.sh) — and
           # the pattern is name-agnostic (matches up to the worker-name backtick).
-          if printf '%s' "$COMMENT_BODY" | LC_ALL=C grep -q '^> 🐙 \*\*Kraken worker `'; then
+          if printf '%s' "$COMMENT_BODY" | head -n 1 | LC_ALL=C grep -q '^> 🐙 \*\*Kraken worker `'; then
             echo "requeue: worker comment (disclaimer present) on #$NUM — no-op"
             exit 0
           fi

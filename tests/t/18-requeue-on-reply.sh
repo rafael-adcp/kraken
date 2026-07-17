@@ -43,6 +43,15 @@ assert_rc $? 0 "#2 run"
 has_label 2 needs-decision || fail "#2 worker comment wrongly requeued (disclaimer ignored)"
 assert_eq "$(comment_count 2)" "0" "#2 got a comment it should not have"
 
+# #2b — first-line anchoring: an operator answering a needs-decision by pasting
+# the worker's disclaimer line MID-body (quoting the question they answer) must
+# still requeue — the disclaimer only classifies a worker when it OPENS the body.
+mk_issue 20 "operator reply quoting the disclaimer mid-body still requeues" kraken-task "project:app" needs-decision
+run_case 20 "$(printf 'answering your question below:\n\n%s\n\noption B, go' "$DISCLAIMER")" "User"
+assert_rc $? 0 "#2b run"
+has_label 20 needs-decision && fail "#2b operator reply quoting the disclaimer mid-body was misread as a worker comment"
+last_comment 20 | grep -q '^requeue: ' || fail "#2b missing requeue confirmation comment"
+
 mk_issue 3 "no held label" kraken-task "project:app"
 run_case 3 "nice work everyone" "User"
 assert_rc $? 0 "#3 run"
