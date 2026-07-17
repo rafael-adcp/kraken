@@ -10,6 +10,9 @@ Stdlib only (unittest), no network, no gh. Run: python3 tests/unit/test_kraken.p
 import os
 import sys
 import unittest
+from types import SimpleNamespace
+from io import StringIO
+from contextlib import redirect_stdout
 
 # Import kraken.py from the plugin folder without installing anything.
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -161,6 +164,126 @@ class CommentPaginationTests(unittest.TestCase):
 
         result = kraken.comment_bodies("OWNER/tasks", "42")
         self.assertEqual(kraken.arbitrate_winner(result), "heir")
+
+
+class ClaimNextIterationTests(unittest.TestCase):
+    """cmd_claim_next's loop, isolated from any transport: the classification
+    (classify_queue) and the per-candidate claim (_claim_once) are both mocked,
+    so only the iteration logic — skip-on-held, skip-on-lost, forward-only,
+    stop-on-transport, honest-empty — is under test."""
+
+    def setUp(self):
+        self._orig_classify = kraken.classify_queue
+        self._orig_claim_once = kraken._claim_once
+        self.attempted = []  # issue numbers _claim_once was actually called on
+
+    def tearDown(self):
+        kraken.classify_queue = self._orig_classify
+        kraken._claim_once = self._orig_claim_once
+
+    def _run(self, rows, claim_results, json_mode=False):
+        """rows: what classify_queue returns (or None). claim_results: dict
+        {issue_number: exit_code} the mocked _claim_once replays. Returns
+        (exit_code, stdout)."""
+        kraken.classify_queue = lambda repo, project, include_body=False: rows
+
+        def fake_claim_once(repo, issue, worker):
+            self.attempted.append(issue)
+            return claim_results[issue]
+        kraken._claim_once = fake_claim_once
+
+        args = SimpleNamespace(repo="OWNER/tasks", project="app",
+                               worker="w1", json=json_mode)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            rc = kraken.cmd_claim_next(args)
+        return rc, buf.getvalue()
+
+    def test_claims_first_startable(self):
+        rows = [(7, "oldest", "t1", "startable", "body-7")]
+        rc, out = self._run(rows, {7: kraken.EXIT_OK})
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(self.attempted, [7])
+        self.assertIn("claim-next: claimed issue=7 worker=w1", out)
+        self.assertIn("7\toldest", out)
+        self.assertIn("body-7", out)
+
+    def test_skips_held_rows_without_attempting_them(self):
+        # A held candidate is never even offered to _claim_once — the guard
+        # cost is spent once in the listing, not re-paid per row.
+        rows = [
+            (5, "held one", "t1", "held", "b5"),
+            (7, "startable", "t2", "startable", "b7"),
+        ]
+        rc, out = self._run(rows, {7: kraken.EXIT_OK})
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(self.attempted, [7])  # 5 skipped, never attempted
+
+    def test_skip_on_lost_tiebreaker_moves_forward_never_back(self):
+        # THE §5 invariant: a lost tiebreaker on the oldest candidate moves on
+        # to the next — it must never retry the issue it just lost.
+        rows = [
+            (7, "lost this", "t1", "startable", "b7"),
+            (9, "win this", "t2", "startable", "b9"),
+        ]
+        rc, out = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_OK})
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(self.attempted, [7, 9])       # forward order
+        self.assertEqual(self.attempted.count(7), 1)   # 7 never retried
+        self.assertIn("claim-next: claimed issue=9 worker=w1", out)
+
+    def test_skip_on_held_since_listing_moves_to_next(self):
+        # A candidate that acquired a held label between listing and claim
+        # (exit 11) is skipped, and the next candidate is tried.
+        rows = [
+            (7, "now held", "t1", "startable", "b7"),
+            (9, "clear", "t2", "startable", "b9"),
+        ]
+        rc, out = self._run(rows, {7: kraken.EXIT_NOT_CLEAR, 9: kraken.EXIT_OK})
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(self.attempted, [7, 9])
+
+    def test_empty_queue_is_honest_none(self):
+        rc, out = self._run([], {})
+        self.assertEqual(rc, kraken.EXIT_NONE)
+        self.assertEqual(self.attempted, [])
+        self.assertIn("claim-next: none project:app", out)
+
+    def test_all_candidates_lost_or_held_is_none(self):
+        rows = [
+            (7, "a", "t1", "startable", "b7"),
+            (9, "b", "t2", "startable", "b9"),
+        ]
+        rc, out = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_NOT_CLEAR})
+        self.assertEqual(rc, kraken.EXIT_NONE)
+        self.assertEqual(self.attempted, [7, 9])
+
+    def test_transport_during_claim_stops_immediately(self):
+        # A gh/network fault leaves the claim ambiguous: claim-next must stop
+        # (exit 20), never wander to another candidate with a write half-landed.
+        rows = [
+            (7, "ambiguous", "t1", "startable", "b7"),
+            (9, "untouched", "t2", "startable", "b9"),
+        ]
+        rc, out = self._run(rows, {7: kraken.EXIT_TRANSPORT, 9: kraken.EXIT_OK})
+        self.assertEqual(rc, kraken.EXIT_TRANSPORT)
+        self.assertEqual(self.attempted, [7])  # 9 never reached
+        self.assertIn("state unknown", out)
+
+    def test_transport_during_listing_is_twenty(self):
+        rc, out = self._run(None, {})
+        self.assertEqual(rc, kraken.EXIT_TRANSPORT)
+        self.assertEqual(self.attempted, [])
+        self.assertIn("claim-next: gh-failure stage=list", out)
+
+    def test_json_mode_emits_structured_win(self):
+        rows = [(7, "the title", "t1", "startable", "### Goal\ndo it")]
+        rc, out = self._run(rows, {7: kraken.EXIT_OK}, json_mode=True)
+        self.assertEqual(rc, kraken.EXIT_OK)
+        import json as _json
+        payload = _json.loads(out.strip().splitlines()[-1])
+        self.assertEqual(payload, {"issue": 7, "title": "the title",
+                                   "body": "### Goal\ndo it"})
 
 
 if __name__ == "__main__":

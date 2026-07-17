@@ -28,6 +28,9 @@ Exit-code contract (PROTOCOL.md §12), preserved verbatim from the scripts:
     10  lost the claim tiebreaker — back off, pick the next candidate
     11  no longer clear — a held label appeared since listing; skip the task
     20  gh / network transport failure — state unknown, re-check before retry
+    3   claim-next only: no candidate was startable — the queue is empty, or
+        every candidate turned out held/lost as it iterated (nothing to claim,
+        an honest empty result, not a fault)
     2   bad invocation (missing file / unknown mode)
 """
 
@@ -44,6 +47,10 @@ EXIT_OK = 0
 EXIT_LOST = 10
 EXIT_NOT_CLEAR = 11
 EXIT_TRANSPORT = 20
+# claim-next only: the queue held no startable candidate — either it was empty,
+# or every candidate turned out held/lost as claim-next iterated. An honest
+# "nothing to claim", distinct from success (0) and from a transport fault (20).
+EXIT_NONE = 3
 EXIT_USAGE = 2
 
 # The three "held" labels: a task carrying any of them is claimed, escalated, or
@@ -262,11 +269,13 @@ def resolve_depends_on(repo, targets):
     }
 
 
-def classify_queue(repo, project):
+def classify_queue(repo, project, include_body=False):
     """The shared startable/held classification list-startable and watch's
     snapshot both read — one code path so the filter can't drift between them.
     Returns a list of (number, title, createdAt, "startable"|"held") sorted
-    oldest-first, or None on transport failure."""
+    oldest-first, or None on transport failure. With include_body=True each row
+    gains a fifth element, the issue body, so claim-next can brief a subagent
+    from the win without a second fetch (the GraphQL walk already has it)."""
     nodes = fetch_open_tasks(repo)
     if nodes is None:
         return None
@@ -277,34 +286,35 @@ def classify_queue(repo, project):
     ]
     nodes.sort(key=lambda n: n.get("createdAt", ""))
 
-    rows = []            # [number, title, createdAt, state-or-None]
+    rows = []            # [number, title, createdAt, state-or-None, body]
     fallback_targets = []  # (row_index, dep_number) needing the depends-on batch
 
     for node in nodes:
         number = node["number"]
         title = node.get("title", "")
         created = node.get("createdAt", "")
+        body = node.get("body") or ""
         label_names = [l.get("name", "") for l in node.get("labels", {}).get("nodes", [])]
         if any(h in label_names for h in HELD_LABELS):
-            rows.append([number, title, created, "held"])
+            rows.append([number, title, created, "held", body])
             continue
 
         blockers = node.get("blockedBy", {}).get("nodes", [])
         if blockers:
             blocked = any(str(b.get("state", "")).upper() == "OPEN" for b in blockers)
-            rows.append([number, title, created, "held" if blocked else "startable"])
+            rows.append([number, title, created, "held" if blocked else "startable", body])
             continue
 
         dep = None
-        for line in (node.get("body") or "").split("\n"):
+        for line in body.split("\n"):
             m = re.match(r"^depends-on: *#([0-9]+)", line)
             if m:
                 dep = int(m.group(1))
                 break
         if dep is None:
-            rows.append([number, title, created, "startable"])
+            rows.append([number, title, created, "startable", body])
             continue
-        rows.append([number, title, created, None])
+        rows.append([number, title, created, None, body])
         fallback_targets.append((len(rows) - 1, dep))
 
     if fallback_targets:
@@ -314,7 +324,9 @@ def classify_queue(repo, project):
         for idx, dep in fallback_targets:
             rows[idx][3] = "held" if dep_open.get(dep, False) else "startable"
 
-    return [tuple(r) for r in rows]
+    if include_body:
+        return [tuple(r) for r in rows]
+    return [(n, t, c, s) for n, t, c, s, _ in rows]
 
 
 def cmd_list_startable(args):
@@ -334,8 +346,12 @@ def cmd_list_startable(args):
 
 # --- subcommand: claim -------------------------------------------------------
 
-def cmd_claim(args):
-    repo, issue, worker = args.repo, args.issue, args.worker
+def _claim_once(repo, issue, worker):
+    """The one contended claim sequence — guard, label, comment, arbitrate —
+    executed identically every time (PROTOCOL.md §5). Returns an exit code and
+    prints the same `claim:` diagnostic line for each outcome. Shared by the
+    `claim` subcommand and by `claim-next`'s per-candidate loop so the two can
+    never drift: a loss backs off writing nothing, exactly here, once."""
 
     # 1. Guard — re-fetch labels; a held task is skipped with zero writes.
     labels_obj = gh_json(["-R", repo, "issue", "view", str(issue), "--json", "labels"])
@@ -371,6 +387,51 @@ def cmd_claim(args):
         return EXIT_OK
     print(f"claim: lost-tiebreaker issue={issue} winner={winner or 'unknown'}")
     return EXIT_LOST
+
+
+def cmd_claim(args):
+    return _claim_once(args.repo, args.issue, args.worker)
+
+
+# --- subcommand: claim-next --------------------------------------------------
+
+def cmd_claim_next(args):
+    """Collapse the deterministic claim loop into one invocation: list startable
+    candidates oldest-first, then guard/label/comment/arbitrate each in turn,
+    stopping at the first win. Per-candidate losses (10/11) move on to the next
+    one, exactly as the drain loop did by hand; a transport fault (20) stops
+    immediately with the state-unknown semantics; an exhausted queue is an
+    honest EXIT_NONE. Never turns a lost tiebreaker into a retry on the same
+    issue (PROTOCOL.md §5) — it iterates forward, never back."""
+    repo, project, worker = args.repo, args.project, args.worker
+
+    rows = classify_queue(repo, project, include_body=True)
+    if rows is None:
+        print("claim-next: gh-failure stage=list")
+        return EXIT_TRANSPORT
+
+    for number, title, _created, state, body in rows:  # already oldest-first
+        if state != "startable":
+            continue
+        rc = _claim_once(repo, number, worker)
+        if rc == EXIT_OK:
+            if args.json:
+                print(json.dumps({"issue": number, "title": title, "body": body}))
+            else:
+                print(f"claim-next: claimed issue={number} worker={worker}")
+                print(f"{number}\t{title}")
+                print()
+                print(body)
+            return EXIT_OK
+        if rc == EXIT_TRANSPORT:
+            # State is now ambiguous — do NOT move on to another candidate while
+            # a write of ours may have half-landed. Re-check before any retry.
+            print(f"claim-next: gh-failure issue={number} — state unknown, re-check")
+            return EXIT_TRANSPORT
+        # EXIT_LOST (10) / EXIT_NOT_CLEAR (11): back off, try the next candidate.
+
+    print(f"claim-next: none project:{project}")
+    return EXIT_NONE
 
 
 # --- subcommand: heartbeat ---------------------------------------------------
@@ -521,6 +582,17 @@ def build_parser():
     p.add_argument("issue")
     p.add_argument("worker")
     p.set_defaults(func=cmd_claim)
+
+    p = sub.add_parser(
+        "claim-next",
+        help="list + guard + claim the oldest startable candidate in one shot",
+    )
+    p.add_argument("repo")
+    p.add_argument("project")
+    p.add_argument("worker")
+    p.add_argument("--json", action="store_true",
+                   help="emit the won claim as a JSON object {issue,title,body}")
+    p.set_defaults(func=cmd_claim_next)
 
     p = sub.add_parser("heartbeat", help="liveness comment")
     p.add_argument("repo")

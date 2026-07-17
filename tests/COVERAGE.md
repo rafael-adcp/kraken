@@ -63,7 +63,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | --- | --- | --- | --- |
 | L140 | Label filtering **SHOULD** be client-side for determinism | ✅ pinned | `tests/t/01` asserts exact client-side-filtered output; `tests/t/19` pins the O(1) call count that client-side filtering enables. |
 | L144 | Guard: a held task **MUST** be skipped without writing anything | ✅ pinned | `tests/t/03` (exit 11, zero writes). |
-| L150 | A loser **MUST** back off removing nothing | ✅ pinned | `tests/t/04` (the claim race: loser exits 10, removes nothing). |
+| L150 | A loser **MUST** back off removing nothing | ✅ pinned | `tests/t/04` (the claim race: loser exits 10, removes nothing); `tests/t/22` + `tests/unit` `ClaimNextIterationTests` (`claim-next` skips a lost/held candidate forward — never retries it — and two concurrent `claim-next` workers claim two different tasks). |
 | L157 | `claimed-by:` lines before the window start **MUST** be ignored | ✅ pinned | `tests/t/05`; `tests/unit` `test_released_resets_window`, `test_stale_claim_resets_window`, `test_needs_decision_resets_window`, `test_reset_after_claim_leaves_no_winner`. |
 | L160 | `heartbeat:` **MUST NOT** reset the window | ✅ pinned | (same as §4 L113) `tests/t/08`, `tests/unit` `test_heartbeat_does_not_reset`. |
 | L167 | A worker **MUST** work one task at a time; **MUST NOT** claim a second while holding a claim | 🕳 gap | `kraken.py claim` does not refuse a second claim while a `claim-<worker>.json` state file exists. State-file lifecycle is pinned (`tests/t/15`) but the one-at-a-time guard is not. Follow-up: rafael-adcp/personal-tasks#35 (gap **G1** below). |

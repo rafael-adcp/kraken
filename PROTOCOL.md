@@ -287,7 +287,13 @@ with a subcommand per transition (`list-startable`, `claim`, `heartbeat`,
 `escalate`, `deliver`, `release`, `watch`), driven by a Claude Code skill
 ([`skills/unleash/SKILL.md`](skills/unleash/SKILL.md)) that supplies the
 judgment between transitions. `gh` remains the transport, so it runs against any
-authenticated `gh`.
+authenticated `gh`. It also ships a `claim-next OWNER/tasks <project> <worker>`
+convenience that composes `list-startable` + `claim` into the whole
+deterministic claim loop (list, guard, label, comment, arbitrate, skip-on-loss,
+try the next candidate) behind one invocation — a worker-side ergonomic detail,
+not part of the wire contract; it exits `0` holding a won claim (printing the
+task's number, title, and body), a distinct `3` when nothing is claimable, and
+`20` on transport failure with the same state-unknown semantics.
 
 The **conformance suite** in [`tests/`](tests/) exercises the contract's
 invariants against a stateful GitHub stub — the claim guard, the claim race

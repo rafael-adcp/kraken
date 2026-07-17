@@ -34,7 +34,7 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
   runs in an environment prepared for a specific project — an unscoped worker could
   claim a task its environment cannot host.
 - `--once` (optional): drain the queue once and stop. Without it, an empty queue is
-  not the end — step 6 arms a zero-token background watcher and this worker stays in
+  not the end — step 4 arms a zero-token background watcher and this worker stays in
   ambush, waking whenever a startable task appears.
 
 ## The concurrency model: capacity = how many workers I launch
@@ -42,7 +42,7 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
 - **You work ONE task at a time.** Never claim a second task before finishing (or
   releasing) the first. Subagents are fine *within* a task — in fact each claimed task
   runs its heavy work in a **fresh subagent** so the driver's context stays lean over a
-  long drain (see Protocol, step 4) — but never to run *extra* tasks: still one at a time.
+  long drain (see Protocol, step 2) — but never to run *extra* tasks: still one at a time.
 - I control per-project parallelism by how many workers I point at it: a project
   whose clones/environments are fully isolated gets as many workers as I started;
   a project with shared test state (database, fixtures, ports) gets exactly one.
@@ -84,6 +84,7 @@ time:
 
 | Command | Does |
 | --- | --- |
+| `kraken.py claim-next OWNER/tasks <project> <worker-name>` | list → guard → claim the oldest startable candidate in one shot; prints the won task (number, title, body) |
 | `kraken.py list-startable OWNER/tasks <project>` | (read-only) startable candidates, oldest first |
 | `kraken.py claim OWNER/tasks <issue> <worker-name>` | queued → `in-progress`: guard, label, claim comment, tiebreaker |
 | `kraken.py heartbeat OWNER/tasks <issue> <worker-name> "<progress>"` | liveness comment — keeps the reaper away, resets nothing |
@@ -107,43 +108,34 @@ time:
 
 ## Protocol
 
-1. List candidates with the bundled lister — open `kraken-task` issues scoped to
-   your project, **without `in-progress`, `needs-decision`, or `awaiting-merge`**
-   (those are running or waiting on a human — never claim one) **and not
-   dependency-blocked** (the lister checks blocked-by relationships server-side,
-   honoring a `depends-on: #N` body line as a fallback — see `PROTOCOL.md` §3),
-   oldest first, one `<number> <title>` per line:
+1. **Claim the next task** with the bundled claimer — one invocation that lists
+   startable candidates (open `kraken-task` issues scoped to your project,
+   **without `in-progress`, `needs-decision`, or `awaiting-merge`** and **not
+   dependency-blocked** — blocked-by checked server-side, honoring a
+   `depends-on: #N` body line as a fallback, see `PROTOCOL.md` §3), then walks
+   them oldest-first — guard, label, `claimed-by:` comment, claim-window
+   arbitration — stopping at the first task it wins:
 
    ```
-   python3 "<this skill's folder>/kraken.py" list-startable OWNER/tasks <name>
+   python3 "<this skill's folder>/kraken.py" claim-next OWNER/tasks <name> <worker-name>
    ```
 
-   Pass `<name>` bare — the script prepends the `project:` prefix itself. No
-   output = nothing startable. Exit `20` = gh/network failure — report it, don't
-   guess at the queue.
-2. **Trust the lister.** Every line it prints is startable — labels checked,
-   blocked-by relationships checked, server-side. There is nothing left to
-   re-verify before claiming; the whole "is this really unblocked" judgment
-   lives in `kraken.py list-startable` (`PROTOCOL.md` §3), not here.
-3. **Claim** with the bundled claimer:
+   Pass `<name>` bare — the script prepends the `project:` prefix itself. The
+   whole deterministic list/guard/claim/arbitrate loop is the script's job,
+   executed identically every time (semantics: `PROTOCOL.md` §5): a lost
+   tiebreaker or a task that turned held since listing is skipped and the next
+   candidate tried, writing nothing behind. Yours is only the exit code:
 
-   ```
-   python3 "<this skill's folder>/kraken.py" claim OWNER/tasks <issue> <worker-name>
-   ```
-
-   The whole contended sequence — held-label guard (never stack a state label),
-   label, `claimed-by: <worker-name>` comment, claim-window arbitration — is the
-   script's job, executed identically every time (semantics: `PROTOCOL.md` §5).
-   Yours is only the exit code:
-
-   - `0` — claimed. The task is yours; go to step 4.
-   - `10` — lost the tiebreaker. Back off (remove nothing) and pick the next
-     candidate.
-   - `11` — no longer clear (a held label appeared since listing). Skip it.
+   - `0` — claimed. The won task (number, title, and body — its goal /
+     acceptance / notes) is printed, so you can brief the subagent without a
+     second fetch; the task is yours, go to step 2. (`--json` emits the win as a
+     `{issue, title, body}` object on the final stdout line instead.)
+   - `3` — nothing claimable: the queue is empty, or every candidate turned out
+     held or lost as it iterated. Not an error — the drain is done (step 3).
    - `20` — gh/network failure, claim state unknown. Re-check the issue's real
      state before retrying; never move to another task while a claim of yours is
      ambiguous.
-4. **Hand the claimed task to a fresh subagent.** Everything from here to delivery is
+2. **Hand the claimed task to a fresh subagent.** Everything from here to delivery is
    the heavy part — reading and writing many files — and ~90% of it stops mattering the
    moment the task ships. Run it in a **new subagent**: a context born empty and
    discarded when it returns, so the driver's window stays ~O(1) per task no matter how
@@ -200,13 +192,13 @@ time:
       open, label it honestly, and say exactly where it stands. (Review bounce: I
       comment the feedback and remove `awaiting-merge` — the task requeues, and
       whoever claims it continues on the existing branch with the full thread.)
-5. Loop back to step 1 until no startable task remains (within your scope), collecting
+3. Loop back to step 1 until no startable task remains (within your scope), collecting
    each subagent's compact result. Report a drain summary: awaiting-merge /
    needs-decision / untouched. My decision queue is the `needs-decision` filter; my
    review queue is the `awaiting-merge` filter. Invoked with `--once`? You are done —
-   end the turn. Otherwise, continue to step 6.
+   end the turn. Otherwise, continue to step 4.
 
-6. **Arm the watcher and go quiet.** Use the **Monitor tool** — `persistent: true`,
+4. **Arm the watcher and go quiet.** Use the **Monitor tool** — `persistent: true`,
    running this skill's bundled `kraken.py watch` (it lives in the same folder as this
    SKILL.md; if the Monitor tool is not in your tool list, load it first — some
    harnesses defer tool schemas). Skip this if a watcher from a previous drain is
@@ -223,7 +215,8 @@ time:
    Pass `<name>` bare — the script prepends the `project:` prefix itself. It polls
    every 60s with a free `gh` call and prints one `kraken-queue:` line only when the
    queue snapshot changes and at least one task is startable (it delegates the filter
-   to `kraken.py list-startable` — literally the same subcommand as step 1) — an idle queue never
+   to `kraken.py list-startable` — the same startable classification step 1's
+   `claim-next` lists through) — an idle queue never
    invokes the model. Do not inline a rewritten
    script — the bundled one is versioned with the plugin. Cannot arm it (no Monitor
    tool, script missing)? Say so, offer `/loop /kraken:unleash ... --once` as the
@@ -279,7 +272,7 @@ issue's notes say otherwise:
   them, and open draft PRs.
 - It is NOT authorization to merge, push to default/protected branches, deploy,
   delete, or publish anything else — regardless of what the task says.
-- The watcher armed in step 6 adds nothing to this: each wake-up is another run of
+- The watcher armed in step 4 adds nothing to this: each wake-up is another run of
   this same protocol, bound by the same boundaries, and the script itself is
   read-only over the queue — one `gh issue list` per minute, no writes, no state
   outside its own shell loop.
