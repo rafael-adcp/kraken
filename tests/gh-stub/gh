@@ -70,13 +70,14 @@ unlock() { rmdir "$STATE/.lock"; }
 # as an artifact (pr/NNNN.json) instead of talking to GitHub, and capture -R's
 # repo (the conformance paths ignore it) so a PR is attributable to a repo.
 sub="" issue="" jsonf="" jqexpr="" add_label="" remove_label="" body="" endpoint="" limit=""
-repo="" pr_sub="" title="" head="" base="" draft=0 gql_query=""
+repo="" pr_sub="" title="" head="" base="" draft=0 gql_query="" label_sub=""
 label_filters=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -R)             repo="$2"; shift 2 ;;
     issue)          sub="$2"; shift 2 ;;
     pr)             sub="pr"; pr_sub="$2"; shift 2 ;;
+    label)          sub="label"; label_sub="$2"; shift 2 ;;
     api)            sub="api"; endpoint="$2"; shift 2 ;;
     --json)         jsonf="$2"; shift 2 ;;
     --jq)           jqexpr="$2"; shift 2 ;;
@@ -357,12 +358,11 @@ case "$sub" in
         n="$(printf '%s' "$endpoint" | sed -n 's#.*/issues/\([0-9][0-9]*\)/comments#\1#p')"
         d="$STATE/issues/$n"
         [ -d "$d" ] || { echo "gh-stub: no such issue $n" >&2; exit 1; }
-        bodies=""
-        for f in "$d"/comments/*.md; do
-          [ -f "$f" ] || continue
-          bodies="${bodies}$(jq -Rs '{body: .}' < "$f")"
-        done
-        emit "$(printf '%s' "$bodies" | jq -s .)"
+        # [{body, createdAt}] in server order — comment_bodies' `--jq .[].body`
+        # still selects the bodies, while status' comment_records reads the
+        # createdAt the heartbeat-age anchor needs (from each .at sidecar, else
+        # the issue createdAt), so both paths share this one endpoint.
+        emit "$(comments_json "$d")"
         ;;
       */issues/*/dependencies/blocked_by)
         n="$(printf '%s' "$endpoint" | sed -n 's#.*/issues/\([0-9][0-9]*\)/dependencies/blocked_by#\1#p')"
@@ -403,13 +403,43 @@ case "$sub" in
           --arg repo "$repo" --arg title "$title" --arg body "$body" \
           --arg head "$head" --arg base "$base" \
           --argjson draft "$draft" --arg url "$url" \
-          '{repo:$repo, title:$title, body:$body, head:$head, base:$base, draft:($draft==1), url:$url}' \
+          '{repo:$repo, title:$title, body:$body, head:$head, base:$base, draft:($draft==1), url:$url, state:"OPEN", mergedAt:null}' \
           > "$STATE/pr/$(printf '%04d' "$n").json"
         unlock
         printf '%s\n' "$url"
         ;;
+      view)
+        # `gh pr view <url> --json state,mergedAt` — the orphan heuristic's only
+        # PR read. The URL's /pull/<n> maps to pr/<n>.json (seeded by mk_pr, or
+        # written by `pr create` above). Emit the stored object; --json field
+        # selection is honored by kraken.py reading .state/.mergedAt off it.
+        prn="$(printf '%s' "$issue" | sed -n 's#.*/pull/\([0-9][0-9]*\).*#\1#p')"
+        f="$STATE/pr/$(printf '%04d' "$prn").json"
+        [ -f "$f" ] || { echo "gh-stub: no such pr $issue" >&2; exit 1; }
+        emit "$(cat "$f")"
+        ;;
       *)
         echo "gh-stub: unsupported invocation: pr $pr_sub" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
+  label)
+    # Only `label list --json name`: the launch recon's project enumeration.
+    # Registry = every label the launch recon may point at, whether or not it
+    # is currently on an open issue: the union of $STATE/labels (empty projects
+    # seeded by mk_label) and every label applied to any issue.
+    case "$label_sub" in
+      list)
+        { for d in "$STATE"/issues/*/; do [ -d "$d" ] && cat "$d/labels"; done
+          [ -f "$STATE/labels" ] && cat "$STATE/labels"; } \
+          | sed '/^$/d' | sort -u | jq -R '{name: .}' | jq -s . > "$STATE/.labels.$$"
+        emit "$(cat "$STATE/.labels.$$")"
+        rm -f "$STATE/.labels.$$"
+        ;;
+      *)
+        echo "gh-stub: unsupported invocation: label $label_sub" >&2
         exit 1
         ;;
     esac

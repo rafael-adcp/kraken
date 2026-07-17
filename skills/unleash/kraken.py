@@ -35,6 +35,7 @@ Exit-code contract (PROTOCOL.md §12), preserved verbatim from the scripts:
 """
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -134,6 +135,47 @@ def comment_bodies(repo, issue):
     # lines); machine lines are one-per-line, so a flat line scan downstream is
     # exactly what arbitration needs.
     return out.split("\n")
+
+
+def comment_records(repo, issue):
+    """Every comment as a {"body", "createdAt"} record, in server order —
+    paginated past 100 through the SAME REST comments endpoint comment_bodies
+    walks. `status` needs the timestamps (heartbeat-age anchoring) that the
+    body-only `comment_bodies` drops; reading them off the identical paginated
+    path means the age anchor is never computed from a truncated 100-comment
+    history (the very bug comment_bodies exists to avoid for the claim window).
+
+    Returns a list of dicts, or None on transport failure. `gh --jq` emits one
+    compact JSON object per comment (interior newlines escaped), so a per-line
+    decode is exact."""
+    rc, out = run_gh([
+        "api",
+        f"repos/{repo}/issues/{issue}/comments",
+        "--paginate",
+        "--jq", ".[] | {body, createdAt}",
+    ])
+    if rc != 0:
+        return None
+    records = []
+    decoder = json.JSONDecoder()
+    idx = 0
+    length = len(out)
+    while idx < length:
+        # Skip inter-object whitespace/newlines: `gh --jq` streams one object
+        # per result, but a jq that pretty-prints spreads each across lines, so
+        # decode object-by-object rather than line-by-line.
+        while idx < length and out[idx] in " \t\r\n":
+            idx += 1
+        if idx >= length:
+            break
+        try:
+            obj, end = decoder.raw_decode(out, idx)
+        except (ValueError, json.JSONDecodeError):
+            break
+        if isinstance(obj, dict):
+            records.append(obj)
+        idx = end
+    return records
 
 
 # --- machine-line grammar ----------------------------------------------------
@@ -561,6 +603,298 @@ def cmd_watch(args):
         time.sleep(poll_seconds)
 
 
+# --- subcommand: status ------------------------------------------------------
+#
+# The operator console, mechanized (PROTOCOL.md §12): the same read-only view
+# skills/status/SKILL.md used to teach an LLM to orchestrate — review queue,
+# decision queue, in-flight with heartbeat ages, the merged-PR-but-open-issue
+# orphan heuristic, and the launch recon — computed deterministically here so
+# the skill is a thin renderer and the data is reusable (scripts, cron, `--json`
+# for downstream tooling). Read-only: no label change, no comment, no write.
+#
+# Reuse, don't duplicate: the queue itself comes from the same paginated
+# fetch_open_tasks GraphQL walk list-startable uses (held tasks keep their
+# kraken-task label, so the walk returns them). Per-issue comment reads happen
+# only for tasks that are actually in flight or awaiting merge — an idle queue
+# stays O(pages) — and go through the paginated comment_records path so the
+# heartbeat anchor never reads a truncated >100-comment history.
+
+_PR_URL_RE = re.compile(r"https?://\S+?/pull/\d+")
+
+
+def project_names_of(node):
+    """The project:<name> suffixes carried by a queue node's labels."""
+    names = set()
+    for lbl in node.get("labels", {}).get("nodes", []):
+        name = lbl.get("name", "")
+        if name.startswith("project:"):
+            names.add(name[len("project:"):])
+    return names
+
+
+def label_names_of(node):
+    return {lbl.get("name", "") for lbl in node.get("labels", {}).get("nodes", [])}
+
+
+def parse_iso(ts):
+    """An ISO-8601 UTC timestamp (…Z) to epoch seconds, or None if unparseable."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.datetime.strptime(ts.strip(), "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
+
+
+def _is_machine_line(line):
+    line = line.rstrip("\r")
+    return line.startswith("claimed-by:") or line.startswith("heartbeat:")
+
+
+def heartbeat_anchor(records):
+    """The createdAt of the newest comment carrying a worker liveness machine
+    line (^claimed-by: or ^heartbeat:), or None when the worker never spoke.
+
+    This is the reaper's staleness anchor (reclaim-stale.yml), computed the same
+    way: only those two lines prove liveness, and an operator comment — carrying
+    neither — never resets the clock, so a human poking a dead worker's issue
+    cannot make it look alive. None means no anchor exists at all (a malformed
+    or silent claim), which the reaper treats as infinitely stale."""
+    newest = None
+    for rec in records:
+        body = rec.get("body") or ""
+        if any(_is_machine_line(l) for l in body.split("\n")):
+            created = rec.get("createdAt") or ""
+            if created and (newest is None or created > newest):
+                newest = created
+    return newest
+
+
+def flat_comment_lines(records):
+    """Every comment body flattened to a per-line list, in server order — the
+    shape arbitrate_winner reads."""
+    lines = []
+    for rec in records:
+        lines.extend((rec.get("body") or "").split("\n"))
+    return lines
+
+
+def parse_pr_url(records):
+    """The delivery PR URL for an awaiting-merge task: the newest `pr:` machine
+    line's URL (what `deliver` records), falling back to the newest GitHub
+    pull-request URL anywhere in the thread. None when no PR was recorded."""
+    from_line = None
+    fallback = None
+    for rec in records:  # server order — keep overwriting so the newest wins
+        for raw in (rec.get("body") or "").split("\n"):
+            line = raw.rstrip("\r").strip()
+            if line.startswith("pr:"):
+                url = line[len("pr:"):].strip()
+                if url:
+                    from_line = url
+            m = _PR_URL_RE.search(raw)
+            if m:
+                fallback = m.group(0)
+    return from_line or fallback
+
+
+def pr_is_merged(pr_url):
+    """Whether a delivery PR is already merged — the orphan heuristic's only
+    signal. Returns True/False, or None on transport failure (a flag is never
+    guessed from a failed read)."""
+    data = gh_json(["pr", "view", pr_url, "--json", "state,mergedAt"])
+    if data is None:
+        return None
+    return bool(data.get("mergedAt")) or str(data.get("state", "")).upper() == "MERGED"
+
+
+def list_projects(repo):
+    """Every project:<name> label configured in the repo, sorted, prefix
+    stripped — the launch recon points a worker at each. Read from `gh label
+    list` (not the open-task walk) so a project with no open task still gets a
+    launch line. Returns a sorted name list, or None on transport failure."""
+    data = gh_json(["-R", repo, "label", "list", "--limit", "200", "--json", "name"])
+    if data is None:
+        return None
+    return sorted(
+        n["name"][len("project:"):]
+        for n in data
+        if str(n.get("name", "")).startswith("project:")
+    )
+
+
+def format_age(seconds):
+    """A compact human age: '42s', '12m', '3h', '4d'. 'unknown' when there is no
+    anchor (a worker that never left a machine line)."""
+    if seconds is None:
+        return "unknown"
+    seconds = int(seconds)
+    if seconds < 0:
+        seconds = 0
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def compute_status(repo, project, nodes, now, *, comment_reader, pr_merged,
+                   project_lister):
+    """Pure-ish status computation, transport injected so it is unit-testable:
+    given the queue nodes (from fetch_open_tasks) and reader callbacks, build the
+    review/decision/in-flight/projects report. Returns the report dict, or None
+    on any injected-transport failure (propagated as exit 20)."""
+    if project:
+        pl = project
+        nodes = [n for n in nodes if pl in project_names_of(n)]
+
+    review, decision, in_flight = [], [], []
+    seen_projects = set()
+
+    for node in sorted(nodes, key=lambda n: (n.get("createdAt", ""), n.get("number", 0))):
+        seen_projects |= project_names_of(node)
+        number = node["number"]
+        title = node.get("title", "")
+        labels = label_names_of(node)
+
+        if "awaiting-merge" in labels:
+            records = comment_reader(repo, number)
+            if records is None:
+                return None
+            pr_url = parse_pr_url(records)
+            orphan = False
+            if pr_url:
+                merged = pr_merged(pr_url)
+                if merged is None:
+                    return None
+                orphan = bool(merged)
+            review.append({"number": number, "title": title,
+                           "pr_url": pr_url, "orphan": orphan})
+        elif "needs-decision" in labels:
+            decision.append({"number": number, "title": title})
+        elif "in-progress" in labels:
+            records = comment_reader(repo, number)
+            if records is None:
+                return None
+            worker = arbitrate_winner(flat_comment_lines(records)) or None
+            anchor = heartbeat_anchor(records)
+            age = None
+            if anchor:
+                anchor_epoch = parse_iso(anchor)
+                if anchor_epoch is not None:
+                    age = max(0, int(now - anchor_epoch))
+            in_flight.append({"number": number, "title": title, "worker": worker,
+                              "heartbeat_anchor": anchor,
+                              "heartbeat_age_seconds": age})
+
+    if project:
+        projects = [project]
+    else:
+        projects = project_lister(repo)
+        if projects is None:
+            return None
+
+    return {
+        "repo": repo,
+        "project": project or None,
+        "generated_at": datetime.datetime.fromtimestamp(
+            now, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "review_queue": review,
+        "decision_queue": decision,
+        "in_flight": in_flight,
+        "orphans": [r["number"] for r in review if r["orphan"]],
+        "projects": projects,
+    }
+
+
+def render_status(report):
+    """The human console — the shape skills/status/SKILL.md documents. A thin
+    renderer over compute_status's report; empty groups say so plainly."""
+    repo = report["repo"]
+    project = report["project"]
+    scope = f"project:{project} @ {repo}" if project else f"@ {repo}"
+    lines = [f"🐙 kraken status — {scope}", ""]
+
+    review = report["review_queue"]
+    lines.append(f"  📋 Review queue (awaiting-merge) — "
+                 f"{len(review) or 'nothing'} waiting for your merge"
+                 if review else
+                 "  📋 Review queue (awaiting-merge) — nothing waiting")
+    for item in review:
+        link = f" → {item['pr_url']}" if item["pr_url"] else " → (no PR link recorded)"
+        flag = "  ⚠️  PR looks merged — close it?" if item["orphan"] else ""
+        lines.append(f"     #{item['number']}  {item['title']}{link}{flag}")
+    lines.append("")
+
+    decision = report["decision_queue"]
+    lines.append(f"  ❓ Decision queue (needs-decision) — "
+                 f"{len(decision)} waiting for your call"
+                 if decision else
+                 "  ❓ Decision queue (needs-decision) — nothing waiting")
+    for item in decision:
+        lines.append(f"     #{item['number']}  {item['title']}  (options in thread)")
+    lines.append("")
+
+    in_flight = report["in_flight"]
+    lines.append(f"  ⚙️  In flight (in-progress) — {len(in_flight)} running"
+                 if in_flight else
+                 "  ⚙️  In flight (in-progress) — nothing running")
+    for item in in_flight:
+        worker = item["worker"] or "unknown"
+        age = format_age(item["heartbeat_age_seconds"])
+        lines.append(f"     #{item['number']}  {item['title']}  · worker {worker} "
+                     f"· last heartbeat {age} ago")
+    lines.append("")
+
+    orphans = report["orphans"]
+    if orphans:
+        joined = ", ".join(f"#{n}" for n in orphans)
+        lines.append(f"  ⚠️  {len(orphans)} possible orphan(s): {joined} — "
+                     f"PR looks merged but the issue is still open. You decide.")
+        lines.append("")
+
+    if project is None:
+        projects = report["projects"]
+        if projects:
+            lines.append("  🚀 Launch — one worker per prepared environment")
+            for name in projects:
+                lines.append(f"     /kraken:unleash {repo} "
+                             f"--worker-name <worker-name> --project {name}")
+        else:
+            lines.append("  🚀 Launch — no project: labels yet "
+                         "(create one with init --project)")
+    return "\n".join(lines)
+
+
+def cmd_status(args):
+    repo, project = args.repo, args.project
+    nodes = fetch_open_tasks(repo)
+    if nodes is None:
+        print("status: gh-failure stage=list", file=sys.stderr)
+        return EXIT_TRANSPORT
+
+    report = compute_status(
+        repo, project, nodes, time.time(),
+        comment_reader=comment_records,
+        pr_merged=pr_is_merged,
+        project_lister=list_projects,
+    )
+    if report is None:
+        print("status: gh-failure stage=read", file=sys.stderr)
+        return EXIT_TRANSPORT
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_status(report))
+    return EXIT_OK
+
+
 # --- CLI ---------------------------------------------------------------------
 
 def build_parser():
@@ -627,6 +961,17 @@ def build_parser():
     p.add_argument("repo")
     p.add_argument("project")
     p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser(
+        "status",
+        help="read-only operator console: review / decision / in-flight queues",
+    )
+    p.add_argument("repo")
+    p.add_argument("--project", default="",
+                   help="scope every queue to project:<name> (default: whole queue)")
+    p.add_argument("--json", action="store_true",
+                   help="emit the stable machine-readable status schema")
+    p.set_defaults(func=cmd_status)
 
     return parser
 
