@@ -1,13 +1,14 @@
 ---
 name: init
-description: Stand up a kraken coordination repo end to end — verify or create the private repo, install the bundled task template and coordination workflows (reaper, closed-issue cleanup, requeue-on-reply), and create the canonical labels. Strictly setup, the write-side twin of status's read-only console; it reads and writes no issues.
+description: Stand up a kraken coordination repo end to end — verify or create the private repo, install the bundled task template and coordination workflows (reaper, closed-issue cleanup, requeue-on-reply, queue-entry validator), and create the canonical labels. Strictly setup, the write-side twin of status's read-only console; it reads and writes no issues.
 ---
 
 # Kraken — raise the head
 
 You are the setup step for kraken: given a coordination-repo slug, you make that repo
 ready to receive tasks — the private repo exists, the task template and coordination
-workflows (reaper, closed-issue cleanup, requeue-on-reply) are committed, and the
+workflows (reaper, closed-issue cleanup, requeue-on-reply, queue-entry validator) are
+committed, and the
 state-machine labels are created. This is the symmetric partner
 to `status` (the read-only console): `init` builds the queue, `status` reads it. You
 touch no issues — none read, none written.
@@ -30,8 +31,9 @@ the first project is ready to queue against.
 ## Design decisions
 
 - **Assets are copied from this skill's bundled folder, never fetched from the network.**
-  `task-template.yml`, `reclaim-stale.yml`, `cleanup-closed.yml`, and
-  `requeue-on-reply.yml` ship in this plugin's `skills/unleash/` folder — the same
+  `task-template.yml`, `reclaim-stale.yml`, `cleanup-closed.yml`,
+  `requeue-on-reply.yml`, and `validate-task.yml` ship in this plugin's
+  `skills/unleash/` folder — the same
   install as this skill (`unleash` resolves its bundled `kraken.py` the same
   way). The bundled copies match the installed plugin version and work offline. Do
   not `curl` from `raw.githubusercontent.com`.
@@ -64,7 +66,7 @@ the first project is ready to queue against.
    Never create it public — the queue is instructions that run in your environment with
    your credentials (see the README's FAQ on who can command your workers).
 
-2. **Install the four assets** into the coordination repo, resolving each from this
+2. **Install the five assets** into the coordination repo, resolving each from this
    skill's bundled `skills/unleash/` folder:
 
    - `task-template.yml` → `.github/ISSUE_TEMPLATE/task.yml`
@@ -75,6 +77,9 @@ the first project is ready to queue against.
    - `requeue-on-reply.yml` → `.github/workflows/requeue-on-reply.yml` (requeues a
      held task when a genuine operator comment arrives — no 🐙 attribution
      disclaimer — so answering is "just reply")
+   - `validate-task.yml` → `.github/workflows/validate-task.yml` (the queue-entry
+     gate: flags a new/edited task missing its `project:<name>` label or its Goal
+     or Acceptance section with one actionable comment — it informs, never holds)
 
    For each, check the destination via the contents API:
 
@@ -141,8 +146,9 @@ the first project is ready to queue against.
 
 - Invoking this skill is my authorization to, on the coordination repo only:
   (a) **create the repo private** if it does not exist;
-  (b) **commit the four bundled template files** (`task.yml`, `reclaim-stale.yml`,
-  `cleanup-closed.yml`, `requeue-on-reply.yml`) via the contents API, creating them
+  (b) **commit the five bundled template files** (`task.yml`, `reclaim-stale.yml`,
+  `cleanup-closed.yml`, `requeue-on-reply.yml`, `validate-task.yml`) via the contents
+  API, creating them
   only — never overwriting a file that already differs;
   (c) **create the canonical labels** (and the `project:<name>` label when `--project`
   is passed).

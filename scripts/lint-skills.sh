@@ -17,6 +17,7 @@ PROTOCOL="PROTOCOL.md"
 TEMPLATE="skills/unleash/task-template.yml"
 REAPER="skills/unleash/reclaim-stale.yml"
 REQUEUE="skills/unleash/requeue-on-reply.yml"
+VALIDATE="skills/unleash/validate-task.yml"
 # kraken.py is the single stdlib-only transition program. Every label /
 # machine-line / disclaimer emitter lives in it, so all the per-emitter
 # checks below resolve to that single module.
@@ -193,7 +194,7 @@ if command -v python3 >/dev/null 2>&1; then
   done
 fi
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
-  for y in "$TEMPLATE" "$REAPER" .github/workflows/*.yml; do
+  for y in "$TEMPLATE" "$REAPER" "$REQUEUE" "$VALIDATE" .github/workflows/*.yml; do
     [ -f "$y" ] || continue
     python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$y" 2>/dev/null \
       || err "invalid YAML: $y"
