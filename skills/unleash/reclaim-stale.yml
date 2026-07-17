@@ -37,17 +37,34 @@ jobs:
       - name: Move silent in-progress issues to needs-decision
         run: |
           now=$(date -u +%s)
-          # Per issue, emit "<number> <anchor>" where <anchor> is the createdAt of
-          # the newest comment carrying a worker liveness payload — a protocol/3
-          # hidden marker (<!-- kraken {"type":"claim"|"heartbeat", ...} -->) —
-          # or the literal "none" when the worker never spoke. Only claim/heartbeat
-          # mark liveness: delivered/released already drop in-progress, so they
-          # never appear on a still-held claim. Operator comments are ignored —
-          # they must not reset the clock.
+          # List ONLY the in-progress issue numbers (few by definition), then read
+          # each thread's complete comment history separately. `gh issue list`'s
+          # nested `comments` export silently caps at 100 and does not paginate —
+          # the exact truncation class kraken.py's comment_bodies documents — so on
+          # a thread past 100 comments the newest heartbeat: line falls outside the
+          # export and a live, heartbeating worker looks silent, gets reclaimed, and
+          # a second worker can claim a task still being executed. The paginated
+          # REST comments endpoint (the same path comment_bodies uses) walks every
+          # page, so the anchor is always computed against the whole history.
+          #
+          # Per issue, the anchor is the createdAt of the newest comment carrying a
+          # worker liveness payload — a protocol/3 hidden marker
+          # (<!-- kraken {"type":"claim"|"heartbeat", ...} -->) — or the literal
+          # "none" when the worker never spoke. Only claim/heartbeat mark liveness:
+          # delivered/released already drop in-progress, so they never appear on a
+          # still-held claim. Operator comments are ignored — they must not reset
+          # the clock.
           gh issue list -R "$GITHUB_REPOSITORY" --label in-progress --state open \
-            --json number,comments \
-            --jq '.[] | "\(.number) \([.comments[] | select(.body | test("<!-- kraken \\{\"type\":\"(claim|heartbeat)\"")) | .createdAt] | max // "none")"' |
-          while read -r num anchor; do
+            --json number --jq '.[].number' |
+          while read -r num; do
+            [ -n "$num" ] || continue
+            # --jq emits one createdAt per liveness comment across every page;
+            # ISO-8601 UTC timestamps sort lexically = chronologically, so
+            # `sort | tail -1` is the newest anchor. No match -> empty -> "none".
+            anchor=$(gh api "repos/$GITHUB_REPOSITORY/issues/$num/comments" --paginate \
+              --jq '.[] | select(.body | test("<!-- kraken \\{\"type\":\"(claim|heartbeat)\"")) | .createdAt' \
+              | sort | tail -n1)
+            [ -n "$anchor" ] || anchor="none"
             if [ "$anchor" = "none" ]; then
               age="" # no worker liveness marker at all: infinitely stale
             else
