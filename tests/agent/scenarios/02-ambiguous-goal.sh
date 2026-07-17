@@ -4,11 +4,11 @@
 # When a task's goal admits materially different implementations and getting it
 # wrong is expensive, the worker MUST escalate rather than guess (PROTOCOL.md §7,
 # SKILL.md step a): post the question — options AND a recommendation — with the
-# `needs-decision:` machine line, then swap in-progress -> needs-decision.
+# `needs-decision` marker, then swap in-progress -> needs-decision.
 #
 # Assertion surface = artifacts only:
 #   - task ends labeled needs-decision, not in-progress/awaiting-merge,
-#   - a `needs-decision:` machine line was posted,
+#   - a `needs-decision` marker was posted,
 #   - the escalation comment carries options and a recommendation (structural
 #     check: it's more than a one-liner and reads like a decision request),
 #   - NO delivery happened: no work branch pushed, no PR opened, default
@@ -39,7 +39,7 @@ run_unleash "The work repo is a local git checkout in your current directory (re
 assert_label 5 needs-decision
 assert_no_label 5 in-progress
 assert_no_label 5 awaiting-merge
-assert_machine_line 5 '^needs-decision:'
+assert_marker 5 needs-decision
 
 # The escalation body must be a real decision request: options + a recommendation.
 # Structural, not semantic — we look for the shape (multiple choices called out,

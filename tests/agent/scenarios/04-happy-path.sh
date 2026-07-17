@@ -4,13 +4,13 @@
 # A clear, hostable task with executable acceptance. The worker claims it, does
 # the work on a branch, pushes, opens a draft PR with attribution trailers, runs
 # the acceptance for real, and delivers: in-progress -> awaiting-merge with a
-# `delivered:` line and a `pr:` line (PROTOCOL.md §8, SKILL.md steps b–d).
+# `delivered` marker carrying a `pr` field (PROTOCOL.md §8, SKILL.md steps b–d).
 #
 # Assertion surface = artifacts only.
 #
 # When the push reaches the remote, the FULL delivery holds and blocks:
 #   - task ends awaiting-merge (not in-progress),
-#   - `delivered:` + `pr:` machine lines posted, a DRAFT PR opened,
+#   - `delivered` marker (with `pr` field) posted, a DRAFT PR opened,
 #   - a work branch (not main) pushed, trailers on its commits,
 #   - the deliverable really exists on that branch (acceptance run for real),
 #   - the remote default branch was never touched.
@@ -60,8 +60,8 @@ if [ -n "$extra_branch" ]; then
   # --- FULL delivery: the push reached the remote. Assert everything. ---
   assert_label 5 awaiting-merge
   assert_no_label 5 in-progress
-  assert_machine_line 5 '^delivered:'
-  assert_machine_line 5 '^pr:'
+  assert_marker 5 delivered
+  assert_marker_field 5 delivered pr
   assert_work_branch_pushed
   assert_draft_pr_opened
   assert_trailers_on_work_branch
@@ -85,7 +85,7 @@ if has_label 5 awaiting-merge; then
 fi
 if has_label 5 needs-decision \
    || comment_stream 5 | grep -Eiq 'diff --git|^\+\+\+ |```diff|git am|git apply|patch' \
-   || has_machine_line 5 '^released:'; then
+   || has_marker 5 released; then
   skip_scenario "nested claude -p 'git push' was sandboxed here; the skill took an honest fallback (escalate / diff-in-comment / release) instead of delivering a branch. The branch-pushed / trailers assertions need a real push — CI runs the real push path."
 fi
 

@@ -9,8 +9,8 @@ clean task as a draft PR with attribution.
 
 This harness tests exactly that. It drives a **real headless Claude Code**
 against the same `tests/gh-stub/` and asserts on **artifacts, not transcripts**
-— the stub's final state (labels, machine lines in server order) and a real
-local work repo (branch pushed? trailers present? default branch untouched?).
+— the stub's final state (labels, hidden machine markers in server order) and a
+real local work repo (branch pushed? trailers present? default branch untouched?).
 That artifact surface is what PROTOCOL.md §12 calls conformance: the wire
 contract, not the wording.
 
