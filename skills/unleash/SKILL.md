@@ -66,7 +66,9 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
 
   Leave a blank line between it and the rest of the body, or GitHub folds the body
   into the quote. Work-repo PRs and commits don't need it — they carry the
-  `Kraken-Task` / `Co-Authored-By` trailers instead.
+  `Kraken-Task` / `Co-Authored-By` trailers instead. This block is illustrative:
+  the authoritative format lives once in `kraken.py`'s `DISCLAIMER` constant
+  (`python3 kraken.py contract disclaimer` prints it) — don't maintain a second copy.
 - A task is an **open issue labeled `kraken-task`** with **goal / acceptance /
   notes** fields (shape: `PROTOCOL.md` §2) — the acceptance is what you execute at
   validation time.

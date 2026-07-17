@@ -174,6 +174,50 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(kraken.arbitrate_winner(body.split("\n")), "env-1")
 
 
+class ContractCommandTests(unittest.TestCase):
+    """`kraken.py contract`: the single source of truth other consumers (the
+    requeue workflow filter, the test helpers, the skill lint) derive from. Each
+    field must echo the authoritative constant, so a format change lands once."""
+
+    def _run(self, *argv):
+        buf = StringIO()
+        with redirect_stdout(buf):
+            rc = kraken.main(["contract", *argv])
+        self.assertEqual(rc, kraken.EXIT_OK)
+        return buf.getvalue().splitlines()
+
+    def test_disclaimer_defaults_to_the_doc_placeholder(self):
+        self.assertEqual(self._run("disclaimer"),
+                         [kraken.DISCLAIMER.format(worker="<worker-name>")])
+
+    def test_disclaimer_substitutes_the_worker(self):
+        self.assertEqual(self._run("disclaimer", "--worker", "env-1"),
+                         [kraken.disclaimer("env-1")])
+
+    def test_reset_prefixes_echo_the_constant(self):
+        self.assertEqual(self._run("reset-prefixes"),
+                         list(kraken.WINDOW_RESET_PREFIXES))
+
+    def test_marker_types_echo_the_constant(self):
+        self.assertEqual(self._run("marker-types"), list(kraken.MARKER_TYPES))
+
+    def test_legacy_line_prefixes_echo_the_constant(self):
+        self.assertEqual(self._run("legacy-line-prefixes"),
+                         list(kraken.LEGACY_LINE_PREFIXES))
+
+    def test_marker_types_are_the_liveness_and_reset_vocabulary(self):
+        # protocol/2 vocabulary kraken.py builds/arbitrates on — requeue is
+        # operator-only and deliberately absent.
+        self.assertEqual(tuple(kraken.MARKER_TYPES),
+                         kraken.LIVENESS_TYPES + kraken.RESET_TYPES)
+        self.assertNotIn("requeue", kraken.MARKER_TYPES)
+
+    def test_every_reset_prefix_maps_to_a_reset_type(self):
+        # each legacy reset line drops its colon to the marker type it migrates to.
+        self.assertEqual(
+            tuple(p[:-1] for p in kraken.WINDOW_RESET_PREFIXES), kraken.RESET_TYPES)
+
+
 class MachineLineParsingTests(unittest.TestCase):
     """Machine-line grammar edge cases: CR stripping, spacing, prefix bodies
     that only look like machine lines."""

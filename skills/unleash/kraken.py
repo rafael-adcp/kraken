@@ -99,6 +99,17 @@ LIVENESS_TYPES = ("claim", "heartbeat")
 # lint enforces that.
 WINDOW_RESET_PREFIXES = ("released:", "stale-claim:", "needs-decision:", "delivered:")
 
+# Every marker "type" this program builds or arbitrates on — the protocol/2
+# vocabulary. (`requeue` is operator-only; the workflow reads it, this program
+# never emits it, so it is not here.) The lint checks each appears in
+# PROTOCOL.md's marker table by executing `kraken.py contract marker-types`.
+MARKER_TYPES = LIVENESS_TYPES + RESET_TYPES
+
+# The protocol/1 legacy line-grammar prefixes this program still READS (dual-read
+# migration, machine_event above): the claim line, the liveness line, and every
+# window-reset line. Documented in PROTOCOL.md §4's migration section.
+LEGACY_LINE_PREFIXES = ("claimed-by:", "heartbeat:") + WINDOW_RESET_PREFIXES
+
 
 def make_marker(payload):
     """Render a machine payload dict as the protocol/2 hidden marker. Compact,
@@ -142,11 +153,14 @@ def machine_event(line, *, reset_prefixes=WINDOW_RESET_PREFIXES):
         return {"type": "heartbeat", "worker": line[len("heartbeat:"):].lstrip(" ")}
     return None
 
-# The attribution disclaimer. Every worker authenticates as the operator, so a
-# worker comment reads exactly like a human's without this blockquote. It heads
-# every comment a transition writes; a blank line must follow it or GitHub folds
-# the body into the quote. Kept byte-identical to SKILL.md / PROTOCOL.md (the
-# lint asserts that), with {worker} as the only placeholder.
+# The attribution disclaimer — the ONE authoritative definition of its format.
+# Every worker authenticates as the operator, so a worker comment reads exactly
+# like a human's without this blockquote. It heads every comment a transition
+# writes; a blank line must follow it or GitHub folds the body into the quote.
+# {worker} is the only placeholder. Docs (SKILL.md, PROTOCOL.md §4) quote it
+# illustratively and every other consumer (the requeue workflow filter, the test
+# helpers, the skill lint) derives from or is verified against this constant via
+# `kraken.py contract` — nothing re-declares the format by hand.
 DISCLAIMER = "> 🐙 **Kraken worker `{worker}`** — automated comment from a Claude Code tentacle, not a human."
 
 
@@ -1009,6 +1023,31 @@ def cmd_status(args):
     return EXIT_OK
 
 
+# The contract literals `kraken.py contract` exposes, each a list of lines. This
+# is the read side of single-sourcing: the disclaimer format and the machine
+# marker / legacy-line / claim-window vocabulary live in the constants above,
+# and every other consumer derives from or is verified against them by executing
+# this command rather than re-declaring the literals.
+CONTRACT_FIELDS = {
+    "disclaimer": lambda args: [disclaimer(args.worker)],
+    "reset-prefixes": lambda args: list(WINDOW_RESET_PREFIXES),
+    "reset-types": lambda args: list(RESET_TYPES),
+    "liveness-types": lambda args: list(LIVENESS_TYPES),
+    "marker-types": lambda args: list(MARKER_TYPES),
+    "legacy-line-prefixes": lambda args: list(LEGACY_LINE_PREFIXES),
+}
+
+
+def cmd_contract(args):
+    """Print an authoritative contract literal (no network). The single source of
+    truth for the disclaimer format and the machine-line/marker vocabulary — the
+    requeue workflow filter, the test helpers, and the skill lint read these
+    instead of re-declaring them, so a format change lands in exactly one place."""
+    for line in CONTRACT_FIELDS[args.field](args):
+        print(line)
+    return EXIT_OK
+
+
 # --- CLI ---------------------------------------------------------------------
 
 def build_parser():
@@ -1086,6 +1125,18 @@ def build_parser():
     p.add_argument("--json", action="store_true",
                    help="emit the stable machine-readable status schema")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser(
+        "contract",
+        help="print an authoritative contract literal (disclaimer / machine-line "
+             "vocabulary) for consumers to derive from — no network",
+    )
+    p.add_argument("field", choices=sorted(CONTRACT_FIELDS),
+                   help="which contract literal to print")
+    p.add_argument("--worker", default="<worker-name>",
+                   help="worker name to substitute into the disclaimer "
+                        "(default: the doc placeholder <worker-name>)")
+    p.set_defaults(func=cmd_contract)
 
     return parser
 
