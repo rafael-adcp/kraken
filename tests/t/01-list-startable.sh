@@ -10,6 +10,10 @@ mk_issue 5 "delivered"      kraken-task "project:app" awaiting-merge
 mk_issue 6 "escalated"      kraken-task "project:app" needs-decision
 mk_issue 7 "closed" kraken-task "project:app"
 echo "closed" > "$STATE/issues/7/state"
+# §2: a kraken-task carrying NO project:<name> label is invisible to every
+# conforming worker — it must appear in neither the startable list nor the
+# snapshot, so it can never be claimed until the label is fixed.
+mk_issue 8 "no project label" kraken-task
 
 # Default mode: startable only, oldest first, number<TAB>title.
 out="$(python3 "$SCRIPTS/kraken.py" list-startable OWNER/tasks app)"
