@@ -103,12 +103,12 @@ assert_disclaimer() {
     || fail "disclaimer blockquote missing or drifted — expected [$expected], got [$actual]"
 }
 
-# assert_marker ISSUE JSON — the issue's latest comment carries the protocol/2
+# assert_marker ISSUE JSON — the issue's latest comment carries the protocol/3
 # hidden kraken marker with exactly this compact JSON object (what kraken.py's
 # json.dumps(..., separators=(",", ":")) emits). The marker is invisible in the
 # rendered UI but present in the raw body.
 assert_marker() {
   printf '%s' "$(last_comment "$1")" \
     | grep -qF -- "<!-- kraken $2 -->" \
-    || fail "protocol/2 marker '<!-- kraken $2 -->' missing from #$1 latest comment"
+    || fail "protocol/3 marker '<!-- kraken $2 -->' missing from #$1 latest comment"
 }

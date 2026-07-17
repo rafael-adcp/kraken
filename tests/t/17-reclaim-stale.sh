@@ -41,22 +41,22 @@ export MAX_HOURS=6
 ago_iso() { date -u -d "@$(( $(date -u +%s) - $1 * 3600 ))" +%Y-%m-%dT%H:%M:%SZ; }
 
 # #1 — DEAD: claimed 8h ago, then an operator commented 10m ago. updatedAt would
-# read fresh (the operator comment) and spare it; anchored to the last machine
-# line it is 8h silent and MUST be reclaimed. The claim body carries the real
-# shape (disclaimer + blank line + machine line), proving the `(?m)^` match finds
-# the machine line inside a multi-line comment, not just a bare one.
+# read fresh (the operator comment) and spare it; anchored to the last liveness
+# marker it is 8h silent and MUST be reclaimed. The claim body carries the real
+# shape (disclaimer + blank line + marker), proving the reaper's marker match
+# finds the marker inside a multi-line comment, not just a bare one.
 mk_issue 1 "dead worker, operator poked it" kraken-task "project:app" in-progress
-mk_comment 1 "$(printf '> disclaimer\n\nclaimed-by: dead-worker\n')" "$(ago_iso 8)"
+mk_comment 1 "$(printf '> disclaimer\n\n<!-- kraken {"type":"claim","worker":"dead-worker"} -->\n')" "$(ago_iso 8)"
 mk_comment 1 "any update here? — the operator" "$(ago_iso 0)"
 
 # #2 — ALIVE: a fresh heartbeat 30m ago (0h floor) is inside the window and MUST
 # be left alone, even though the original claim is old.
 mk_issue 2 "live worker heartbeating" kraken-task "project:app" in-progress
-mk_comment 2 "claimed-by: live-worker" "$(ago_iso 9)"
-mk_comment 2 "heartbeat: live-worker" "$(ago_iso 0)"
+mk_comment 2 '<!-- kraken {"type":"claim","worker":"live-worker"} -->' "$(ago_iso 9)"
+mk_comment 2 '<!-- kraken {"type":"heartbeat","worker":"live-worker"} -->' "$(ago_iso 0)"
 
-# #3 — MALFORMED: in-progress but no worker machine line at all (only an operator
-# comment). No anchor exists, so it is infinitely stale and MUST be reclaimed.
+# #3 — MALFORMED: in-progress but no worker liveness marker at all (only an
+# operator comment). No anchor exists, so it is infinitely stale and MUST be reclaimed.
 mk_issue 3 "in-progress, worker never spoke" kraken-task "project:app" in-progress
 mk_comment 3 "someone mislabeled this — the operator" "$(ago_iso 0)"
 

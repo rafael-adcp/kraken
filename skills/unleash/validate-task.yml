@@ -23,7 +23,7 @@
 # counts as missing.
 #
 # Debounce is idempotent like requeue-on-reply: a burst of edits does not pile up
-# duplicate comments. The workflow tags its own comment with a protocol/2 hidden
+# duplicate comments. The workflow tags its own comment with a protocol/3 hidden
 # marker (<!-- kraken {"type":"validation"} -->); before posting it compares the
 # body it would post against the latest prior validation comment and SKIPS when
 # they are byte-identical. A per-issue concurrency group serializes an edit burst
@@ -121,7 +121,7 @@ jobs:
             exit 0
           fi
 
-          # Build the actionable comment. The protocol/2 marker tags it as ours so
+          # Build the actionable comment. The protocol/3 marker tags it as ours so
           # the debounce below can find the latest prior validation comment. It
           # informs only — never blocks, closes, or relabels.
           body="$(printf '%s\n\n%s\n%s\n\n%s\n\n%s' \

@@ -66,7 +66,7 @@ assert_rc $? 0 "#6 run"
 has_label 6 awaiting-merge && fail "#6 awaiting-merge not removed on a standalone requeue: directive"
 last_comment 6 | grep -q '^requeue: ' || fail "#6 missing requeue confirmation comment"
 
-# #6b — awaiting-merge bounced back by the structured protocol/2 requeue marker.
+# #6b — awaiting-merge bounced back by the structured protocol/3 requeue marker.
 mk_issue 60 "awaiting-merge, structured requeue marker" kraken-task "project:app" awaiting-merge
 run_case 60 "$(printf 'bounce it back\n\n<!-- kraken {"type":"requeue"} -->')" "User"
 assert_rc $? 0 "#6b run"

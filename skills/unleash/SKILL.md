@@ -13,7 +13,7 @@ dependency graph come for free.
 
 The coordination contract itself — task shape, label state machine, the machine marker,
 claim algorithm, authorization boundaries — is normatively specified in
-[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/2`). This file is how a Claude
+[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/3`). This file is how a Claude
 Code worker executes that contract (subagent-per-task, Monitor watcher, the bundled
 scripts); if the two ever disagree, the spec wins.
 
@@ -103,10 +103,9 @@ time:
   issue's real state before retrying, and never move on while a claim is
   ambiguous.
 - It composes the attribution disclaimer and the hidden machine marker
-  (`<!-- kraken {"type":...} -->`, carrying protocol/2 `claim`, `heartbeat`,
-  `needs-decision`, `delivered`, `released` payloads — the successors to
-  protocol/1's `claimed-by:` / `heartbeat:` / `needs-decision:` / `delivered:` /
-  `released:` lines) itself — never hand-write those. The escalation question
+  (`<!-- kraken {"type":...} -->`, carrying the `claim`, `heartbeat`,
+  `needs-decision`, `delivered`, `released` payloads) itself — never hand-write
+  those. The escalation question
   and the result comment stay yours to write: put the body in a file and hand
   the file to the subcommand.
 

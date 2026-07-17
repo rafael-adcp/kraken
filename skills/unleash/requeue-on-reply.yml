@@ -25,7 +25,7 @@
 #   - awaiting-merge: the task is already DELIVERED. Requeuing on a bare comment
 #     ("I'll merge tomorrow") would bounce a ready branch back to a worker. So it
 #     is left held UNLESS the comment carries an explicit, STRUCTURED requeue
-#     directive: a protocol/2 `<!-- kraken {"type":"requeue"} -->` marker, or a
+#     directive: a protocol/3 `<!-- kraken {"type":"requeue"} -->` marker, or a
 #     standalone `requeue`/`requeue:` line (nothing after it). A `requeue:`
 #     buried in a prose sentence no longer bounces delivered work by accident.
 #
@@ -107,7 +107,7 @@ jobs:
           # so a prose sentence that merely starts a line with "requeue:" (e.g.
           # "requeue: is something I considered, but hold off") no longer bounces
           # a ready branch by accident. The two accepted forms:
-          #   - a protocol/2 kraken requeue marker: <!-- kraken {"type":"requeue"} -->
+          #   - a protocol/3 kraken requeue marker: <!-- kraken {"type":"requeue"} -->
           #   - a standalone directive line whose only content is `requeue` /
           #     `requeue:` (nothing after it) — a deliberate one-word gesture.
           if printf '%s\n' "$labels" | grep -qx 'awaiting-merge'; then
