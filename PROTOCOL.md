@@ -295,10 +295,24 @@ not part of the wire contract; it exits `0` holding a won claim (printing the
 task's number, title, and body), a distinct `3` when nothing is claimable, and
 `20` on transport failure with the same state-unknown semantics.
 
+A read-only `status OWNER/tasks [--project <name>] [--json]` subcommand
+(operator-side, driven by [`skills/status/SKILL.md`](skills/status/SKILL.md))
+computes the console — the review queue (`awaiting-merge` + parsed PR link), the
+decision queue (`needs-decision`), in-flight tasks with a heartbeat age anchored
+to the worker's last machine line (the same anchor the reaper uses, §11), the
+merged-PR-but-open-issue orphan heuristic (flag-only, never acting), and the
+`project:` launch recon — over the same batched queue walk `list-startable`
+uses, with the heartbeat/PR-link history read through the paginated comment path
+so it is never truncated past 100 comments. It performs no writes; `--json`
+emits a stable schema for downstream tooling. Like `claim-next`, it is a
+reference-implementation ergonomic, not part of the wire contract.
+
 The **conformance suite** in [`tests/`](tests/) exercises the contract's
 invariants against a stateful GitHub stub — the claim guard, the claim race
 (exactly one winner), claim-window arbitration including the review-bounce
-reset, honest release, and failure staging — plus `kraken.py` unit tests
+reset, honest release, failure staging, and the read-only `status` console
+(heartbeat-age anchoring and orphan flagging, never acting) — plus `kraken.py`
+unit tests
 ([`tests/unit/`](tests/unit/)) that cover the arbitration grammar, machine-line
 parsing, and comment pagination past 100 in isolation. A third-party
 implementation MAY validate itself by pointing the suite's stub at its own

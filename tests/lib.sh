@@ -49,6 +49,23 @@ mk_body() {
   printf '%s\n' "$2" > "$STATE/issues/$1/body"
 }
 
+# mk_pr N STATE [MERGED_AT] — seed a delivery PR the orphan heuristic reads via
+# `gh pr view .../pull/N --json state,mergedAt`. STATE is OPEN|MERGED|CLOSED; an
+# optional MERGED_AT ISO stamp models a merged PR (absent = null).
+mk_pr() {
+  mkdir -p "$STATE/pr"
+  local merged="null"
+  [ $# -ge 3 ] && merged="\"$3\""
+  printf '{"state":"%s","mergedAt":%s}\n' "$2" "$merged" \
+    > "$STATE/pr/$(printf '%04d' "$1").json"
+}
+
+# mk_label LABEL — register a repo label the launch recon may enumerate even
+# when no open issue carries it (an empty project:<name>).
+mk_label() {
+  printf '%s\n' "$1" >> "$STATE/labels"
+}
+
 fail() { echo "FAIL: $*"; exit 1; }
 
 assert_eq() { # actual expected context

@@ -165,6 +165,49 @@ class CommentPaginationTests(unittest.TestCase):
         result = kraken.comment_bodies("OWNER/tasks", "42")
         self.assertEqual(kraken.arbitrate_winner(result), "heir")
 
+    def test_comment_records_uses_same_paginated_endpoint(self):
+        # status' heartbeat/PR-link path reads timestamps off the SAME paginated
+        # REST comments endpoint, so its anchor is never truncated at 100 either.
+        calls = []
+
+        def fake_run_gh(args):
+            calls.append(args)
+            return 0, ""
+        kraken.run_gh = fake_run_gh
+        kraken.comment_records("OWNER/tasks", "42")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "api")
+        self.assertIn("repos/OWNER/tasks/issues/42/comments", calls[0])
+        self.assertIn("--paginate", calls[0])
+
+    def test_comment_records_returns_records_past_one_hundred(self):
+        # 150 comment records (compact one-per-line, what gh --jq streams); the
+        # 130th carries the live machine line, invisible under a 100 truncation.
+        recs = [{"body": f"c {i}", "createdAt": f"2026-07-01T00:{i % 60:02d}:00Z"}
+                for i in range(150)]
+        recs[129] = {"body": "heartbeat: late", "createdAt": "2026-07-09T00:00:00Z"}
+        out = "\n".join(kraken.json.dumps(r) for r in recs)
+
+        def fake_run_gh(args):
+            return 0, out
+        kraken.run_gh = fake_run_gh
+        result = kraken.comment_records("OWNER/tasks", "42")
+        self.assertEqual(len(result), 150)
+        self.assertEqual(kraken.heartbeat_anchor(result), "2026-07-09T00:00:00Z")
+
+    def test_comment_records_parses_pretty_printed_stream(self):
+        # The conformance stub pretty-prints each object across lines; the
+        # object-by-object decoder must handle that as well as compact output.
+        pretty = ('{\n  "body": "claimed-by: w1",\n  "createdAt": "2026-07-01T00:00:00Z"\n}\n'
+                  '{\n  "body": "heartbeat: w1",\n  "createdAt": "2026-07-01T05:00:00Z"\n}\n')
+
+        def fake_run_gh(args):
+            return 0, pretty
+        kraken.run_gh = fake_run_gh
+        result = kraken.comment_records("OWNER/tasks", "42")
+        self.assertEqual(len(result), 2)
+        self.assertEqual(kraken.heartbeat_anchor(result), "2026-07-01T05:00:00Z")
+
 
 class ClaimNextIterationTests(unittest.TestCase):
     """cmd_claim_next's loop, isolated from any transport: the classification
@@ -284,6 +327,202 @@ class ClaimNextIterationTests(unittest.TestCase):
         payload = _json.loads(out.strip().splitlines()[-1])
         self.assertEqual(payload, {"issue": 7, "title": "the title",
                                    "body": "### Goal\ndo it"})
+
+
+class StatusHelperTests(unittest.TestCase):
+    """The status console's pure helpers, isolated from any transport: the
+    heartbeat anchor (machine-line-only, newest-wins), PR-URL parsing, worker
+    resolution, and age formatting."""
+
+    def _rec(self, body, created):
+        return {"body": body, "createdAt": created}
+
+    def test_anchor_is_newest_machine_line(self):
+        recs = [
+            self._rec("claimed-by: w1", "2026-07-01T00:00:00Z"),
+            self._rec("heartbeat: w1", "2026-07-01T05:00:00Z"),
+        ]
+        self.assertEqual(kraken.heartbeat_anchor(recs), "2026-07-01T05:00:00Z")
+
+    def test_anchor_ignores_operator_comments(self):
+        # THE anchoring invariant (mirrors the reaper): a fresh operator comment
+        # must NOT reset the clock — only worker machine lines anchor liveness.
+        recs = [
+            self._rec("> disclaimer\n\nclaimed-by: w1", "2026-07-01T00:00:00Z"),
+            self._rec("any update? — the operator", "2026-07-01T09:00:00Z"),
+        ]
+        self.assertEqual(kraken.heartbeat_anchor(recs), "2026-07-01T00:00:00Z")
+
+    def test_anchor_none_when_worker_never_spoke(self):
+        recs = [self._rec("someone mislabeled this", "2026-07-01T00:00:00Z")]
+        self.assertIsNone(kraken.heartbeat_anchor(recs))
+
+    def test_anchor_finds_machine_line_inside_multiline_body(self):
+        recs = [self._rec("> \U0001f419 worker note\n\nheartbeat: w1\n\nstill going",
+                          "2026-07-01T02:00:00Z")]
+        self.assertEqual(kraken.heartbeat_anchor(recs), "2026-07-01T02:00:00Z")
+
+    def test_parse_pr_url_from_pr_machine_line(self):
+        recs = [self._rec("delivered: w1\npr: https://github.com/o/r/pull/42\n\nbody",
+                          "t")]
+        self.assertEqual(kraken.parse_pr_url(recs),
+                         "https://github.com/o/r/pull/42")
+
+    def test_parse_pr_url_newest_wins(self):
+        recs = [
+            self._rec("pr: https://github.com/o/r/pull/1", "t1"),
+            self._rec("delivered: w2\npr: https://github.com/o/r/pull/9", "t2"),
+        ]
+        self.assertEqual(kraken.parse_pr_url(recs),
+                         "https://github.com/o/r/pull/9")
+
+    def test_parse_pr_url_fallback_to_url_in_prose(self):
+        recs = [self._rec("landed in https://github.com/o/r/pull/7 fyi", "t")]
+        self.assertEqual(kraken.parse_pr_url(recs),
+                         "https://github.com/o/r/pull/7")
+
+    def test_parse_pr_url_none_when_absent(self):
+        recs = [self._rec("delivered: w1\n\njust prose", "t")]
+        self.assertIsNone(kraken.parse_pr_url(recs))
+
+    def test_worker_resolves_via_arbitration(self):
+        recs = [
+            self._rec("claimed-by: dead", "t1"),
+            self._rec("stale-claim: 7h", "t2"),
+            self._rec("claimed-by: heir", "t3"),
+        ]
+        self.assertEqual(
+            kraken.arbitrate_winner(kraken.flat_comment_lines(recs)), "heir")
+
+    def test_parse_iso_roundtrip(self):
+        self.assertEqual(kraken.parse_iso("2026-07-01T00:00:00Z"), 1782864000.0)
+        self.assertIsNone(kraken.parse_iso("not-a-date"))
+        self.assertIsNone(kraken.parse_iso(""))
+
+    def test_format_age_buckets(self):
+        self.assertEqual(kraken.format_age(0), "0s")
+        self.assertEqual(kraken.format_age(42), "42s")
+        self.assertEqual(kraken.format_age(12 * 60), "12m")
+        self.assertEqual(kraken.format_age(3 * 3600), "3h")
+        self.assertEqual(kraken.format_age(4 * 86400), "4d")
+        self.assertEqual(kraken.format_age(None), "unknown")
+
+
+class StatusComputeTests(unittest.TestCase):
+    """compute_status: the whole report assembled from queue nodes and injected
+    readers — grouping, project filter, orphan flagging, in-flight ages, and the
+    transport-failure propagation, all with no gh."""
+
+    NOW = kraken.parse_iso("2026-07-01T10:00:00Z")
+
+    def _node(self, number, title, labels, created="2026-07-01T00:00:00Z"):
+        return {
+            "number": number, "title": title, "createdAt": created,
+            "labels": {"nodes": [{"name": n} for n in labels]},
+        }
+
+    def _readers(self, comments=None, merged=None, projects=None):
+        comments = comments or {}
+        merged = merged or {}
+
+        def comment_reader(repo, issue):
+            return comments.get(issue, [])
+
+        def pr_merged(url):
+            return merged.get(url, False)
+
+        def project_lister(repo):
+            return projects if projects is not None else []
+
+        return dict(comment_reader=comment_reader, pr_merged=pr_merged,
+                    project_lister=project_lister)
+
+    def test_groups_by_held_label(self):
+        nodes = [
+            self._node(88, "review", ["kraken-task", "project:app", "awaiting-merge"]),
+            self._node(97, "decide", ["kraken-task", "project:app", "needs-decision"]),
+            self._node(99, "running", ["kraken-task", "project:app", "in-progress"]),
+            self._node(12, "queued", ["kraken-task", "project:app"]),
+        ]
+        comments = {
+            88: [{"body": "delivered: w\npr: https://x/pull/1", "createdAt": "t"}],
+            99: [{"body": "claimed-by: w1", "createdAt": "2026-07-01T09:00:00Z"}],
+        }
+        report = kraken.compute_status(
+            "o/tasks", "", nodes, self.NOW,
+            **self._readers(comments=comments, projects=["app"]))
+        self.assertEqual([r["number"] for r in report["review_queue"]], [88])
+        self.assertEqual([r["number"] for r in report["decision_queue"]], [97])
+        self.assertEqual([r["number"] for r in report["in_flight"]], [99])
+        # A non-held (queued) task is surfaced by list-startable, not here.
+        self.assertEqual(report["in_flight"][0]["worker"], "w1")
+        self.assertEqual(report["in_flight"][0]["heartbeat_age_seconds"], 3600)
+
+    def test_project_filter(self):
+        nodes = [
+            self._node(1, "a", ["kraken-task", "project:app", "in-progress"]),
+            self._node(2, "b", ["kraken-task", "project:web", "in-progress"]),
+        ]
+        comments = {
+            1: [{"body": "claimed-by: w", "createdAt": "2026-07-01T09:00:00Z"}],
+            2: [{"body": "claimed-by: w", "createdAt": "2026-07-01T09:00:00Z"}],
+        }
+        report = kraken.compute_status(
+            "o/tasks", "web", nodes, self.NOW, **self._readers(comments=comments))
+        self.assertEqual([r["number"] for r in report["in_flight"]], [2])
+        self.assertEqual(report["project"], "web")
+        self.assertEqual(report["projects"], ["web"])  # scoped, no label list call
+
+    def test_orphan_flag_only_when_pr_merged(self):
+        nodes = [
+            self._node(88, "merged pr", ["kraken-task", "project:app", "awaiting-merge"]),
+            self._node(91, "open pr", ["kraken-task", "project:app", "awaiting-merge"],
+                       created="2026-07-01T01:00:00Z"),
+        ]
+        comments = {
+            88: [{"body": "pr: https://x/pull/5", "createdAt": "t"}],
+            91: [{"body": "pr: https://x/pull/6", "createdAt": "t"}],
+        }
+        merged = {"https://x/pull/5": True, "https://x/pull/6": False}
+        report = kraken.compute_status(
+            "o/tasks", "", nodes, self.NOW,
+            **self._readers(comments=comments, merged=merged, projects=["app"]))
+        self.assertEqual(report["orphans"], [88])
+        flags = {r["number"]: r["orphan"] for r in report["review_queue"]}
+        self.assertTrue(flags[88])
+        self.assertFalse(flags[91])
+
+    def test_no_machine_line_yields_unknown_age(self):
+        nodes = [self._node(99, "silent", ["kraken-task", "project:app", "in-progress"])]
+        comments = {99: [{"body": "operator note", "createdAt": "2026-07-01T09:00:00Z"}]}
+        report = kraken.compute_status(
+            "o/tasks", "", nodes, self.NOW,
+            **self._readers(comments=comments, projects=["app"]))
+        item = report["in_flight"][0]
+        self.assertIsNone(item["heartbeat_age_seconds"])
+        self.assertIsNone(item["worker"])
+
+    def test_comment_transport_failure_propagates_none(self):
+        nodes = [self._node(99, "x", ["kraken-task", "project:app", "in-progress"])]
+
+        def failing_reader(repo, issue):
+            return None
+        report = kraken.compute_status(
+            "o/tasks", "", nodes, self.NOW,
+            comment_reader=failing_reader,
+            pr_merged=lambda u: False,
+            project_lister=lambda r: [])
+        self.assertIsNone(report)
+
+    def test_pr_read_failure_propagates_none(self):
+        nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]
+        comments = {88: [{"body": "pr: https://x/pull/5", "createdAt": "t"}]}
+        report = kraken.compute_status(
+            "o/tasks", "", nodes, self.NOW,
+            comment_reader=lambda r, i: comments.get(i, []),
+            pr_merged=lambda u: None,  # transport failure
+            project_lister=lambda r: [])
+        self.assertIsNone(report)
 
 
 if __name__ == "__main__":
