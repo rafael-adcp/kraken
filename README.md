@@ -26,6 +26,7 @@ AI coding agents made each change cheap — but you are still the bus between th
 | Dependencies       | Native `blocked-by` relationships — closing a task unblocks |
 | Parallelism        | Capacity = how many workers you launch; 1 task per worker   |
 | Dead workers       | Heartbeat comments + an hourly reaper workflow              |
+| Bad tasks          | A queue-entry validator flags a missing label/Goal/Acceptance |
 | Dashboard          | The GitHub UI — filters, notifications, mobile app          |
 | Audit trail        | The issue timeline: who, when, why, validated how           |
 
@@ -136,7 +137,8 @@ executes it — subagents, the watcher, the bundled transition program — lives
 ## The full walkthrough
 
 1. **Create the coordination repo** (once). Running the plugin? One command stands it
-   all up — verifies or creates the private repo, installs the three templates, and creates
+   all up — verifies or creates the private repo, installs the task template and its four
+   coordination workflows, and creates
    the canonical labels (idempotent, safe to re-run):
 
    ```
@@ -146,9 +148,9 @@ executes it — subagents, the watcher, the bundled transition program — lives
    <details>
    <summary>Not running the plugin? The same setup by hand</summary>
 
-   The three assets land at `.github/ISSUE_TEMPLATE/task.yml`,
-   `.github/workflows/reclaim-stale.yml`, and
-   `.github/workflows/cleanup-closed.yml`:
+   The five assets land at `.github/ISSUE_TEMPLATE/task.yml` and the four
+   `.github/workflows/` files (`reclaim-stale.yml`, `cleanup-closed.yml`,
+   `requeue-on-reply.yml`, `validate-task.yml`):
 
    ```bash
    gh repo create OWNER/tasks --private --clone && cd tasks
@@ -156,7 +158,9 @@ executes it — subagents, the watcher, the bundled transition program — lives
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/task-template.yml -o .github/ISSUE_TEMPLATE/task.yml
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/reclaim-stale.yml -o .github/workflows/reclaim-stale.yml
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/cleanup-closed.yml -o .github/workflows/cleanup-closed.yml
-   git add -A && git commit -m "chore: kraken task template, reaper, and cleanup" && git push
+   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/requeue-on-reply.yml -o .github/workflows/requeue-on-reply.yml
+   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/validate-task.yml -o .github/workflows/validate-task.yml
+   git add -A && git commit -m "chore: kraken task template, reaper, cleanup, requeue, and validator" && git push
 
    gh -R OWNER/tasks label create kraken-task
    gh -R OWNER/tasks label create in-progress
@@ -362,6 +366,19 @@ already-ready branch back on an "I'll merge tomorrow" would be worse than
 leaving it. To requeue by comment alone, start a line with `requeue:`; otherwise
 remove the label. The next claim continues on the existing branch with the whole
 discussion in hand.
+
+</details>
+
+<details>
+<summary><b>A task I filed got a bot comment listing what's missing — what is that?</b></summary>
+
+That's the coordination repo's **validate-task** workflow — the queue-entry gate.
+The two ways a task is born dead (no `project:<name>` label, so no worker will
+ever see it; or an empty **Goal**/**Acceptance** section, so a worker claims it
+and stalls) are otherwise silent, so on a new/edited `kraken-task` issue it posts
+one comment naming exactly what to fix. It only **informs** — it never blocks,
+closes, or relabels. Fix the flagged item and the comment stops recurring; a
+compliant task never gets one.
 
 </details>
 

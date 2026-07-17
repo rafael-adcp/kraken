@@ -74,6 +74,27 @@ worker; the remedy is fixing the label, never improvising.
 Dependencies use GitHub's native *blocked-by* relationships. A `depends-on:
 #N` line in the task body MAY be honored as a fallback with the same meaning.
 
+### 2.1 Queue-entry validation
+
+The two ways a task is dead on arrival — no `project:<name>` label (invisible to
+every worker) or an empty/absent **Goal** or **Acceptance** section (a worker
+claims it, then stalls) — are the queue's most common operator mistakes, and
+they are otherwise silent. The coordination repo SHOULD run the **validator**
+([`skills/unleash/validate-task.yml`](skills/unleash/validate-task.yml)): on a
+`kraken-task` issue being opened, edited, or relabeled, it checks the three
+requirements above and, when any is missing, posts a single actionable comment
+(a protocol/2 `validation` marker) naming exactly what to fix. Section detection
+keys on the issue-form headings the template produces (`### Goal`,
+`### Acceptance`); a hand-written issue lacking them counts as missing them.
+
+The validator **informs; the operator acts** — it never blocks, closes, or
+relabels the task into a held state. A compliant task gets no comment (no noise
+on the happy path), a non-`kraken-task` issue is a no-op, and the check is
+idempotent: a burst of edits that do not change what is missing does not pile up
+duplicate comments (it skips when an identical `validation` comment is already
+the latest one). The validator's comment is authored by the Actions bot, so the
+requeue workflow's Bot gate (§6) ignores it.
+
 ## 3. Labels: the state machine
 
 Four labels are the entire state machine. Every transition is a label change,
@@ -150,6 +171,7 @@ prose is a pure human courtesy. **Grammar** (normative):
 | `released` | `worker`, `reason`? | release | claim handed back (optional `reason`) | Yes |
 | `stale-claim` | `reason`? | reaper | claim reclaimed from a silent worker | Yes |
 | `requeue` | — | operator | bounce a delivered (`awaiting-merge`) task back for rework (§6) | n/a (operator directive) |
+| `validation` | — | validator | task fails the queue-entry gate; the comment lists what to fix (§2.1) | n/a (never touches a claim) |
 
 **Migration (reading protocol/1).** A conforming protocol/2 consumer MUST also
 read the retired protocol/1 **line grammar** so pre-existing threads keep

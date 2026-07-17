@@ -39,6 +39,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | L65 | **Goal** field **MUST** be present | 🧠 agent / 🧹 lint | Task template field presence: `scripts/lint-skills.sh`; worker restates goal as assumptions: `tests/agent/`. |
 | L66 | **Acceptance MUST** be run for real; a task whose acceptance was not executed **MUST NOT** move to `awaiting-merge` | 🧠 agent | Worker judgment — `tests/agent/`. The conformance suite cannot observe whether real acceptance ran. |
 | L69 | Every task **MUST** carry exactly one `project:<name>` label; a task without one is invisible to every worker | ✅ pinned (invisible) / 🧹 lint ("exactly one") | Missing-label invisibility: `tests/t/01` (issue 8, no project label, absent from both list and snapshot). Cross-project routing: `tests/t/01` (issue 3, `project:other`, excluded). "Exactly one" is a label-hygiene rule, not enforced by `kraken.py`. |
+| §2.1 validator | Queue-entry gate flags a missing `project:<name>` label or an empty/absent Goal or Acceptance section with one actionable comment; compliant task and non-`kraken-task` issue are no-ops; idempotent (no duplicate on re-flag) | ✅ pinned | `tests/t/25` extracts and runs `validate-task.yml`'s shipped `run:` block verbatim (missing label, missing Acceptance, heading-less body, compliant, non-task, debounce, edit-after-fix). |
 
 ## §3 Labels: the state machine
 

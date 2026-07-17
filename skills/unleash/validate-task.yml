@@ -1,0 +1,146 @@
+# Queue-entry quality gate for kraken. Copy to
+# .github/workflows/validate-task.yml in the coordination repo (see SKILL.md).
+#
+# The queue's most common operator mistake — filing a task that no worker will
+# ever see, or that will waste a worker turn on arrival — stops being silent.
+# PROTOCOL.md §2, the README, and SKILL.md all warn that "a task without a
+# project label is invisible to every worker" and that Goal/Acceptance are MUST
+# fields; this workflow turns that documentation into mechanism. On a new (or
+# edited/relabeled) kraken-task issue it checks three things and, when any is
+# missing, posts ONE actionable comment saying exactly what to fix:
+#   - carries a project:<name> label? (else invisible to every worker)
+#   - has a non-empty Goal section?    (### Goal, the issue-form heading)
+#   - has a non-empty Acceptance section? (### Acceptance)
+#
+# It INFORMS; the operator acts. It never blocks, closes, or relabels the task
+# into a held state — a compliant task gets no comment at all (no noise on the
+# happy path), and a non-kraken-task issue is a no-op (the job `if:` gate).
+#
+# Section detection keys on the issue-form headings the bundled task-template.yml
+# produces (`### Goal`, `### Acceptance`). A hand-written issue without those
+# headings counts as missing them — that is the point of the gate, not a false
+# positive. An empty issue-form field renders as `_No response_`, which also
+# counts as missing.
+#
+# Debounce is idempotent like requeue-on-reply: a burst of edits does not pile up
+# duplicate comments. The workflow tags its own comment with a protocol/2 hidden
+# marker (<!-- kraken {"type":"validation"} -->); before posting it compares the
+# body it would post against the latest prior validation comment and SKIPS when
+# they are byte-identical. A per-issue concurrency group serializes an edit burst
+# so two racing runs don't both post. The validator's own comment is authored by
+# the Actions bot (user.type == Bot), so requeue-on-reply's Bot gate ignores it
+# and the two workflows never interact.
+#
+# Untrusted-input discipline (same guard requeue-on-reply.yml documents): the
+# issue body and title go through env vars, never inlined into the script — an
+# inlined ${{ github.event.issue.body }} is a shell-injection vector (a body
+# could contain $(...) or backticks).
+#
+# All four behaviors — missing label, missing Acceptance, compliant (no comment),
+# and edit-after-fix (no duplicate / no re-flag) — are pinned by
+# tests/t/25-validate-task.sh against the gh stub.
+name: Validate task on arrival
+on:
+  issues:
+    types: [opened, edited, labeled]
+
+concurrency:
+  group: validate-task-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    # Coordination-repo task issues only; a non-kraken-task issue is a no-op.
+    if: contains(github.event.issue.labels.*.name, 'kraken-task')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      NUM: ${{ github.event.issue.number }}
+      # Untrusted issue body through env, never inlined into the script.
+      BODY: ${{ github.event.issue.body }}
+    steps:
+      - name: Flag a task missing its project label, Goal, or Acceptance
+        run: |
+          set -euo pipefail
+
+          # section_body HEADING — the trimmed content under "### HEADING" up to
+          # the next "### " heading (or EOF), read from $BODY. An issue-form field
+          # left blank renders as the literal "_No response_", which is treated as
+          # empty; a hand-written issue lacking the heading yields nothing at all.
+          section_body() {
+            printf '%s' "$BODY" | awk -v h="### $1" '
+              { sub(/\r$/, "") }
+              $0 == h { grab = 1; next }
+              grab && /^### / { grab = 0 }
+              grab { print }
+            '
+          }
+
+          # is_empty_section CONTENT — true when CONTENT is blank or only the
+          # issue-form "_No response_" placeholder.
+          is_empty_section() {
+            local c
+            c="$(printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^[[:space:]]*$/d')"
+            [ -z "$c" ] || [ "$c" = "_No response_" ]
+          }
+
+          # Read live labels via gh (the labeled/edited event may have just added
+          # or removed one). The job `if:` already gates on kraken-task; the run:
+          # block re-checks it at the gate too, so the stub test can prove the
+          # non-task no-op the same way the job condition enforces it in CI.
+          labels="$(gh issue view "$NUM" -R "$REPO" --json labels --jq '.labels[].name')"
+          if ! printf '%s\n' "$labels" | grep -qx 'kraken-task'; then
+            echo "validate: #$NUM is not a kraken-task issue — no-op"
+            exit 0
+          fi
+
+          missing=""
+
+          # project:<name> label — no project label means the task is invisible to
+          # every conforming worker (PROTOCOL.md §2).
+          if ! printf '%s\n' "$labels" | grep -q '^project:'; then
+            missing="${missing}- Add a \`project:<name>\` label. Workers are scoped to one project and never see a task without it, so an unlabeled task sits invisible in the queue forever."$'\n'
+          fi
+
+          if is_empty_section "$(section_body Goal)"; then
+            missing="${missing}- Fill in the **Goal** section (the \`### Goal\` heading). Describe the desired end state as an outcome — it is what the worker plans toward."$'\n'
+          fi
+
+          if is_empty_section "$(section_body Acceptance)"; then
+            missing="${missing}- Fill in the **Acceptance** section (the \`### Acceptance\` heading). Give executable, observable proof the Goal was met — a worker must run it for real before delivering."$'\n'
+          fi
+
+          # Compliant task: no comment at all. This is also the edit-after-fix
+          # exit — once the operator fixes what was flagged, the gate simply stops
+          # flagging (no "all good" noise, no relabel).
+          if [ -z "$missing" ]; then
+            echo "validate: #$NUM is compliant — no-op"
+            exit 0
+          fi
+
+          # Build the actionable comment. The protocol/2 marker tags it as ours so
+          # the debounce below can find the latest prior validation comment. It
+          # informs only — never blocks, closes, or relabels.
+          body="$(printf '%s\n\n%s\n%s\n\n%s\n\n%s' \
+            "> 🐙 **Kraken task validator** — this task isn't ready for a worker to pick up yet." \
+            "Please fix the following so it can be claimed (this gate only informs; it never holds, closes, or relabels your task):" \
+            "$missing" \
+            "Once fixed, this check clears itself — no action needed here." \
+            '<!-- kraken {"type":"validation"} -->')"
+
+          # Debounce: skip when the newest prior validation comment is byte-
+          # identical to what we would post. A burst of edits that don't change
+          # what's missing produces exactly one comment; the concurrency group
+          # serializes the burst so two runs don't race past this check.
+          prior="$(gh issue view "$NUM" -R "$REPO" --json comments \
+            --jq '[.comments[] | select(.body | contains("<!-- kraken {\"type\":\"validation\"")) ] | last | .body // ""')"
+          if [ "$prior" = "$body" ]; then
+            echo "validate: #$NUM already carries an identical validation comment — no-op"
+            exit 0
+          fi
+
+          gh issue comment "$NUM" -R "$REPO" --body "$body"
+          echo "validate: #$NUM flagged (missing: project/Goal/Acceptance as listed)"
