@@ -35,6 +35,7 @@ Exit-code contract (PROTOCOL.md §12), preserved verbatim from the scripts:
 """
 
 import argparse
+import base64
 import datetime
 import json
 import os
@@ -64,6 +65,38 @@ HELD_LABELS = ("in-progress", "needs-decision", "awaiting-merge")
 # ONLY markers: the retired protocol/1 visible line grammar is no longer parsed,
 # so free text in a comment can never occupy a machine-line position.
 PROTOCOL_VERSION = 3
+
+# --- plugin version ----------------------------------------------------------
+# The installed plugin's version, as stamped in the bundled marketplace manifest
+# the release workflow bumps. It is the `kraken@<version>` in the Kraken-Task
+# commit trailer (task_trailer below): read at runtime, never a second literal to
+# drift, and never something the worker model has to guess.
+PLUGIN_MANIFEST = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "..", ".claude-plugin", "plugin.json",
+)
+PLUGIN_VERSION_UNKNOWN = "unknown"
+
+# This module's own folder — where the bundled assets `init` installs
+# (task-template.yml and the four coordination workflows) ship, next to this
+# file, exactly as the unleash skill resolves its bundled kraken.py.
+SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def plugin_version(manifest=PLUGIN_MANIFEST):
+    """The installed plugin's version, read from the bundled
+    `.claude-plugin/plugin.json` two levels up from this module
+    (skills/unleash/kraken.py -> <plugin root>/.claude-plugin/plugin.json). The
+    release workflow bumps ONLY that file, so reading it at runtime keeps the
+    Kraken-Task trailer's `kraken@<version>` in lockstep with the plugin without
+    a second version literal to maintain. Returns ``"unknown"`` if the manifest
+    is missing or unreadable — the trailer still forms, just unstamped."""
+    try:
+        with open(manifest, encoding="utf-8") as f:
+            version = json.load(f).get("version")
+    except (OSError, ValueError):
+        return PLUGIN_VERSION_UNKNOWN
+    return version if isinstance(version, str) and version else PLUGIN_VERSION_UNKNOWN
 
 # --- structured hidden markers (kraken-protocol/3) ---------------------------
 # A state-changing comment carries its machine payload in ONE hidden HTML-comment
@@ -142,6 +175,27 @@ DISCLAIMER = "> 🐙 **Kraken worker `{worker}`** — automated comment from a C
 
 def disclaimer(worker):
     return DISCLAIMER.format(worker=worker)
+
+
+# The Kraken-Task commit trailer — the ONE authoritative definition of its format,
+# the delivery-side twin of DISCLAIMER. Every delivered commit carries it so a
+# merge maps back to the task and the plugin version that produced it
+# (PROTOCOL.md §11). `{version}` is sourced from the bundled plugin.json via
+# plugin_version(), never hand-copied: the worker model cannot know the installed
+# version, and a pasted literal is exactly the drift this single-sourcing kills.
+# The companion `Co-Authored-By` line stays the agent's own — it carries the
+# agent's identity, which this program cannot know — so only the kraken-specific
+# line lives here.
+TASK_TRAILER = "Kraken-Task: {repo}#{issue} (worker: {worker}, kraken@{version})"
+
+
+def task_trailer(repo, issue, worker):
+    """Compose the authoritative `Kraken-Task:` commit trailer, stamping the live
+    plugin version so `kraken@<version>` is never guessed."""
+    return TASK_TRAILER.format(
+        repo=repo, issue=issue, worker=worker, version=plugin_version()
+    )
+
 
 
 def compose_comment(worker, prose, payload):
@@ -993,13 +1047,181 @@ def cmd_status(args):
     return EXIT_OK
 
 
-# The contract literals `kraken.py contract` exposes, each a list of lines. This
+# --- subcommand: init --------------------------------------------------------
+# The bootstrap `init` mechanizes, single-sourced here so the skill and the
+# program never disagree on the asset set or the label canon (issue #30, the
+# trio with claim-next #25 and status #27).
+
+# Each bundled asset init commits: (bundled filename next to this module,
+# destination path in the coordination repo, commit message used on create).
+INIT_ASSETS = (
+    ("task-template.yml", ".github/ISSUE_TEMPLATE/task.yml",
+     "chore: add kraken task template"),
+    ("reclaim-stale.yml", ".github/workflows/reclaim-stale.yml",
+     "chore: add kraken reaper workflow"),
+    ("cleanup-closed.yml", ".github/workflows/cleanup-closed.yml",
+     "chore: add kraken cleanup-closed workflow"),
+    ("requeue-on-reply.yml", ".github/workflows/requeue-on-reply.yml",
+     "chore: add kraken requeue-on-reply workflow"),
+    ("validate-task.yml", ".github/workflows/validate-task.yml",
+     "chore: add kraken validate-task workflow"),
+)
+
+# The canonical state-machine labels — (name, color, description). The GitHub
+# labels UI IS kraken's dashboard, so the colors trace the flow left to right:
+# blue queued -> yellow working -> red needs-you / green ready-to-land. This is
+# the one authoritative home for PROTOCOL.md §3's SHOULD colors; init upserts
+# with --force so a re-run re-canonicalizes any drift in place.
+CANONICAL_LABELS = (
+    ("kraken-task", "1D76DB", "A unit of work for a kraken worker — the queue"),
+    ("in-progress", "FBCA04", "Claimed by a worker and being executed"),
+    ("needs-decision", "D93F0B",
+     "Blocked on your decision — answer, then remove the label to requeue"),
+    ("awaiting-merge", "0E8A16",
+     "Delivered as a draft PR — waiting for your review and merge"),
+)
+PROJECT_LABEL_COLOR = "5319E7"
+PROJECT_LABEL_DESC = (
+    "Canonical project identity — a worker's --project filters on this"
+)
+
+
+def gh_repo_exists(repo):
+    """True iff the coordination repo already exists (a clean `repo view`)."""
+    rc, _ = run_gh(
+        ["repo", "view", repo, "--json", "nameWithOwner", "--jq", ".nameWithOwner"]
+    )
+    return rc == 0
+
+
+def gh_repo_create_private(repo):
+    """Create the coordination repo PRIVATE — never public: the queue is
+    instructions that run in a worker's environment with its credentials."""
+    rc, _ = run_gh(["repo", "create", repo, "--private"])
+    return rc == 0
+
+
+def gh_get_content(repo, path):
+    """The file's current bytes on the repo via the contents API, or None when it
+    is absent (404) OR unreadable. The caller cannot tell 404 from a transport
+    fault here and, like the skill, treats 'no readable file' as absent and
+    creates — a PUT over a file that truly exists then fails server-side (no
+    sha), so a lost read never silently clobbers a customized file."""
+    rc, out = run_gh(["api", f"/repos/{repo}/contents/{path}", "--jq", ".content"])
+    if rc != 0:
+        return None
+    try:
+        return base64.b64decode(re.sub(r"\s+", "", out))
+    except ValueError:
+        return None
+
+
+def gh_put_content(repo, path, data, message):
+    """Create `path` on the repo with `data` via the contents API (create-only;
+    callers reach here only when gh_get_content reported the file absent)."""
+    b64 = base64.b64encode(data).decode("ascii")
+    rc, _ = run_gh([
+        "api", f"/repos/{repo}/contents/{path}", "-X", "PUT",
+        "-f", f"message={message}", "-f", f"content={b64}",
+    ])
+    return rc == 0
+
+
+def gh_label_upsert(repo, name, color, description):
+    """Upsert a label with its canonical color/description via `--force` — a
+    no-op create on a fresh repo, an in-place re-canonicalize on a re-run."""
+    rc, _ = run_gh([
+        "-R", repo, "label", "create", name, "--force",
+        "--color", color, "--description", description,
+    ])
+    return rc == 0
+
+
+def cmd_init(args):
+    """Stand up a coordination repo: verify-or-create it private, install the
+    bundled assets (create / skip-unchanged / flag-customized), and upsert the
+    canonical labels. Idempotent — a second run creates nothing new. Touches no
+    issues. Exit 0 on success, 20 on any gh/transport failure."""
+    repo, project = args.repo, args.project
+    report = {
+        "repo": repo,
+        "repo_status": "exists",
+        "assets": [],
+        "labels": [],
+        "project": project or None,
+    }
+
+    # 1. Verify or create the repo (private).
+    if not gh_repo_exists(repo):
+        if not gh_repo_create_private(repo):
+            print(f"init: gh-failure stage=repo repo={repo}", file=sys.stderr)
+            return EXIT_TRANSPORT
+        report["repo_status"] = "created"
+
+    # 2. Install the bundled assets, create-only — never clobber a customized one.
+    for name, dest, message in INIT_ASSETS:
+        try:
+            with open(os.path.join(SKILL_DIR, name), "rb") as fh:
+                bundled = fh.read()
+        except OSError:
+            print(f"init: missing bundled asset {name}", file=sys.stderr)
+            return EXIT_USAGE
+        current = gh_get_content(repo, dest)
+        if current is None:
+            if not gh_put_content(repo, dest, bundled, message):
+                print(f"init: gh-failure stage=asset path={dest}", file=sys.stderr)
+                return EXIT_TRANSPORT
+            status = "created"
+        elif current == bundled:
+            status = "unchanged"
+        else:
+            status = "customized"
+        report["assets"].append({"path": dest, "status": status})
+
+    # 3. Upsert the canonical labels (+ the project label when scoped).
+    labels = list(CANONICAL_LABELS)
+    if project:
+        labels.append((f"project:{project}", PROJECT_LABEL_COLOR, PROJECT_LABEL_DESC))
+    for lname, color, desc in labels:
+        if not gh_label_upsert(repo, lname, color, desc):
+            print(f"init: gh-failure stage=label label={lname}", file=sys.stderr)
+            return EXIT_TRANSPORT
+        report["labels"].append(lname)
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_init(report))
+    return EXIT_OK
+
+
+def render_init(report):
+    """Human-facing init report: one line per repo/asset/label decision, then a
+    summary line the skill can echo verbatim."""
+    lines = [f"init: repo {report['repo']} ({report['repo_status']})"]
+    for asset in report["assets"]:
+        lines.append(f"init: asset {asset['path']} ({asset['status']})")
+    for name in report["labels"]:
+        lines.append(f"init: label {name} (upserted)")
+    created = sum(1 for a in report["assets"] if a["status"] == "created")
+    unchanged = sum(1 for a in report["assets"] if a["status"] == "unchanged")
+    customized = sum(1 for a in report["assets"] if a["status"] == "customized")
+    lines.append(
+        f"init: done repo={report['repo']} repo_status={report['repo_status']} "
+        f"assets_created={created} assets_unchanged={unchanged} "
+        f"assets_customized={customized} labels={len(report['labels'])}"
+    )
+    return "\n".join(lines)
+
+
+
 # is the read side of single-sourcing: the disclaimer format and the machine
 # marker / claim-window vocabulary live in the constants above, and every other
 # consumer derives from or is verified against them by executing this command
 # rather than re-declaring the literals.
 CONTRACT_FIELDS = {
     "disclaimer": lambda args: [disclaimer(args.worker)],
+    "task-trailer": lambda args: [task_trailer(args.repo, args.issue, args.worker)],
     "reset-types": lambda args: list(RESET_TYPES),
     "liveness-types": lambda args: list(LIVENESS_TYPES),
     "marker-types": lambda args: list(MARKER_TYPES),
@@ -1095,6 +1317,18 @@ def build_parser():
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser(
+        "init",
+        help="stand up a coordination repo: private repo + bundled assets + "
+             "canonical labels (idempotent; touches no issues)",
+    )
+    p.add_argument("repo")
+    p.add_argument("--project", default="",
+                   help="also upsert the project:<name> routing label")
+    p.add_argument("--json", action="store_true",
+                   help="emit the machine-readable init report")
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser(
         "contract",
         help="print an authoritative contract literal (disclaimer / machine-line "
              "vocabulary) for consumers to derive from — no network",
@@ -1104,6 +1338,12 @@ def build_parser():
     p.add_argument("--worker", default="<worker-name>",
                    help="worker name to substitute into the disclaimer "
                         "(default: the doc placeholder <worker-name>)")
+    p.add_argument("--repo", default="<coordination-repo>",
+                   help="coordination repo slug for the task-trailer field "
+                        "(default: the doc placeholder <coordination-repo>)")
+    p.add_argument("--issue", default="<issue>",
+                   help="task issue number for the task-trailer field "
+                        "(default: the doc placeholder <issue>)")
     p.set_defaults(func=cmd_contract)
 
     return parser

@@ -9,6 +9,8 @@ Stdlib only (unittest), no network, no gh. Run: python3 tests/unit/test_kraken.p
 
 import os
 import sys
+import json
+import tempfile
 import unittest
 from types import SimpleNamespace
 from io import StringIO
@@ -257,6 +259,28 @@ class ContractCommandTests(unittest.TestCase):
         self.assertEqual(self._run("disclaimer", "--worker", "env-1"),
                          [kraken.disclaimer("env-1")])
 
+    def test_task_trailer_defaults_to_the_doc_placeholders(self):
+        # No flags → every field is the doc placeholder, but the version is the
+        # real stamp (plugin_version), never a placeholder — that is the point.
+        self.assertEqual(
+            self._run("task-trailer"),
+            [kraken.task_trailer("<coordination-repo>", "<issue>", "<worker-name>")],
+        )
+
+    def test_task_trailer_substitutes_repo_issue_worker(self):
+        self.assertEqual(
+            self._run("task-trailer", "--repo", "acme/work",
+                      "--issue", "12", "--worker", "env-1"),
+            [kraken.task_trailer("acme/work", "12", "env-1")],
+        )
+
+    def test_task_trailer_stamps_the_live_plugin_version(self):
+        # The kraken@<version> field must be the manifest's version, never a
+        # literal — this is the drift the single-sourcing exists to kill.
+        line = self._run("task-trailer", "--repo", "acme/work",
+                         "--issue", "12", "--worker", "env-1")[0]
+        self.assertIn(f"kraken@{kraken.plugin_version()}", line)
+
     def test_reset_types_echo_the_constant(self):
         self.assertEqual(self._run("reset-types"), list(kraken.RESET_TYPES))
 
@@ -272,6 +296,96 @@ class ContractCommandTests(unittest.TestCase):
         self.assertEqual(tuple(kraken.MARKER_TYPES),
                          kraken.LIVENESS_TYPES + kraken.RESET_TYPES)
         self.assertNotIn("requeue", kraken.MARKER_TYPES)
+
+
+class PluginVersionTests(unittest.TestCase):
+    """plugin_version() sources the Kraken-Task trailer's kraken@<version> from
+    the bundled manifest the release workflow bumps — read at runtime, so the
+    trailer never carries a stale hand-copied version and never has to be
+    guessed by the worker model."""
+
+    def _manifest(self, contents):
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(contents)
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_reads_the_version_from_the_manifest(self):
+        path = self._manifest(json.dumps({"version": "9.9.9"}))
+        self.assertEqual(kraken.plugin_version(path), "9.9.9")
+
+    def test_bundled_manifest_matches_the_shipped_plugin_json(self):
+        # The default lookup must resolve the real bundled manifest, not "unknown".
+        with open(kraken.PLUGIN_MANIFEST, encoding="utf-8") as f:
+            shipped = json.load(f)["version"]
+        self.assertEqual(kraken.plugin_version(), shipped)
+
+    def test_missing_manifest_falls_back_to_unknown(self):
+        self.assertEqual(
+            kraken.plugin_version("/no/such/plugin.json"),
+            kraken.PLUGIN_VERSION_UNKNOWN,
+        )
+
+    def test_malformed_manifest_falls_back_to_unknown(self):
+        path = self._manifest("{not json")
+        self.assertEqual(kraken.plugin_version(path), kraken.PLUGIN_VERSION_UNKNOWN)
+
+    def test_manifest_without_version_falls_back_to_unknown(self):
+        path = self._manifest(json.dumps({"name": "kraken"}))
+        self.assertEqual(kraken.plugin_version(path), kraken.PLUGIN_VERSION_UNKNOWN)
+
+
+class InitConstantsTests(unittest.TestCase):
+    """The init subcommand single-sources the asset set and the label canon in
+    kraken.py (issue #30). These guard that single-sourcing: every asset it
+    installs must actually ship next to the module, and the label/render shapes
+    must stay well-formed — a rename or a dropped field is caught here, not in a
+    live bootstrap."""
+
+    def test_every_bundled_asset_exists_next_to_the_module(self):
+        for name, dest, message in kraken.INIT_ASSETS:
+            src = os.path.join(kraken.SKILL_DIR, name)
+            self.assertTrue(os.path.isfile(src),
+                            f"bundled asset {name} missing at {src}")
+            self.assertTrue(dest.startswith(".github/"),
+                            f"asset {name} destination not under .github/")
+            self.assertTrue(message, f"asset {name} has no commit message")
+
+    def test_the_five_documented_assets_are_installed(self):
+        dests = {dest for _, dest, _ in kraken.INIT_ASSETS}
+        self.assertEqual(dests, {
+            ".github/ISSUE_TEMPLATE/task.yml",
+            ".github/workflows/reclaim-stale.yml",
+            ".github/workflows/cleanup-closed.yml",
+            ".github/workflows/requeue-on-reply.yml",
+            ".github/workflows/validate-task.yml",
+        })
+
+    def test_canonical_labels_are_six_hex_colors(self):
+        for name, color, desc in kraken.CANONICAL_LABELS:
+            self.assertRegex(color, r"^[0-9A-F]{6}$",
+                             f"label {name} color not a 6-digit hex")
+            self.assertTrue(desc, f"label {name} has no description")
+        self.assertRegex(kraken.PROJECT_LABEL_COLOR, r"^[0-9A-F]{6}$")
+
+    def test_render_init_summarizes_every_decision(self):
+        report = {
+            "repo": "acme/tasks", "repo_status": "created",
+            "assets": [
+                {"path": ".github/ISSUE_TEMPLATE/task.yml", "status": "created"},
+                {"path": ".github/workflows/reclaim-stale.yml", "status": "unchanged"},
+                {"path": ".github/workflows/cleanup-closed.yml", "status": "customized"},
+            ],
+            "labels": ["kraken-task", "project:app"],
+            "project": "app",
+        }
+        out = kraken.render_init(report)
+        self.assertIn("init: repo acme/tasks (created)", out)
+        self.assertIn("init: asset .github/ISSUE_TEMPLATE/task.yml (created)", out)
+        self.assertIn("init: label project:app (upserted)", out)
+        self.assertIn(
+            "assets_created=1 assets_unchanged=1 assets_customized=1 labels=2", out)
 
 
 class MarkerEdgeCaseTests(unittest.TestCase):
