@@ -82,15 +82,25 @@ comment_count() { ls "$STATE/issues/$1/comments"/*.md 2>/dev/null | wc -l | tr -
 
 last_comment() { cat "$STATE/issues/$1/comments/$(printf '%04d' "$(comment_count "$1")").md"; }
 
-# assert_disclaimer ISSUE WORKER — the 🐙 attribution blockquote heads the
-# issue's latest comment. LC_ALL=C forces byte matching: GNU grep 3.1 (Git
-# Bash's bundled build) fails to match the astral-plane 🐙 (U+1F419) under a
-# UTF-8 locale, so a UTF-8-locale run false-fails on a disclaimer that is in
-# fact present. The disclaimer is a fixed byte string, so bytewise is exact.
+# disclaimer_line WORKER — the authoritative attribution blockquote for WORKER,
+# derived from kraken.py's DISCLAIMER constant (the single source of truth) via
+# `kraken.py contract`, so no test re-declares the format. A drift in the format
+# lands in exactly one place and every test that builds or checks a worker
+# comment picks it up automatically.
+disclaimer_line() {
+  python3 "$SCRIPTS/kraken.py" contract disclaimer --worker "$1"
+}
+
+# assert_disclaimer ISSUE WORKER — the attribution blockquote (derived above)
+# heads the issue's latest comment. First-line byte-equality against the
+# authoritative form, so — unlike a grep for the astral-plane 🐙 (U+1F419), which
+# GNU grep 3.1 misses under a UTF-8 locale — there is no locale-sensitive match.
 assert_disclaimer() {
-  printf '%s' "$(last_comment "$1")" \
-    | LC_ALL=C grep -q "^> 🐙 \*\*Kraken worker \`$2\`\*\*" \
-    || fail "disclaimer blockquote missing"
+  local expected actual
+  expected="$(disclaimer_line "$2")"
+  actual="$(last_comment "$1" | sed -n '1p')"
+  [ "$actual" = "$expected" ] \
+    || fail "disclaimer blockquote missing or drifted — expected [$expected], got [$actual]"
 }
 
 # assert_marker ISSUE JSON — the issue's latest comment carries the protocol/2

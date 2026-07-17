@@ -173,7 +173,12 @@ from human ones:
 (Non–Claude Code implementations substitute their own tool name; the
 blockquote + worker name shape is the contract.) The disclaimer sits *above*
 the prose and marker with a blank line between, or GitHub folds the body into
-the quote.
+the quote. The block above is **illustrative**: the Kraken reference
+implementation defines the format once as the `DISCLAIMER` constant in
+`skills/unleash/kraken.py` and every other occurrence derives from it —
+`kraken.py contract disclaimer` prints the authoritative line, and consumers
+that must recognize a worker comment (the `requeue-on-reply.yml` filter) are
+verified against it by executing both rather than by copying the literal.
 
 ## 5. The claim algorithm
 

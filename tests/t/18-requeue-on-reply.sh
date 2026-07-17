@@ -25,7 +25,9 @@ extract_run "$WF" > "$RUN"
 [ -s "$RUN" ] || fail "could not extract the run block from $WF"
 
 export REPO="OWNER/tasks"
-DISCLAIMER='> 🐙 **Kraken worker `w1`** — automated comment from a Claude Code tentacle, not a human.'
+# Derive the worker disclaimer from kraken.py (the single source of truth) so this
+# test never re-declares the format the requeue filter keys on. See tests/lib.sh.
+DISCLAIMER="$(disclaimer_line w1)"
 
 run_case() { export NUM="$1" COMMENT_BODY="$2" COMMENT_AUTHOR_TYPE="$3"; bash "$RUN"; }
 

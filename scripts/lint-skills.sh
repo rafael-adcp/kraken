@@ -16,6 +16,7 @@ README="README.md"
 PROTOCOL="PROTOCOL.md"
 TEMPLATE="skills/unleash/task-template.yml"
 REAPER="skills/unleash/reclaim-stale.yml"
+REQUEUE="skills/unleash/requeue-on-reply.yml"
 # kraken.py is the single stdlib-only transition program. Every label /
 # machine-line / disclaimer emitter lives in it, so all the per-emitter
 # checks below resolve to that single module.
@@ -55,79 +56,86 @@ for bad in kraken_task in_progress needs_decision awaiting_merge; do
 done
 [ "$fail" -eq 0 ] && note "4 canonical labels aligned across files"
 
-# --- 1b. Machine lines: the spec and every emitter agree ---------------------
-# protocol/2 carries payloads in hidden markers; kraken.py still READS the
-# protocol/1 line grammar (dual-read migration), so the legacy keyword literals
-# below must stay aligned across the spec, the skill, and kraken.py's reader.
-echo "[1b] machine-line consistency (PROTOCOL.md vs emitters)"
-fail_before=$fail
-check_label "claimed-by:"     "$PROTOCOL" "$SKILL" "$CLAIM"
-check_label "heartbeat:"      "$PROTOCOL" "$SKILL" "$HEARTBEAT"
-check_label "needs-decision:" "$PROTOCOL" "$SKILL" "$ESCALATE" "$CLAIM"
-check_label "delivered:"      "$PROTOCOL" "$SKILL" "$DELIVER" "$CLAIM"
-check_label "released:"       "$PROTOCOL" "$SKILL" "$RELEASE" "$CLAIM"
-# stale-claim: the reaper's reset — protocol/2 emits it as a hidden marker, so
-# the legacy line lives in the spec + kraken.py reader, the marker in the reaper.
-check_label "stale-claim:"    "$PROTOCOL" "$CLAIM"
-grep -qF -- '"type":"stale-claim"' "$REAPER" \
-  || err "reaper missing the protocol/2 stale-claim marker"
-[ "$fail" -eq "$fail_before" ] && note "6 machine lines aligned across spec, skill, and emitters"
+# --- 1b–1d. Contract vocabulary is single-sourced in kraken.py ---------------
+# kraken.py OWNS the disclaimer format and the machine-line / marker / claim-
+# window vocabulary (its DISCLAIMER, MARKER_TYPES, LEGACY_LINE_PREFIXES,
+# WINDOW_RESET_PREFIXES constants, surfaced by `kraken.py contract`). Instead of
+# re-declaring those literals here and diffing prose against prose, we EXECUTE
+# the program and check the spec documents everything it reads/emits, and that
+# the requeue workflow's own filter accepts what it emits. Structural, not
+# byte-equality between files.
+if command -v python3 >/dev/null 2>&1; then
+  kcontract() { python3 "$KRAKEN" contract "$@"; }
 
-# --- 1b'. protocol/2 marker vocabulary: spec and kraken.py agree -------------
-# Every marker "type" kraken.py emits or arbitrates on must be named in
-# PROTOCOL.md's marker table — the protocol/2 analogue of the machine-line check.
-echo "[1b'] marker type vocabulary (kraken.py vs PROTOCOL.md)"
-fail_before=$fail
-for t in claim heartbeat needs-decision delivered released stale-claim; do
-  grep -qF -- "\"$t\"" "$CLAIM" \
-    || err "marker type '$t' not built/read in kraken.py"
-  grep -qF -- "\`$t\`" "$PROTOCOL" || err "marker type '$t' missing from PROTOCOL.md"
-done
-[ "$fail" -eq "$fail_before" ] && note "6 marker types aligned across kraken.py and PROTOCOL.md"
+  # [1b] Every legacy protocol/1 line kraken.py still READS (dual-read migration)
+  # is documented in PROTOCOL.md §4 — the reader keyword can't drift ahead of the
+  # spec.
+  echo "[1b] legacy machine lines (kraken.py reader vs PROTOCOL.md)"
+  fail_before=$fail
+  while read -r kw; do
+    [ -z "$kw" ] && continue
+    grep -qF -- "$kw" "$PROTOCOL" \
+      || err "legacy line '$kw' read by kraken.py missing from PROTOCOL.md"
+  done < <(kcontract legacy-line-prefixes)
+  # the reaper is the one non-kraken.py emitter left; its stale-claim reset must
+  # stay a structured protocol/2 marker.
+  grep -qF -- '"type":"stale-claim"' "$REAPER" \
+    || err "reaper missing the protocol/2 stale-claim marker"
+  [ "$fail" -eq "$fail_before" ] && note "every legacy line kraken.py reads is specified in PROTOCOL.md"
 
-# --- 1c. Attribution disclaimer: byte-identical everywhere -------------------
-# The blockquote is defined once in kraken.py (the single emitter) plus the
-# skill and the spec. Normalize the code form (the {worker} placeholder, a
-# trailing string-literal quote) to the doc form and require equality.
-echo "[1c] attribution disclaimer consistency"
-fail_before=$fail
-canon_disclaimer() {
-  # LC_ALL=C: GNU grep 3.1 (Git Bash's build) won't match the astral-plane 🐙
-  # (U+1F419) under a UTF-8 locale, so a local run false-fails "no disclaimer
-  # found" on prose that has it. The disclaimer is a fixed byte string, so
-  # bytewise matching is exact (and matches how CI's newer grep behaves).
-  LC_ALL=C grep -m1 -o '> 🐙 .*' "$1" \
-    | sed -e 's/\\`/`/g' -e 's/${WORKER}/<worker-name>/g' \
-          -e 's/{worker}/<worker-name>/g' -e 's/"$//' -e 's/\r$//'
-}
-ref="$(canon_disclaimer "$SKILL")"
-if [ -z "$ref" ]; then
-  err "no attribution disclaimer found in $SKILL"
-else
-  for f in "$CLAIM" "$HEARTBEAT" "$ESCALATE" "$DELIVER" "$RELEASE" "$PROTOCOL"; do
-    [ "$(canon_disclaimer "$f")" = "$ref" ] || err "attribution disclaimer drift in $f"
+  # [1b'] Every protocol/2 marker "type" kraken.py builds/arbitrates on is named
+  # in PROTOCOL.md's marker table.
+  echo "[1b'] marker type vocabulary (kraken.py vs PROTOCOL.md)"
+  fail_before=$fail
+  while read -r t; do
+    [ -z "$t" ] && continue
+    grep -qF -- "\`$t\`" "$PROTOCOL" || err "marker type '$t' missing from PROTOCOL.md"
+  done < <(kcontract marker-types)
+  [ "$fail" -eq "$fail_before" ] && note "every marker type kraken.py emits is specified in PROTOCOL.md"
+
+  # [1c] Attribution disclaimer: verify the requeue workflow's human-vs-tentacle
+  # filter against kraken.py's emitter by EXECUTING both — emit a real disclaimer,
+  # then require the workflow's OWN grep pattern to accept it and reject a bare
+  # human comment. No second hand-maintained copy of the format anywhere.
+  echo "[1c] attribution disclaimer filter (requeue workflow vs kraken.py)"
+  fail_before=$fail
+  emitted="$(kcontract disclaimer --worker lint-probe)"
+  # the single-quoted pattern the workflow feeds to `grep -q` on its disclaimer
+  # branch. LC_ALL=C so the astral-plane 🐙 (U+1F419) extracts bytewise.
+  wf_pat="$(LC_ALL=C grep -oE "grep -q '[^']*Kraken worker[^']*'" "$REQUEUE" | head -1 \
+             | sed -E "s/^grep -q '//; s/'$//")"
+  if [ -z "$wf_pat" ]; then
+    err "could not extract the disclaimer filter pattern from $REQUEUE"
+  else
+    printf '%s' "$emitted" | LC_ALL=C grep -q "$wf_pat" \
+      || err "requeue filter pattern does not accept the disclaimer kraken.py emits"
+    printf '%s' 'a bare human reply, option B' | LC_ALL=C grep -q "$wf_pat" \
+      && err "requeue filter pattern also matches a bare human comment (worker/human distinction broken)"
+  fi
+  # docs quote the disclaimer illustratively — presence, not cross-file equality.
+  for f in "$PROTOCOL" "$SKILL"; do
+    LC_ALL=C grep -qF -- '> 🐙 **Kraken worker' "$f" \
+      || err "$f no longer quotes the attribution disclaimer illustratively"
   done
-fi
-[ "$fail" -eq "$fail_before" ] && note "disclaimer identical across skill, spec, and kraken.py"
+  [ "$fail" -eq "$fail_before" ] \
+    && note "requeue filter accepts kraken.py's disclaimer and rejects bare comments; docs quote it"
 
-# --- 1d. Claim-window resets: code never ahead of the spec -------------------
-# Every keyword kraken.py treats as a window reset must appear as a machine line
-# in PROTOCOL.md's table. Catches the dangerous drift direction: a new reset
-# added to the implementation without the contract learning about it.
-echo "[1d] claim-window reset keywords (kraken.py vs PROTOCOL.md)"
-fail_before=$fail
-reset_line="$(grep -E 'WINDOW_RESET_PREFIXES *=' "$CLAIM")"
-resets="$(printf '%s' "$reset_line" | grep -oE '[a-z-]+:')"
-if [ -z "$resets" ]; then
-  err "could not extract the reset case pattern from $CLAIM"
-else
+  # [1d] Claim-window resets: every keyword kraken.py treats as a window reset is
+  # documented as a machine line in PROTOCOL.md — catches the dangerous drift
+  # direction (a new reset in code the contract never learned about).
+  echo "[1d] claim-window reset keywords (kraken.py vs PROTOCOL.md)"
+  fail_before=$fail
   n=0
-  for kw in $resets; do
+  while read -r kw; do
+    [ -z "$kw" ] && continue
     n=$((n+1))
-    grep -qF -- "\`${kw}" "$PROTOCOL" || err "claim-window reset '$kw' in kraken.py missing from PROTOCOL.md"
-  done
+    grep -qF -- "\`${kw}" "$PROTOCOL" \
+      || err "claim-window reset '$kw' in kraken.py missing from PROTOCOL.md"
+  done < <(kcontract reset-prefixes)
+  [ "$fail" -eq "$fail_before" ] && note "$n reset keyword(s) in kraken.py all specified in PROTOCOL.md"
+else
+  note "python3 unavailable — skipping contract-derived checks (1b–1d)"
 fi
-[ "$fail" -eq "$fail_before" ] && note "$n reset keyword(s) in kraken.py all specified in PROTOCOL.md"
 
 # --- 2. Every "step N" reference points at a step that exists ---------------
 echo "[2] step references (in $SKILL)"

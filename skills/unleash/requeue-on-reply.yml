@@ -10,10 +10,13 @@
 # The human-vs-tentacle discriminator is PROTOCOL.md §4's attribution disclaimer:
 # every worker-posted comment MUST open with the `> 🐙 **Kraken worker ...`
 # blockquote, so a comment WITHOUT it is (by the protocol's own contract) a human.
-# The blockquote pattern below is kept byte-identical to the one the transition
-# scripts emit (skills/unleash/*.sh) and the test helper asserts
-# (tests/lib.sh assert_disclaimer) — a format drift there silently breaks this
-# filter, so the two MUST move together.
+# This workflow ships to the coordination repo (issues only, no kraken.py), so it
+# must carry its own copy of the disclaimer pattern below rather than import it.
+# That copy is not hand-kept in sync: kraken.py's DISCLAIMER constant is the
+# single source of truth, and scripts/lint-skills.sh verifies THIS pattern against
+# it by EXECUTING both (`kraken.py contract disclaimer` emits, this pattern must
+# accept it and reject a bare human comment) — a silent format drift fails the lint
+# instead of silently breaking this filter.
 #
 # Two held states, handled asymmetrically (see the issue's Notes):
 #   - needs-decision: a human comment is almost always the answer, so ANY bare
