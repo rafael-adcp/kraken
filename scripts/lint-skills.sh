@@ -56,6 +56,9 @@ done
 [ "$fail" -eq 0 ] && note "4 canonical labels aligned across files"
 
 # --- 1b. Machine lines: the spec and every emitter agree ---------------------
+# protocol/2 carries payloads in hidden markers; kraken.py still READS the
+# protocol/1 line grammar (dual-read migration), so the legacy keyword literals
+# below must stay aligned across the spec, the skill, and kraken.py's reader.
 echo "[1b] machine-line consistency (PROTOCOL.md vs emitters)"
 fail_before=$fail
 check_label "claimed-by:"     "$PROTOCOL" "$SKILL" "$CLAIM"
@@ -63,9 +66,24 @@ check_label "heartbeat:"      "$PROTOCOL" "$SKILL" "$HEARTBEAT"
 check_label "needs-decision:" "$PROTOCOL" "$SKILL" "$ESCALATE" "$CLAIM"
 check_label "delivered:"      "$PROTOCOL" "$SKILL" "$DELIVER" "$CLAIM"
 check_label "released:"       "$PROTOCOL" "$SKILL" "$RELEASE" "$CLAIM"
-# stale-claim: is the reaper's line — the skill drives no emitter of it
-check_label "stale-claim:"    "$PROTOCOL" "$REAPER" "$CLAIM"
+# stale-claim: the reaper's reset — protocol/2 emits it as a hidden marker, so
+# the legacy line lives in the spec + kraken.py reader, the marker in the reaper.
+check_label "stale-claim:"    "$PROTOCOL" "$CLAIM"
+grep -qF -- '"type":"stale-claim"' "$REAPER" \
+  || err "reaper missing the protocol/2 stale-claim marker"
 [ "$fail" -eq "$fail_before" ] && note "6 machine lines aligned across spec, skill, and emitters"
+
+# --- 1b'. protocol/2 marker vocabulary: spec and kraken.py agree -------------
+# Every marker "type" kraken.py emits or arbitrates on must be named in
+# PROTOCOL.md's marker table — the protocol/2 analogue of the machine-line check.
+echo "[1b'] marker type vocabulary (kraken.py vs PROTOCOL.md)"
+fail_before=$fail
+for t in claim heartbeat needs-decision delivered released stale-claim; do
+  grep -qF -- "\"$t\"" "$CLAIM" \
+    || err "marker type '$t' not built/read in kraken.py"
+  grep -qF -- "\`$t\`" "$PROTOCOL" || err "marker type '$t' missing from PROTOCOL.md"
+done
+[ "$fail" -eq "$fail_before" ] && note "6 marker types aligned across kraken.py and PROTOCOL.md"
 
 # --- 1c. Attribution disclaimer: byte-identical everywhere -------------------
 # The blockquote is defined once in kraken.py (the single emitter) plus the

@@ -92,3 +92,13 @@ assert_disclaimer() {
     | LC_ALL=C grep -q "^> 🐙 \*\*Kraken worker \`$2\`\*\*" \
     || fail "disclaimer blockquote missing"
 }
+
+# assert_marker ISSUE JSON — the issue's latest comment carries the protocol/2
+# hidden kraken marker with exactly this compact JSON object (what kraken.py's
+# json.dumps(..., separators=(",", ":")) emits). The marker is invisible in the
+# rendered UI but present in the raw body.
+assert_marker() {
+  printf '%s' "$(last_comment "$1")" \
+    | grep -qF -- "<!-- kraken $2 -->" \
+    || fail "protocol/2 marker '<!-- kraken $2 -->' missing from #$1 latest comment"
+}

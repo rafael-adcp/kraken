@@ -5,7 +5,7 @@
 # When a worker's Claude Code session ends *gracefully* (terminal closed,
 # /exit) while it still holds an open claim, this releases that claim
 # automatically: the task returns to the queue in seconds instead of waiting
-# ~6h for the reaper. It runs `kraken.py release`, so `released: <worker>` lands
+# ~6h for the reaper. It runs `kraken.py release`, so the `released` marker lands
 # before in-progress drops — the ordering that closes the claim window (§9).
 #
 # Scope, honestly: this covers a graceful end only. A Claude usage limit does
@@ -52,7 +52,7 @@ for f in "$STATE_DIR"/claim-*.json; do
   # A malformed/empty file we cannot act on: skip it, never guess.
   [ -n "$repo" ] && [ -n "$issue" ] && [ -n "$worker" ] || continue
 
-  # Best-effort: kraken.py release posts released: then drops in-progress and
+  # Best-effort: kraken.py release posts the released marker, drops in-progress, and
   # removes the state file. If it fails (network down), the reaper still backs us
   # up — do not let it fail the hook or block the session from exiting.
   python3 "$KRAKEN" release "$repo" "$issue" "$worker" "session ended" >/dev/null 2>&1 || true

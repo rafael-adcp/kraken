@@ -58,11 +58,27 @@ assert_rc $? 0 "#5 run"
 has_label 5 awaiting-merge || fail "#5 awaiting-merge wrongly requeued on a bare comment"
 assert_eq "$(comment_count 5)" "0" "#5 got a comment it should not have"
 
-mk_issue 6 "awaiting-merge, explicit requeue keyword" kraken-task "project:app" awaiting-merge
-run_case 6 "requeue: please fix the typo in the README before I merge" "User"
+mk_issue 6 "awaiting-merge, standalone requeue: directive" kraken-task "project:app" awaiting-merge
+run_case 6 "$(printf 'requeue:\nplease fix the typo in the README before I merge')" "User"
 assert_rc $? 0 "#6 run"
-has_label 6 awaiting-merge && fail "#6 awaiting-merge not removed on an explicit requeue: keyword"
+has_label 6 awaiting-merge && fail "#6 awaiting-merge not removed on a standalone requeue: directive"
 last_comment 6 | grep -q '^requeue: ' || fail "#6 missing requeue confirmation comment"
+
+# #6b — awaiting-merge bounced back by the structured protocol/2 requeue marker.
+mk_issue 60 "awaiting-merge, structured requeue marker" kraken-task "project:app" awaiting-merge
+run_case 60 "$(printf 'bounce it back\n\n<!-- kraken {"type":"requeue"} -->')" "User"
+assert_rc $? 0 "#6b run"
+has_label 60 awaiting-merge && fail "#6b awaiting-merge not removed on a requeue marker"
+last_comment 60 | grep -q '^requeue: ' || fail "#6b missing requeue confirmation comment"
+
+# #6c — THE accidental-collision fix: a prose sentence that merely starts a line
+# with "requeue:" must NOT bounce delivered work (only a standalone directive or
+# the marker does).
+mk_issue 61 "awaiting-merge, requeue: buried in prose" kraken-task "project:app" awaiting-merge
+run_case 61 "requeue: is something I considered, but let's hold off until Monday" "User"
+assert_rc $? 0 "#6c run"
+has_label 61 awaiting-merge || fail "#6c a prose 'requeue:' sentence wrongly bounced delivered work"
+assert_eq "$(comment_count 61)" "0" "#6c got a comment it should not have"
 
 run_case 1 "and one more thing" "User"
 assert_rc $? 0 "#7 run"

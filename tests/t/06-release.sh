@@ -10,10 +10,8 @@ assert_rc $? 0 "release exit"
 assert_eq "$out" "release: released issue=7 worker=w1" "machine line"
 
 has_label 7 in-progress && fail "in-progress label still present after release"
-c="$(last_comment 7)"
 assert_disclaimer 7 w1
-printf '%s' "$c" | grep -q '^released: w1$' || fail "released: machine line missing"
-printf '%s' "$c" | grep -q '^reason: environment cannot host the task$' || fail "reason line missing"
+assert_marker 7 '{"type":"released","worker":"w1","reason":"environment cannot host the task"}'
 
 # The released issue is claimable again — end to end with kraken.py claim.
 out="$(python3 "$SCRIPTS/kraken.py" claim OWNER/tasks 7 w2)"

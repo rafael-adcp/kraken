@@ -21,10 +21,11 @@ unset GH_STUB_BARRIER
 rcs="$(printf '%s\n%s\n' "$rc_a" "$rc_b" | sort -n | tr '\n' ' ')"
 assert_eq "$rcs" "0 10 " "race exit codes (exactly one 0 and one 10)"
 
-# The winner is the first claimed-by: in server order.
-first="$(grep -h '^claimed-by: ' "$STATE/issues/7/comments/"*.md | head -1)"
+# The winner is whoever's claim marker landed first in server order.
+first="$(grep -hF '<!-- kraken {"type":"claim"' "$STATE/issues/7/comments/"*.md | head -1)"
 if [ "$rc_a" -eq 0 ]; then winner=w-a; else winner=w-b; fi
-assert_eq "$first" "claimed-by: $winner" "winner matches first claimed-by comment"
+printf '%s' "$first" | grep -qF "\"worker\":\"$winner\"" \
+  || fail "winner ($winner) must match the first claim marker in server order"
 
 # The loser backed off without removing anything.
 has_label 7 in-progress || fail "in-progress label missing after race"

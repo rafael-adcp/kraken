@@ -1,6 +1,6 @@
 # The Kraken Coordination Protocol
 
-**Version: `kraken-protocol/1`**
+**Version: `kraken-protocol/2`**
 
 This document is the normative specification of the coordination contract
 between a task queue built on GitHub Issues and the workers that drain it. It
@@ -12,11 +12,25 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY**
 are to be interpreted as described in RFC 2119.
 
 **Versioning.** Backward-incompatible changes to this contract bump the
-integer (`kraken-protocol/2`); clarifications and strictly additive rules
-amend this document in place by PR. An implementation states the protocol
+integer (`kraken-protocol/3` and onward); clarifications and strictly additive
+rules amend this document in place by PR. An implementation states the protocol
 version it targets (this plugin: in `.claude-plugin/plugin.json`), and the
 `Kraken-Task:` commit trailer's `kraken@<version>` maps any delivered commit
 back to a protocol revision via the release notes.
+
+**What changed in `kraken-protocol/2`.** Machine payloads moved from the
+visible line grammar of protocol/1 (`^<keyword>: <value>` scanned per line) to
+a structured **hidden marker** — an HTML comment carrying JSON (§4). This
+retires three fragilities of the line grammar: prefix-scanning every comment
+line (with its CRLF/quoting hazard class), accidental human collisions (a
+comment that happens to start a line with a keyword), and reconstructing claim
+state from interleaved free text. The **semantics are unchanged** — the claim
+window, its reset events, first-claim-wins, and heartbeat-never-resets all
+behave exactly as before; only the wire encoding changed. **Migration:**
+conforming protocol/2 consumers MUST read *both* formats (a pre-existing
+protocol/1 thread still arbitrates correctly), while protocol/2 producers emit
+markers *only*. The visible prose in a protocol/2 comment is a human-facing
+courtesy and MUST NOT be machine-parsed.
 
 ---
 
@@ -31,8 +45,9 @@ back to a protocol revision via the release notes.
 | **Task** | An open coordination-repo issue labeled `kraken-task`. |
 
 Every worker MAY authenticate as the same user. Identity therefore lives in
-the **worker name** carried by machine lines and trailers (§4), never in the
-authenticating account, and assignees MUST NOT be used to arbitrate anything.
+the **worker name** carried by the marker payload and trailers (§4), never in
+the authenticating account, and assignees MUST NOT be used to arbitrate
+anything.
 
 A task body is untrusted input that will execute in a worker's environment
 with the operator's credentials — see [SECURITY.md](SECURITY.md) for the
@@ -100,23 +115,51 @@ Workers MUST NOT close task issues: "done" for a worker means *delivered for
 review*, and the task closes when the work truly lands. Closing an issue is
 cancellation (operator) or landing (merge).
 
-## 4. Comments: machine lines and attribution
+## 4. Comments: the machine marker and attribution
 
-State-changing comments carry a **machine line**: a line matching
-`^<keyword>: <value>` inside the comment body. Consumers MUST scan all
-comment lines in server order; producers MUST put each machine line on its
-own line.
+State-changing comments carry their machine payload in exactly one **hidden
+marker**: an HTML comment carrying a compact single-line JSON object, of the
+form
 
-| Machine line | Posted by | Meaning | Claim-window reset (§5)? |
-| --- | --- | --- | --- |
-| `claimed-by: <worker>` | claim | this worker claims the task | — (it is the claim) |
-| `heartbeat: <worker>` | heartbeat | liveness; resets the reaper clock only | **No** — MUST NOT reset |
-| `needs-decision: <worker>` | escalation | question posted, decision pending | Yes |
-| `delivered: <worker>` | delivery | result posted, review pending | Yes |
-| `pr: <url>` | delivery | the draft PR/MR under review | n/a (companion line) |
-| `released: <worker>` | release | claim handed back | Yes |
-| `reason: <text>` | release | why (optional companion line) | n/a |
-| `stale-claim: <details>` | reaper | claim reclaimed from a silent worker | Yes |
+```
+<!-- kraken {"type":"claim","worker":"env-1"} -->
+```
+
+The marker is invisible in GitHub's rendered timeline, so the surrounding
+prose is a pure human courtesy. **Grammar** (normative):
+
+- The marker opens with the literal delimiter `<!-- kraken ` (the token
+  `kraken`, then a space), followed by the JSON object, then the literal
+  closing delimiter ` -->`. Consumers SHOULD match it as
+  `<!--\s*kraken\s+(\{…\})\s*-->`.
+- The JSON object MUST be a single line (no embedded newline) and MUST carry a
+  string **`type`** field naming the transition. Producers MUST encode it with
+  a real JSON serializer (never string interpolation) — this is what retires
+  the CRLF/quoting hazard class. Producers SHOULD emit ASCII-only JSON so the
+  marker never carries a byte a `C`-locale filter could miss.
+- A state-changing comment MUST carry exactly one marker. Consumers MUST scan
+  every comment in server order and decode each marker; a malformed marker
+  (undecodable JSON, no string `type`) MUST be ignored, never guessed.
+
+| `type` | Fields | Posted by | Meaning | Claim-window reset (§5)? |
+| --- | --- | --- | --- | --- |
+| `claim` | `worker` | claim | this worker claims the task | — (it is the claim) |
+| `heartbeat` | `worker` | heartbeat | liveness; resets the reaper clock only | **No** — MUST NOT reset |
+| `needs-decision` | `worker` | escalation | question posted, decision pending | Yes |
+| `delivered` | `worker`, `pr`? | delivery | result posted, review pending (optional `pr` URL) | Yes |
+| `released` | `worker`, `reason`? | release | claim handed back (optional `reason`) | Yes |
+| `stale-claim` | `reason`? | reaper | claim reclaimed from a silent worker | Yes |
+| `requeue` | — | operator | bounce a delivered (`awaiting-merge`) task back for rework (§6) | n/a (operator directive) |
+
+**Migration (reading protocol/1).** A conforming protocol/2 consumer MUST also
+read the retired protocol/1 **line grammar** so pre-existing threads keep
+arbitrating: a line matching `^<keyword>: <value>` at the start of a comment
+line, where the keyword maps to the same `type` above —
+`claimed-by:` → `claim`, `heartbeat:`, `needs-decision:`, `delivered:` (with a
+companion `pr:` line), `released:` (with a companion `reason:` line), and
+`stale-claim:`. Protocol/2 producers MUST NOT emit these lines; they exist in
+the contract only so a migrating consumer arbitrates an older thread the same
+way it always did.
 
 Every worker-posted coordination-repo comment MUST open with the
 **attribution disclaimer** — every worker may authenticate as the operator,
@@ -129,8 +172,8 @@ from human ones:
 
 (Non–Claude Code implementations substitute their own tool name; the
 blockquote + worker name shape is the contract.) The disclaimer sits *above*
-the machine line with a blank line between the two, or GitHub folds the body
-into the quote.
+the prose and marker with a blank line between, or GitHub folds the body into
+the quote.
 
 ## 5. The claim algorithm
 
@@ -143,22 +186,23 @@ Claiming is the only contended transition; its sequence is fixed:
 3. **Guard**: re-fetch the issue's current labels. If it is now held, the
    worker MUST skip it without writing anything — never stack a held label.
 4. **Label**: add `in-progress`.
-5. **Comment**: post `claimed-by: <worker>` (with the disclaimer).
-6. **Arbitrate**: re-read the comments. The winner is the **first
-   `claimed-by:` line of the current claim window**, in server-side comment
-   order — server ordering is the tiebreaker between two workers that passed
-   the guard at the same instant. If the winner is not this worker, it MUST
-   back off **removing nothing** (the winner owns the label and the claim)
-   and move on.
+5. **Comment**: post a `claim` marker (with the disclaimer) —
+   `<!-- kraken {"type":"claim","worker":"<worker>"} -->`.
+6. **Arbitrate**: re-read the comments. The winner is the **first `claim` of
+   the current claim window**, in server-side comment order — server ordering
+   is the tiebreaker between two workers that passed the guard at the same
+   instant. If the winner is not this worker, it MUST back off **removing
+   nothing** (the winner owns the label and the claim) and move on.
 
-**The claim window** starts immediately after the most recent
-`released:` / `stale-claim:` / `needs-decision:` / `delivered:` machine line
-in the comment stream (or at the beginning of the thread if none exists).
-`claimed-by:` lines before that point MUST be ignored during arbitration —
-otherwise a task once claimed by a dead worker, or delivered and bounced back
-by review, could never be claimed again (or only by its original worker).
-`heartbeat:` MUST NOT reset the window: a worker signalling liveness must
-never make its own claim re-claimable.
+**The claim window** starts immediately after the most recent reset marker —
+`released` / `stale-claim` / `needs-decision` / `delivered` (or their
+protocol/1 line-grammar equivalents on a pre-migration thread) — in the
+comment stream (or at the beginning of the thread if none exists). `claim`
+markers before that point MUST be ignored during arbitration — otherwise a
+task once claimed by a dead worker, or delivered and bounced back by review,
+could never be claimed again (or only by its original worker). A `heartbeat`
+MUST NOT reset the window: a worker signalling liveness must never make its
+own claim re-claimable.
 
 GitHub offers no compare-and-swap on labels, so this algorithm does not make
 claiming atomic; it makes the race **safe**: whatever the interleaving,
@@ -171,20 +215,21 @@ network failure — re-check first).
 ## 6. Heartbeats and the reaper
 
 - A worker holding `in-progress` SHOULD post a heartbeat (a progress comment;
-  the `heartbeat:` machine line) at least every **2 hours** while executing.
+  a `heartbeat` marker) at least every **2 hours** while executing.
 - The coordination repo runs the **reaper**
   ([`skills/unleash/reclaim-stale.yml`](skills/unleash/reclaim-stale.yml)):
   any `in-progress` issue whose worker has been silent for **6 hours**
   (`MAX_HOURS`, configurable) is moved to `needs-decision` with a
-  `stale-claim:` comment for the operator to triage. Staleness is anchored to
-  the worker's **last machine line** — the most recent `claimed-by:` /
-  `heartbeat:` comment — **not** the issue's `updatedAt`. Operator comments
-  and other activity do **not** reset the clock: a human commenting on a dead
-  worker's issue must shorten time-to-triage, not extend the claim's life by
-  another `MAX_HOURS`. Only the worker's own `heartbeat:` keeps a live claim
-  alive. An `in-progress` issue with no `claimed-by:`/`heartbeat:` line at all
-  is treated as infinitely stale and reclaimed. (`delivered:` / `released:`
-  already remove `in-progress`, so they never anchor a still-held claim.)
+  `stale-claim` marker for the operator to triage. Staleness is anchored to
+  the worker's **last liveness marker** — the most recent `claim` /
+  `heartbeat` comment (or a protocol/1 `claimed-by:` / `heartbeat:` line) —
+  **not** the issue's `updatedAt`. Operator comments and other activity do
+  **not** reset the clock: a human commenting on a dead worker's issue must
+  shorten time-to-triage, not extend the claim's life by another `MAX_HOURS`.
+  Only the worker's own `heartbeat` keeps a live claim alive. An `in-progress`
+  issue with no `claim`/`heartbeat` marker at all is treated as infinitely
+  stale and reclaimed. (`delivered` / `released` already remove `in-progress`,
+  so they never anchor a still-held claim.)
 - The coordination repo also runs the **requeue-on-reply** workflow
   ([`skills/unleash/requeue-on-reply.yml`](skills/unleash/requeue-on-reply.yml)):
   on a new comment, it removes the holding label so the task requeues — so the
@@ -194,24 +239,27 @@ network failure — re-check first).
   blockquote is treated as the operator. It is a **no-op** on worker comments
   (disclaimer present), on issues carrying no held label, and on bot/self
   comments (`user.type == Bot`) — which is what keeps the reaper's own
-  `stale-claim:` comment from instantly undoing the escalation it just posted.
+  `stale-claim` comment from instantly undoing the escalation it just posted.
   The two held states are handled asymmetrically: a bare operator comment
   requeues **`needs-decision`** (a human comment is almost always the answer;
   a "let me think" self-corrects via re-escalation), but **`awaiting-merge`**
   is already *delivered* and is left held unless the comment carries an
-  explicit `requeue:` line — a bare comment there would bounce a ready branch
-  back to a worker. Requeuing is idempotent, so a burst of comments requeues
-  once (the first drops the label; the rest find nothing held).
+  explicit, structured **requeue directive** — either a
+  `<!-- kraken {"type":"requeue"} -->` marker or a standalone `requeue:` line
+  (a line whose only content is `requeue`/`requeue:`). A `requeue:` buried in
+  a prose sentence MUST NOT bounce a ready branch back to a worker.
+  Requeuing is idempotent, so a burst of comments requeues once (the first
+  drops the label; the rest find nothing held).
 
 ## 7. Escalation
 
 When a task is blocked on a decision only the operator can make (an
 unverifiable assumption whose failure would be expensive, an ambiguous goal),
 the worker MUST escalate rather than guess: post the question — options and a
-recommendation — with the `needs-decision: <worker>` machine line, then swap
-`in-progress` for `needs-decision`. The comment MUST land before the label
-swap, so a half-executed escalation leaves the task held rather than
-re-claimable with a closed window.
+recommendation — with a `needs-decision` marker, then swap `in-progress` for
+`needs-decision`. The comment MUST land before the label swap, so a
+half-executed escalation leaves the task held rather than re-claimable with a
+closed window.
 
 The operator answers on the thread; the requeue-on-reply workflow (§6) removes
 the label (or the operator removes it by hand), the task requeues, and whoever
@@ -238,8 +286,8 @@ makes it real. Unless the task's notes say otherwise:
   truly lands, which is also what unblocks dependents. Elsewhere, reference
   the task as text; the operator closes it after merging.
 - On the task issue: post the result comment — what was done, how the
-  **acceptance was executed** and its real outcome, links — with the
-  `delivered: <worker>` and `pr: <url>` machine lines, then swap
+  **acceptance was executed** and its real outcome, links — with a `delivered`
+  marker (carrying the `pr` URL field when there is one), then swap
   `in-progress` for `awaiting-merge`. Comment first, labels second (§7's
   ordering rule, same rationale).
 - A work repo that cannot take a branch push: put the full diff or patch in
@@ -249,11 +297,11 @@ makes it real. Unless the task's notes say otherwise:
 
 A worker abandoning a claim without delivering (environment cannot host the
 task, execution failed in a way another worker might not) MUST release
-honestly: post `released: <worker>` (optional `reason:` line), **then**
-remove `in-progress`. The comment MUST land first — the `released:` line is
-what closes the claim window, so removing the label alone would leave the old
-`claimed-by:` winning every future arbitration. Silently dropping a claim
-(removing the label with no `released:` line) is non-conforming.
+honestly: post a `released` marker (optional `reason` field), **then** remove
+`in-progress`. The comment MUST land first — the `released` marker is what
+closes the claim window, so removing the label alone would leave the old
+`claim` winning every future arbitration. Silently dropping a claim (removing
+the label with no `released` marker) is non-conforming.
 
 ## 10. Close and cleanup
 
@@ -299,7 +347,7 @@ A read-only `status OWNER/tasks [--project <name>] [--json]` subcommand
 (operator-side, driven by [`skills/status/SKILL.md`](skills/status/SKILL.md))
 computes the console — the review queue (`awaiting-merge` + parsed PR link), the
 decision queue (`needs-decision`), in-flight tasks with a heartbeat age anchored
-to the worker's last machine line (the same anchor the reaper uses, §11), the
+to the worker's last liveness marker (the same anchor the reaper uses, §11), the
 merged-PR-but-open-issue orphan heuristic (flag-only, never acting), and the
 `project:` launch recon — over the same batched queue walk `list-startable`
 uses, with the heartbeat/PR-link history read through the paginated comment path
@@ -310,13 +358,14 @@ reference-implementation ergonomic, not part of the wire contract.
 The **conformance suite** in [`tests/`](tests/) exercises the contract's
 invariants against a stateful GitHub stub — the claim guard, the claim race
 (exactly one winner), claim-window arbitration including the review-bounce
-reset, honest release, failure staging, and the read-only `status` console
-(heartbeat-age anchoring and orphan flagging, never acting) — plus `kraken.py`
-unit tests
-([`tests/unit/`](tests/unit/)) that cover the arbitration grammar, machine-line
-parsing, and comment pagination past 100 in isolation. A third-party
-implementation MAY validate itself by pointing the suite's stub at its own
-transition executables; matching `kraken.py`'s exit-code contract
-(`0` success / `10` lost tiebreaker / `11` no longer clear / `20` transport
-failure) is RECOMMENDED but the wire contract — labels, machine lines,
-ordering — is what conformance means.
+reset, honest release, failure staging, the protocol/1→/2 migration (a
+producer emitting only markers while a consumer still arbitrates a legacy
+thread), and the read-only `status` console (heartbeat-age anchoring and orphan
+flagging, never acting) — plus `kraken.py` unit tests
+([`tests/unit/`](tests/unit/)) that cover the marker + legacy arbitration
+grammar, marker decoding edge cases, and comment pagination past 100 in
+isolation. A third-party implementation MAY validate itself by pointing the
+suite's stub at its own transition executables; matching `kraken.py`'s
+exit-code contract (`0` success / `10` lost tiebreaker / `11` no longer clear /
+`20` transport failure) is RECOMMENDED but the wire contract — labels, the
+marker grammar, ordering — is what conformance means.
