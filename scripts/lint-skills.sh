@@ -58,33 +58,24 @@ done
 [ "$fail" -eq 0 ] && note "4 canonical labels aligned across files"
 
 # --- 1b–1d. Contract vocabulary is single-sourced in kraken.py ---------------
-# kraken.py OWNS the disclaimer format and the machine-line / marker / claim-
-# window vocabulary (its DISCLAIMER, MARKER_TYPES, LEGACY_LINE_PREFIXES,
-# WINDOW_RESET_PREFIXES constants, surfaced by `kraken.py contract`). Instead of
-# re-declaring those literals here and diffing prose against prose, we EXECUTE
-# the program and check the spec documents everything it reads/emits, and that
-# the requeue workflow's own filter accepts what it emits. Structural, not
-# byte-equality between files.
+# kraken.py OWNS the disclaimer format and the marker / claim-window vocabulary
+# (its DISCLAIMER, MARKER_TYPES, RESET_TYPES constants, surfaced by
+# `kraken.py contract`). Instead of re-declaring those literals here and diffing
+# prose against prose, we EXECUTE the program and check the spec documents
+# everything it reads/emits, and that the requeue workflow's own filter accepts
+# what it emits. Structural, not byte-equality between files.
 if command -v python3 >/dev/null 2>&1; then
   kcontract() { python3 "$KRAKEN" contract "$@"; }
 
-  # [1b] Every legacy protocol/1 line kraken.py still READS (dual-read migration)
-  # is documented in PROTOCOL.md §4 — the reader keyword can't drift ahead of the
-  # spec.
-  echo "[1b] legacy machine lines (kraken.py reader vs PROTOCOL.md)"
+  # [1b] The reaper is the one non-kraken.py emitter left; its stale-claim reset
+  # must stay a structured protocol/3 marker.
+  echo "[1b] reaper stale-claim marker"
   fail_before=$fail
-  while read -r kw; do
-    [ -z "$kw" ] && continue
-    grep -qF -- "$kw" "$PROTOCOL" \
-      || err "legacy line '$kw' read by kraken.py missing from PROTOCOL.md"
-  done < <(kcontract legacy-line-prefixes)
-  # the reaper is the one non-kraken.py emitter left; its stale-claim reset must
-  # stay a structured protocol/2 marker.
   grep -qF -- '"type":"stale-claim"' "$REAPER" \
-    || err "reaper missing the protocol/2 stale-claim marker"
-  [ "$fail" -eq "$fail_before" ] && note "every legacy line kraken.py reads is specified in PROTOCOL.md"
+    || err "reaper missing the protocol/3 stale-claim marker"
+  [ "$fail" -eq "$fail_before" ] && note "reaper emits the structured stale-claim marker"
 
-  # [1b'] Every protocol/2 marker "type" kraken.py builds/arbitrates on is named
+  # [1b'] Every protocol/3 marker "type" kraken.py builds/arbitrates on is named
   # in PROTOCOL.md's marker table.
   echo "[1b'] marker type vocabulary (kraken.py vs PROTOCOL.md)"
   fail_before=$fail
@@ -121,19 +112,19 @@ if command -v python3 >/dev/null 2>&1; then
   [ "$fail" -eq "$fail_before" ] \
     && note "requeue filter accepts kraken.py's disclaimer and rejects bare comments; docs quote it"
 
-  # [1d] Claim-window resets: every keyword kraken.py treats as a window reset is
-  # documented as a machine line in PROTOCOL.md — catches the dangerous drift
+  # [1d] Claim-window resets: every reset type kraken.py treats as a window reset
+  # is documented as a marker type in PROTOCOL.md — catches the dangerous drift
   # direction (a new reset in code the contract never learned about).
-  echo "[1d] claim-window reset keywords (kraken.py vs PROTOCOL.md)"
+  echo "[1d] claim-window reset types (kraken.py vs PROTOCOL.md)"
   fail_before=$fail
   n=0
   while read -r kw; do
     [ -z "$kw" ] && continue
     n=$((n+1))
-    grep -qF -- "\`${kw}" "$PROTOCOL" \
+    grep -qF -- "\`${kw}\`" "$PROTOCOL" \
       || err "claim-window reset '$kw' in kraken.py missing from PROTOCOL.md"
-  done < <(kcontract reset-prefixes)
-  [ "$fail" -eq "$fail_before" ] && note "$n reset keyword(s) in kraken.py all specified in PROTOCOL.md"
+  done < <(kcontract reset-types)
+  [ "$fail" -eq "$fail_before" ] && note "$n reset type(s) in kraken.py all specified in PROTOCOL.md"
 else
   note "python3 unavailable — skipping contract-derived checks (1b–1d)"
 fi

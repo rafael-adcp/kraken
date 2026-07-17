@@ -1,6 +1,6 @@
 # The Kraken Coordination Protocol
 
-**Version: `kraken-protocol/2`**
+**Version: `kraken-protocol/3`**
 
 This document is the normative specification of the coordination contract
 between a task queue built on GitHub Issues and the workers that drain it. It
@@ -18,19 +18,28 @@ version it targets (this plugin: in `.claude-plugin/plugin.json`), and the
 `Kraken-Task:` commit trailer's `kraken@<version>` maps any delivered commit
 back to a protocol revision via the release notes.
 
+**What changed in `kraken-protocol/3`.** The retired protocol/1 **visible line
+grammar** (`^<keyword>: <value>` scanned per line) is no longer read at all.
+protocol/2 required consumers to dual-read both the hidden marker and the
+legacy line grammar so pre-existing threads kept arbitrating; protocol/3 drops
+that requirement — a conforming consumer reads **only** the hidden marker (§4).
+This is a backward-incompatible consumer change (an unmigrated protocol/1-only
+thread no longer arbitrates), so it bumps the integer. The upside is a stronger
+invariant: because no consumer parses visible prose as a machine line, free
+text in a comment (a result file, a question, a heartbeat message, a release
+reason) **cannot** forge a machine line — the entire prefix-collision fragility
+class is gone structurally, not by escaping. The **semantics are unchanged** —
+the claim window, its reset events, first-claim-wins, and heartbeat-never-resets
+all behave exactly as in protocol/2.
+
 **What changed in `kraken-protocol/2`.** Machine payloads moved from the
 visible line grammar of protocol/1 (`^<keyword>: <value>` scanned per line) to
 a structured **hidden marker** — an HTML comment carrying JSON (§4). This
-retires three fragilities of the line grammar: prefix-scanning every comment
+retired three fragilities of the line grammar: prefix-scanning every comment
 line (with its CRLF/quoting hazard class), accidental human collisions (a
 comment that happens to start a line with a keyword), and reconstructing claim
-state from interleaved free text. The **semantics are unchanged** — the claim
-window, its reset events, first-claim-wins, and heartbeat-never-resets all
-behave exactly as before; only the wire encoding changed. **Migration:**
-conforming protocol/2 consumers MUST read *both* formats (a pre-existing
-protocol/1 thread still arbitrates correctly), while protocol/2 producers emit
-markers *only*. The visible prose in a protocol/2 comment is a human-facing
-courtesy and MUST NOT be machine-parsed.
+state from interleaved free text. The visible prose in a marker-carrying
+comment is a human-facing courtesy and MUST NOT be machine-parsed.
 
 ---
 
@@ -83,7 +92,7 @@ they are otherwise silent. The coordination repo SHOULD run the **validator**
 ([`skills/unleash/validate-task.yml`](skills/unleash/validate-task.yml)): on a
 `kraken-task` issue being opened, edited, or relabeled, it checks the three
 requirements above and, when any is missing, posts a single actionable comment
-(a protocol/2 `validation` marker) naming exactly what to fix. Section detection
+(a `validation` marker) naming exactly what to fix. Section detection
 keys on the issue-form headings the template produces (`### Goal`,
 `### Acceptance`); a hand-written issue lacking them counts as missing them.
 
@@ -173,15 +182,14 @@ prose is a pure human courtesy. **Grammar** (normative):
 | `requeue` | — | operator | bounce a delivered (`awaiting-merge`) task back for rework (§6) | n/a (operator directive) |
 | `validation` | — | validator | task fails the queue-entry gate; the comment lists what to fix (§2.1) | n/a (never touches a claim) |
 
-**Migration (reading protocol/1).** A conforming protocol/2 consumer MUST also
-read the retired protocol/1 **line grammar** so pre-existing threads keep
-arbitrating: a line matching `^<keyword>: <value>` at the start of a comment
-line, where the keyword maps to the same `type` above —
-`claimed-by:` → `claim`, `heartbeat:`, `needs-decision:`, `delivered:` (with a
-companion `pr:` line), `released:` (with a companion `reason:` line), and
-`stale-claim:`. Protocol/2 producers MUST NOT emit these lines; they exist in
-the contract only so a migrating consumer arbitrates an older thread the same
-way it always did.
+**Reading (markers only).** A conforming protocol/3 consumer reads machine
+state from the hidden marker and **nothing else**: it MUST NOT parse the visible
+prose of a comment as a machine line. The retired protocol/1 line grammar
+(`^<keyword>: <value>`) is no longer read, so a line of free text that happens
+to begin with `released:`, `delivered:`, `claimed-by:`, `heartbeat:`, or any
+other former keyword is inert — it can never occupy a machine-line position.
+Producers MUST carry every machine payload in a marker and MUST NOT rely on the
+prose being parsed.
 
 Every worker-posted coordination-repo comment MUST open with the
 **attribution disclaimer** — every worker may authenticate as the operator,
@@ -222,8 +230,7 @@ Claiming is the only contended transition; its sequence is fixed:
    nothing** (the winner owns the label and the claim) and move on.
 
 **The claim window** starts immediately after the most recent reset marker —
-`released` / `stale-claim` / `needs-decision` / `delivered` (or their
-protocol/1 line-grammar equivalents on a pre-migration thread) — in the
+`released` / `stale-claim` / `needs-decision` / `delivered` — in the
 comment stream (or at the beginning of the thread if none exists). `claim`
 markers before that point MUST be ignored during arbitration — otherwise a
 task once claimed by a dead worker, or delivered and bounced back by review,
@@ -249,7 +256,7 @@ network failure — re-check first).
   (`MAX_HOURS`, configurable) is moved to `needs-decision` with a
   `stale-claim` marker for the operator to triage. Staleness is anchored to
   the worker's **last liveness marker** — the most recent `claim` /
-  `heartbeat` comment (or a protocol/1 `claimed-by:` / `heartbeat:` line) —
+  `heartbeat` comment —
   **not** the issue's `updatedAt`. Operator comments and other activity do
   **not** reset the clock: a human commenting on a dead worker's issue must
   shorten time-to-triage, not extend the claim's life by another `MAX_HOURS`.
@@ -385,12 +392,12 @@ reference-implementation ergonomic, not part of the wire contract.
 The **conformance suite** in [`tests/`](tests/) exercises the contract's
 invariants against a stateful GitHub stub — the claim guard, the claim race
 (exactly one winner), claim-window arbitration including the review-bounce
-reset, honest release, failure staging, the protocol/1→/2 migration (a
-producer emitting only markers while a consumer still arbitrates a legacy
-thread), and the read-only `status` console (heartbeat-age anchoring and orphan
+reset, honest release, failure staging, the marker-only arbitration invariant
+(free text that starts a line with a former keyword does not forge a machine
+line), and the read-only `status` console (heartbeat-age anchoring and orphan
 flagging, never acting) — plus `kraken.py` unit tests
-([`tests/unit/`](tests/unit/)) that cover the marker + legacy arbitration
-grammar, marker decoding edge cases, and comment pagination past 100 in
+([`tests/unit/`](tests/unit/)) that cover marker arbitration,
+marker decoding edge cases, and comment pagination past 100 in
 isolation. A third-party implementation MAY validate itself by pointing the
 suite's stub at its own transition executables; matching `kraken.py`'s
 exit-code contract (`0` success / `10` lost tiebreaker / `11` no longer clear /

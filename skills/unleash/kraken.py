@@ -59,19 +59,19 @@ EXIT_USAGE = 2
 HELD_LABELS = ("in-progress", "needs-decision", "awaiting-merge")
 
 # --- protocol version --------------------------------------------------------
-# The wire contract this program speaks (PROTOCOL.md). protocol/2 carries every
-# machine payload in a structured hidden marker (see MARKER_* below); it still
-# READS protocol/1's visible line grammar so pre-existing threads keep
-# arbitrating, but every comment it WRITES is protocol/2 only.
-PROTOCOL_VERSION = 2
+# The wire contract this program speaks (PROTOCOL.md). protocol/3 carries every
+# machine payload in a structured hidden marker (see MARKER_* below) and reads
+# ONLY markers: the retired protocol/1 visible line grammar is no longer parsed,
+# so free text in a comment can never occupy a machine-line position.
+PROTOCOL_VERSION = 3
 
-# --- structured hidden markers (kraken-protocol/2) ---------------------------
+# --- structured hidden markers (kraken-protocol/3) ---------------------------
 # A state-changing comment carries its machine payload in ONE hidden HTML-comment
 # marker — invisible in the rendered GitHub UI, so the visible prose is pure
 # human courtesy — of the form:
 #     <!-- kraken {"type":"claim","worker":"env-1"} -->
 # The payload is compact one-line JSON with a required string "type". Encoding it
-# with json.dumps (not string interpolation) is the whole point of protocol/2: it
+# with json.dumps (not string interpolation) is the whole point of protocol/3: it
 # retires the CRLF/quoting/prefix-scan hazard class the visible line grammar
 # inherited from the shell era. ensure_ascii keeps the marker pure ASCII (no
 # astral-plane bytes) so the reaper's grep and the requeue filter never hit a
@@ -83,36 +83,23 @@ MARKER_RE = re.compile(r"<!--\s*kraken\s+(\{.*?\})\s*-->")
 # The claim-window reset transition types: the most recent of these ends the
 # current claim window, so a dead worker's claim (stale-claim), an honest
 # hand-back (released), an escalation (needs-decision), or a delivered task
-# bounced back by review (delivered) can all be re-claimed. Marker "type" values
-# and the legacy prefixes below MUST agree, and each MUST appear in PROTOCOL.md —
-# the lint enforces that.
+# bounced back by review (delivered) can all be re-claimed. Each MUST appear in
+# PROTOCOL.md's marker table — the lint enforces that.
 RESET_TYPES = ("released", "stale-claim", "needs-decision", "delivered")
 
 # The two liveness types: a comment carrying either proves the worker is alive,
 # anchoring the reaper's staleness clock (PROTOCOL.md §6). Nothing else does.
 LIVENESS_TYPES = ("claim", "heartbeat")
 
-# Legacy (protocol/1) claim-window reset prefixes, still read so pre-existing
-# threads arbitrate correctly during migration. Each maps to the RESET_TYPES
-# value that drops its trailing colon (released: -> released, etc.). Every
-# keyword here must appear in PROTOCOL.md's protocol/1 migration section — the
-# lint enforces that.
-WINDOW_RESET_PREFIXES = ("released:", "stale-claim:", "needs-decision:", "delivered:")
-
-# Every marker "type" this program builds or arbitrates on — the protocol/2
+# Every marker "type" this program builds or arbitrates on — the protocol/3
 # vocabulary. (`requeue` is operator-only; the workflow reads it, this program
 # never emits it, so it is not here.) The lint checks each appears in
 # PROTOCOL.md's marker table by executing `kraken.py contract marker-types`.
 MARKER_TYPES = LIVENESS_TYPES + RESET_TYPES
 
-# The protocol/1 legacy line-grammar prefixes this program still READS (dual-read
-# migration, machine_event above): the claim line, the liveness line, and every
-# window-reset line. Documented in PROTOCOL.md §4's migration section.
-LEGACY_LINE_PREFIXES = ("claimed-by:", "heartbeat:") + WINDOW_RESET_PREFIXES
-
 
 def make_marker(payload):
-    """Render a machine payload dict as the protocol/2 hidden marker. Compact,
+    """Render a machine payload dict as the protocol/3 hidden marker. Compact,
     ASCII-only JSON so the marker never carries a byte the reaper/requeue greps
     could miss under a C locale."""
     return MARKER_PREFIX + json.dumps(payload, separators=(",", ":")) + MARKER_SUFFIX
@@ -134,24 +121,13 @@ def parse_marker(line):
     return None
 
 
-def machine_event(line, *, reset_prefixes=WINDOW_RESET_PREFIXES):
-    """Normalize one comment line to a {"type", ...} machine event, reading BOTH
-    wire formats: a protocol/2 marker takes precedence, else the protocol/1
-    visible line grammar. Returns None for a line that is neither. This single
-    normalizer is what lets every consumer read the two formats identically."""
-    line = line.rstrip("\r")
-    marker = parse_marker(line)
-    if marker is not None:
-        return marker
-    # protocol/1 fallback: the visible line grammar.
-    if line.startswith("claimed-by:"):
-        return {"type": "claim", "worker": line[len("claimed-by:"):].lstrip(" ")}
-    for prefix in reset_prefixes:
-        if line.startswith(prefix):
-            return {"type": prefix[:-1]}
-    if line.startswith("heartbeat:"):
-        return {"type": "heartbeat", "worker": line[len("heartbeat:"):].lstrip(" ")}
-    return None
+def machine_event(line):
+    """Normalize one comment line to a {"type", ...} machine event by decoding its
+    protocol/3 hidden marker, or None for a line carrying no well-formed marker.
+    ONLY the marker is read: the retired protocol/1 visible line grammar is not
+    parsed, so free text can never masquerade as a machine line. This single
+    normalizer is what every consumer reads through."""
+    return parse_marker(line.rstrip("\r"))
 
 # The attribution disclaimer — the ONE authoritative definition of its format.
 # Every worker authenticates as the operator, so a worker comment reads exactly
@@ -169,7 +145,7 @@ def disclaimer(worker):
 
 
 def compose_comment(worker, prose, payload):
-    """Assemble a protocol/2 state-changing comment: the attribution disclaimer,
+    """Assemble a protocol/3 state-changing comment: the attribution disclaimer,
     the human-facing prose (courtesy only — never machine-parsed), then the one
     hidden marker carrying the machine payload. Blank lines separate the three so
     GitHub does not fold the body into the disclaimer's blockquote."""
@@ -236,8 +212,8 @@ def comment_bodies(repo, issue):
     if rc != 0:
         return None
     # `--jq .[].body` prints one body per line (multi-line bodies span several
-    # lines); markers (and legacy machine lines) sit on their own line, so a
-    # flat line scan downstream is exactly what arbitration needs.
+    # lines); markers sit on their own line, so a flat line scan downstream is
+    # exactly what arbitration needs.
     return out.split("\n")
 
 
@@ -282,19 +258,19 @@ def comment_records(repo, issue):
     return records
 
 
-# --- machine marker + legacy line grammar ------------------------------------
+# --- machine marker arbitration ----------------------------------------------
 
-def arbitrate_winner(lines, *, reset_prefixes=WINDOW_RESET_PREFIXES):
+def arbitrate_winner(lines):
     """The claim-window tiebreaker, isolated for testing.
 
-    Scan each comment line in server order, reading BOTH wire formats through
-    machine_event (a protocol/2 marker or the protocol/1 line grammar): any
-    reset event clears the running winner (older claims no longer count), and the
-    FIRST claim of the current window wins. Returns the winning worker name, or
-    "" if the window holds no live claim."""
+    Scan each comment line in server order, decoding each protocol/3 hidden
+    marker through machine_event: any reset event clears the running winner
+    (older claims no longer count), and the FIRST claim of the current window
+    wins. Free-text prose carries no marker, so it is inert here. Returns the
+    winning worker name, or "" if the window holds no live claim."""
     winner = ""
     for raw in lines:
-        event = machine_event(raw, reset_prefixes=reset_prefixes)
+        event = machine_event(raw)
         if event is None:
             continue
         etype = event.get("type")
@@ -767,23 +743,23 @@ def parse_iso(ts):
 
 
 def _is_machine_line(line):
-    """Whether a line carries a worker-liveness machine payload — a protocol/2
-    claim/heartbeat marker or the protocol/1 ^claimed-by:/^heartbeat: line. Reset
-    lines (delivered:/released:/…) are not liveness: they already drop
-    in-progress, so they never anchor a still-held claim (PROTOCOL.md §6)."""
+    """Whether a line carries a worker-liveness machine payload — a protocol/3
+    claim/heartbeat marker. Reset markers (delivered/released/…) are not
+    liveness: they already drop in-progress, so they never anchor a still-held
+    claim (PROTOCOL.md §6)."""
     event = machine_event(line)
     return event is not None and event.get("type") in LIVENESS_TYPES
 
 
 def heartbeat_anchor(records):
-    """The createdAt of the newest comment carrying a worker liveness machine
-    line (^claimed-by: or ^heartbeat:), or None when the worker never spoke.
+    """The createdAt of the newest comment carrying a worker liveness marker
+    (a claim/heartbeat marker), or None when the worker never spoke.
 
     This is the reaper's staleness anchor (reclaim-stale.yml), computed the same
-    way: only those two lines prove liveness, and an operator comment — carrying
-    neither — never resets the clock, so a human poking a dead worker's issue
-    cannot make it look alive. None means no anchor exists at all (a malformed
-    or silent claim), which the reaper treats as infinitely stale."""
+    way: only those two markers prove liveness, and an operator comment —
+    carrying neither — never resets the clock, so a human poking a dead worker's
+    issue cannot make it look alive. None means no anchor exists at all (a
+    malformed or silent claim), which the reaper treats as infinitely stale."""
     newest = None
     for rec in records:
         body = rec.get("body") or ""
@@ -805,9 +781,9 @@ def flat_comment_lines(records):
 
 def parse_pr_url(records):
     """The delivery PR URL for an awaiting-merge task: the newest structured
-    source wins — a protocol/2 delivered marker's "pr" field or the protocol/1
-    `pr:` line — falling back to the newest GitHub pull-request URL
-    anywhere in the thread. None when no PR was recorded."""
+    source wins — a protocol/3 delivered marker's "pr" field — falling back to
+    the newest GitHub pull-request URL anywhere in the thread. None when no PR
+    was recorded."""
     from_marker = None
     fallback = None
     for rec in records:  # server order — keep overwriting so the newest wins
@@ -815,12 +791,6 @@ def parse_pr_url(records):
             marker = parse_marker(raw)
             if marker is not None and marker.get("pr"):
                 from_marker = marker["pr"]
-            else:
-                line = raw.rstrip("\r").strip()
-                if line.startswith("pr:"):
-                    url = line[len("pr:"):].strip()
-                    if url:
-                        from_marker = url
             m = _PR_URL_RE.search(raw)
             if m:
                 fallback = m.group(0)
@@ -1025,24 +995,22 @@ def cmd_status(args):
 
 # The contract literals `kraken.py contract` exposes, each a list of lines. This
 # is the read side of single-sourcing: the disclaimer format and the machine
-# marker / legacy-line / claim-window vocabulary live in the constants above,
-# and every other consumer derives from or is verified against them by executing
-# this command rather than re-declaring the literals.
+# marker / claim-window vocabulary live in the constants above, and every other
+# consumer derives from or is verified against them by executing this command
+# rather than re-declaring the literals.
 CONTRACT_FIELDS = {
     "disclaimer": lambda args: [disclaimer(args.worker)],
-    "reset-prefixes": lambda args: list(WINDOW_RESET_PREFIXES),
     "reset-types": lambda args: list(RESET_TYPES),
     "liveness-types": lambda args: list(LIVENESS_TYPES),
     "marker-types": lambda args: list(MARKER_TYPES),
-    "legacy-line-prefixes": lambda args: list(LEGACY_LINE_PREFIXES),
 }
 
 
 def cmd_contract(args):
     """Print an authoritative contract literal (no network). The single source of
-    truth for the disclaimer format and the machine-line/marker vocabulary — the
-    requeue workflow filter, the test helpers, and the skill lint read these
-    instead of re-declaring them, so a format change lands in exactly one place."""
+    truth for the disclaimer format and the marker vocabulary — the requeue
+    workflow filter, the test helpers, and the skill lint read these instead of
+    re-declaring them, so a format change lands in exactly one place."""
     for line in CONTRACT_FIELDS[args.field](args):
         print(line)
     return EXIT_OK

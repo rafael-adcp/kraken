@@ -2,7 +2,7 @@
 # The SessionEnd auto-release hook: when a Claude Code session ends while a claim
 # state file is present, the bundled hook runs `kraken.py release` so the task
 # requeues in seconds instead of waiting ~6h for the reaper. It runs `kraken.py
-# release`, so the released: line lands before in-progress drops (the claim
+# release`, so the released marker lands before in-progress drops (the claim
 # window closes, §9).
 # With no state file it is a strict no-op. It is best-effort: a failed release
 # just falls back to the reaper and never blocks session exit (always exits 0).
@@ -36,7 +36,7 @@ assert_rc $? 0 "task re-claimable after the hook released it"
 # --- no state file: strict no-op (no writes at all) --------------------------
 rm -rf "$KRAKEN_STATE_DIR"
 mk_issue 8 "untouched task" kraken-task "project:app" in-progress
-mk_comment 8 "claimed-by: someone-else"
+mk_comment 8 '<!-- kraken {"type":"claim","worker":"someone-else"} -->'
 before8="$(comment_count 8)"
 out="$(printf '%s' '{"hook_event_name":"SessionEnd","reason":"exit"}' | bash "$HOOK" 2>&1)"
 assert_rc $? 0 "no-op hook still exits 0"

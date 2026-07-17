@@ -30,7 +30,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
 | L43 | Coordination repo **MUST** be private and **MUST NOT** hold work code | 📋 operational | Enforced at queue setup (`skills/init`); not a worker transition. |
-| L49 | Assignees **MUST NOT** be used to arbitrate anything | 🏗 structural | Arbitration (`kraken.py` `arbitrate_winner`) reads only claim markers (and, for migration, legacy `claimed-by:` lines) in the claim window; assignees are never fetched or consulted. Pinned indirectly by `tests/t/04`, `tests/t/05`, `tests/unit` (arbitration ignores everything but claim markers/lines). |
+| L49 | Assignees **MUST NOT** be used to arbitrate anything | 🏗 structural | Arbitration (`kraken.py` `arbitrate_winner`) reads only claim markers in the claim window; assignees are never fetched or consulted. Pinned indirectly by `tests/t/04`, `tests/t/05`, `tests/unit` (arbitration ignores everything but claim markers/lines). |
 
 ## §2 Task shape
 
@@ -55,10 +55,10 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
 | L135–136 | The marker JSON **MUST** be a single line carrying a string `type`, encoded with a real JSON serializer | ✅ pinned + 🧹 lint | `tests/unit` `MarkerTests` (`test_make_marker_is_compact_ascii_json`, `test_make_marker_round_trips_through_parse`); marker byte-form pinned in conformance by `assert_marker` in `tests/t/02`, `tests/t/24`. Serializer-not-interpolation cross-checked by `scripts/lint-skills.sh`. |
-| L140–142 | Consumers **MUST** scan every comment in server order; a malformed marker (undecodable JSON, no string `type`) **MUST** be ignored, never guessed | ✅ pinned | `tests/unit` `MarkerTests` (`test_parse_marker_rejects_undecodable_json`, `test_parse_marker_rejects_a_payload_without_a_string_type`, `test_malformed_marker_never_arbitrates`, `test_parse_marker_tolerates_surrounding_prose`); per-line scan `MachineLineParsingTests`. |
-| L147 | `heartbeat` marker **MUST NOT** reset the claim window | ✅ pinned | `tests/t/08`; `tests/unit` `test_heartbeat_does_not_reset`, `MarkerTests.test_heartbeat_marker_does_not_reset`. |
-| L154–162 | A protocol/2 consumer **MUST** also read the retired protocol/1 line grammar so pre-existing threads keep arbitrating; producers **MUST NOT** emit those lines | ✅ pinned + 🧹 lint | Cross-format arbitration: `tests/unit` `MigrationTests` (legacy-only, marker↔legacy resets, legacy-first-wins), `tests/t/24` (end-to-end migration). Legacy vocabulary agreement across spec/emitter cross-checked by `scripts/lint-skills.sh`. |
-| L164 | Every worker-posted comment **MUST** open with the attribution disclaimer | ✅ pinned + 🧹 lint | Disclaimer asserted on claim `tests/t/02`, release `tests/t/06`, heartbeat `tests/t/08`, and `tests/unit` `MigrationTests.test_composed_comment_carries_disclaimer_prose_and_marker`; disclaimer shape cross-checked by `scripts/lint-skills.sh`. |
+| L140–142 | Consumers **MUST** scan every comment in server order; a malformed marker (undecodable JSON, no string `type`) **MUST** be ignored, never guessed | ✅ pinned | `tests/unit` `MarkerTests` (`test_parse_marker_rejects_undecodable_json`, `test_parse_marker_rejects_a_payload_without_a_string_type`, `test_malformed_marker_never_arbitrates`, `test_parse_marker_tolerates_surrounding_prose`); per-line scan `MarkerEdgeCaseTests`. |
+| L147 | `heartbeat` marker **MUST NOT** reset the claim window | ✅ pinned | `tests/t/08`; `tests/unit` `ArbitrationTests.test_heartbeat_does_not_reset`. |
+| L186–193 | A protocol/3 consumer reads the hidden marker and **NOTHING else**: the retired protocol/1 line grammar is not parsed, so free text can never occupy a machine-line position | ✅ pinned + 🧹 lint | `tests/unit` `MarkerOnlyReadingTests` (former claim/reset lines inert, result-file `released:` resets nothing, heartbeat message with `claimed-by:` forges no machine line, release reason newline injects nothing); `tests/t/24` (end-to-end marker-only + produced-comment shape). Marker vocabulary agreement across spec/emitter cross-checked by `scripts/lint-skills.sh`. |
+| L164 | Every worker-posted comment **MUST** open with the attribution disclaimer | ✅ pinned + 🧹 lint | Disclaimer asserted on claim `tests/t/02`, release `tests/t/06`, heartbeat `tests/t/08`, and `tests/unit` `MarkerReaderTests.test_composed_comment_carries_disclaimer_prose_and_marker`; disclaimer shape cross-checked by `scripts/lint-skills.sh`. |
 
 ## §5 The claim algorithm
 
@@ -67,8 +67,8 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | L183 | Label filtering **SHOULD** be client-side for determinism | ✅ pinned | `tests/t/01` asserts exact client-side-filtered output; `tests/t/19` pins the O(1) call count that client-side filtering enables. |
 | L187 | Guard: a held task **MUST** be skipped without writing anything | ✅ pinned | `tests/t/03` (exit 11, zero writes). |
 | L194 | A loser **MUST** back off removing nothing | ✅ pinned | `tests/t/04` (the claim race: loser exits 10, removes nothing); `tests/t/22` + `tests/unit` `ClaimNextIterationTests` (`claim-next` skips a lost/held candidate forward — never retries it — and two concurrent `claim-next` workers claim two different tasks). |
-| L201 | Claim markers (and legacy `claimed-by:` lines) before the window start **MUST** be ignored | ✅ pinned | `tests/t/05`; `tests/unit` `test_released_resets_window`, `test_stale_claim_resets_window`, `test_needs_decision_resets_window`, `test_reset_after_claim_leaves_no_winner`, `MarkerTests.test_marker_reset_clears_marker_claim`. |
-| L204 | A liveness signal **MUST NOT** reset the window | ✅ pinned | (same as §4 L147) `tests/t/08`, `tests/unit` `test_heartbeat_does_not_reset`. |
+| L201 | Claim markers before the window start **MUST** be ignored | ✅ pinned | `tests/t/05`; `tests/unit` `ArbitrationTests` (`test_released_resets_window`, `test_stale_claim_resets_window`, `test_needs_decision_resets_window`, `test_reset_after_claim_leaves_no_winner`, `test_delivered_is_a_review_bounce_reset`). |
+| L204 | A liveness signal **MUST NOT** reset the window | ✅ pinned | (same as §4 L147) `tests/t/08`, `tests/unit` `ArbitrationTests.test_heartbeat_does_not_reset`. |
 | L211 | A worker **MUST** work one task at a time; **MUST NOT** claim a second while holding a claim | 🕳 gap | `kraken.py claim` does not refuse a second claim while a `claim-<worker>.json` state file exists. State-file lifecycle is pinned (`tests/t/15`) but the one-at-a-time guard is not. Follow-up: rafael-adcp/personal-tasks#35 (gap **G1** below). |
 
 ## §6 Heartbeats and the reaper
@@ -76,7 +76,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
 | L217 | A worker holding `in-progress` **SHOULD** heartbeat at least every 2h | 🧠 agent | Cadence is worker behavior. The reaper *mechanism* that consumes heartbeats is pinned below. |
-| §6 reaper | Staleness anchored to the worker's last liveness marker (`claim`/`heartbeat`, plus legacy lines for migration), 6h `MAX_HOURS`; operator comments do not reset the clock | ✅ pinned | `tests/t/17` extracts and runs `reclaim-stale.yml`'s shipped `run:` block verbatim. |
+| §6 reaper | Staleness anchored to the worker's last liveness marker (`claim`/`heartbeat`), 6h `MAX_HOURS`; operator comments do not reset the clock | ✅ pinned | `tests/t/17` extracts and runs `reclaim-stale.yml`'s shipped `run:` block verbatim. |
 | §6 requeue | requeue-on-reply asymmetry (bare comment requeues `needs-decision`, not `awaiting-merge`); no-op on worker/bot/unheld | ✅ pinned | `tests/t/18` extracts and runs `requeue-on-reply.yml`'s shipped `run:` block verbatim. |
 
 ## §7 Escalation

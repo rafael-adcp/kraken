@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# kraken.py escalate: question posted with the needs-decision: line, labels swapped in
-# one call — and after the human requeues, ANY worker wins the fresh window.
+# kraken.py escalate: question posted with the needs-decision marker, labels
+# swapped in one call — and after the human requeues, ANY worker wins the fresh
+# window.
 . "$ROOT/tests/lib.sh"
 
 mk_issue 7 "blocked task" kraken-task "project:app" in-progress
-mk_comment 7 "claimed-by: w1"
+mk_comment 7 '<!-- kraken {"type":"claim","worker":"w1"} -->'
 
 q="$STATE/question.md"
 printf 'Should pagination be cursor- or offset-based?\n\n- A: cursor (recommended)\n- B: offset\n' > "$q"

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # kraken.py status: the read-only operator console, mechanized. Pins the four
 # things the skill used to teach an LLM to orchestrate — the review/decision/
-# in-flight queues, the heartbeat-age anchored to the worker's last machine line
-# (NOT updatedAt), the merged-PR-but-open-issue orphan heuristic (flag, never
+# in-flight/review/decision queues, the heartbeat-age anchored to the worker's
+# last liveness marker (NOT updatedAt), the merged-PR-but-open-issue orphan heuristic (flag, never
 # act), and the launch recon — plus the hard guarantee that the whole thing is
 # read-only: not one label change, not one comment, not one write.
 . "$ROOT/tests/lib.sh"
@@ -15,24 +15,24 @@ ago_iso() { date -u -d "@$(( $(date -u +%s) - $1 * 3600 ))" +%Y-%m-%dT%H:%M:%SZ;
 # Review queue: #88 delivered with a MERGED PR (an orphan), #91 delivered with
 # an OPEN PR (healthy — waiting on the merge, not flagged).
 mk_issue 88 "orphan candidate" kraken-task "project:app" awaiting-merge
-mk_comment 88 "$(printf '> d\n\ndelivered: w1\npr: https://github.com/OWNER/work/pull/5\n\nlanded')"
+mk_comment 88 "$(printf '> d\n\n<!-- kraken {"type":"delivered","worker":"w1","pr":"https://github.com/OWNER/work/pull/5"} -->\n\nlanded')"
 mk_pr 5 MERGED "$(nowiso)"
 mk_issue 91 "healthy delivery" kraken-task "project:app" awaiting-merge
-mk_comment 91 "$(printf '> d\n\ndelivered: w2\npr: https://github.com/OWNER/work/pull/6')"
+mk_comment 91 "$(printf '> d\n\n<!-- kraken {"type":"delivered","worker":"w2","pr":"https://github.com/OWNER/work/pull/6"} -->')"
 mk_pr 6 OPEN
 
 # Decision queue.
 mk_issue 97 "needs a human call" kraken-task "project:app" needs-decision
 
 # In flight: #99 DEAD — claimed 8h ago, then an operator commented just now.
-# updatedAt would read fresh and hide the death; anchored to the last machine
-# line it is 8h silent. #100 ALIVE — a fresh heartbeat 0h ago.
+# updatedAt would read fresh and hide the death; anchored to the last liveness
+# marker it is 8h silent. #100 ALIVE — a fresh heartbeat 0h ago.
 mk_issue 99 "dead worker, operator poked it" kraken-task "project:app" in-progress
-mk_comment 99 "$(printf '> d\n\nclaimed-by: dead-worker\n')" "$(ago_iso 8)"
+mk_comment 99 "$(printf '> d\n\n<!-- kraken {"type":"claim","worker":"dead-worker"} -->\n')" "$(ago_iso 8)"
 mk_comment 99 "any progress? — the operator" "$(ago_iso 0)"
 mk_issue 100 "live worker" kraken-task "project:app" in-progress
-mk_comment 100 "$(printf '> d\n\nclaimed-by: live-worker')" "$(ago_iso 9)"
-mk_comment 100 "$(printf '> d\n\nheartbeat: live-worker')" "$(ago_iso 0)"
+mk_comment 100 "$(printf '> d\n\n<!-- kraken {"type":"claim","worker":"live-worker"} -->')" "$(ago_iso 9)"
+mk_comment 100 "$(printf '> d\n\n<!-- kraken {"type":"heartbeat","worker":"live-worker"} -->')" "$(ago_iso 0)"
 
 # A startable task in another project, and an empty registered project — both
 # must show in the launch recon; only project: labels drive it.

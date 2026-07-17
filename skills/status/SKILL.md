@@ -74,8 +74,7 @@ orchestration left to do by hand.
    ```
 
    The heartbeat age is anchored to the worker's last liveness marker (a
-   protocol/2 `claim`/`heartbeat` marker, or a protocol/1 `^claimed-by:`/`^heartbeat:`
-   line), NOT the issue's `updatedAt` — an operator comment on
+   `claim`/`heartbeat` marker), NOT the issue's `updatedAt` — an operator comment on
    a dead worker's issue must not make it look alive (the reaper moves silent
    `in-progress` issues to `needs-decision` after 6h off that same anchor). The orphan
    line **flags, it never acts** — no label change, no close; the decision is mine. The

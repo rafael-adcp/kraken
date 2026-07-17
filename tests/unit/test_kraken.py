@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests for kraken.py — the parts the gh-stub conformance suite cannot
-exercise in isolation: the claim-window arbitration grammar (including the
-review-bounce reset), machine-line parsing edge cases, and comment pagination
-beyond 100 comments.
+exercise in isolation: the claim-window arbitration over hidden markers, marker
+decoding edge cases, the marker-only reading invariant (free text can never
+forge a machine line), and comment pagination beyond 100 comments.
 
 Stdlib only (unittest), no network, no gh. Run: python3 tests/unit/test_kraken.py
 """
@@ -22,58 +22,94 @@ sys.path.insert(0, os.path.abspath(SKILL_DIR))
 import kraken  # noqa: E402
 
 
+# --- protocol/3 marker builders (what a real comment carries) ----------------
+
+def clm(worker):
+    return kraken.make_marker({"type": "claim", "worker": worker})
+
+
+def hb(worker):
+    return kraken.make_marker({"type": "heartbeat", "worker": worker})
+
+
+def dlv(worker, pr=None):
+    payload = {"type": "delivered", "worker": worker}
+    if pr:
+        payload["pr"] = pr
+    return kraken.make_marker(payload)
+
+
+def rls(worker, reason=None):
+    payload = {"type": "released", "worker": worker}
+    if reason:
+        payload["reason"] = reason
+    return kraken.make_marker(payload)
+
+
+def stale(reason=None):
+    payload = {"type": "stale-claim"}
+    if reason:
+        payload["reason"] = reason
+    return kraken.make_marker(payload)
+
+
+def needs(worker):
+    return kraken.make_marker({"type": "needs-decision", "worker": worker})
+
+
 class ArbitrationTests(unittest.TestCase):
-    """arbitrate_winner: the claim tiebreaker, isolated from any transport."""
+    """arbitrate_winner: the claim tiebreaker, isolated from any transport. Every
+    fixture is a protocol/3 hidden marker — the only wire format consumers read."""
 
     def test_first_claim_in_window_wins(self):
-        lines = ["claimed-by: alice", "claimed-by: bob"]
-        self.assertEqual(kraken.arbitrate_winner(lines), "alice")
+        self.assertEqual(kraken.arbitrate_winner([clm("alice"), clm("bob")]), "alice")
 
     def test_no_claim_yields_empty(self):
-        self.assertEqual(kraken.arbitrate_winner(["some prose", "released: x"]), "")
+        self.assertEqual(kraken.arbitrate_winner(["some prose", rls("x")]), "")
 
     def test_released_resets_window(self):
         # tired-worker released; the newcomer is now the first live claim.
-        lines = ["claimed-by: tired-worker", "released: tired-worker", "claimed-by: fresh"]
-        self.assertEqual(kraken.arbitrate_winner(lines), "fresh")
+        self.assertEqual(
+            kraken.arbitrate_winner([clm("tired-worker"), rls("tired-worker"), clm("fresh")]),
+            "fresh")
 
     def test_stale_claim_resets_window(self):
-        lines = ["claimed-by: dead", "stale-claim: no activity for 7h", "claimed-by: reaper-heir"]
-        self.assertEqual(kraken.arbitrate_winner(lines), "reaper-heir")
+        self.assertEqual(
+            kraken.arbitrate_winner([clm("dead"), stale("no activity for 7h"), clm("reaper-heir")]),
+            "reaper-heir")
 
     def test_needs_decision_resets_window(self):
-        lines = ["claimed-by: w1", "needs-decision: w1", "claimed-by: w2"]
-        self.assertEqual(kraken.arbitrate_winner(lines), "w2")
+        self.assertEqual(
+            kraken.arbitrate_winner([clm("w1"), needs("w1"), clm("w2")]), "w2")
 
     def test_delivered_is_a_review_bounce_reset(self):
-        # THE review-bounce gap: without delivered: as a reset, the original
+        # THE review-bounce gap: without delivered as a reset, the original
         # claimant would win every future arbitration and a bounced-back task
         # could never be re-claimed by anyone else.
-        lines = ["claimed-by: w1", "delivered: w1", "claimed-by: w2"]
-        self.assertEqual(kraken.arbitrate_winner(lines), "w2")
+        self.assertEqual(
+            kraken.arbitrate_winner([clm("w1"), dlv("w1"), clm("w2")]), "w2")
 
     def test_no_reset_keeps_original_owner(self):
-        # A control: with no reset line, the first (rightful) owner keeps it even
-        # if a newcomer's claim comment lands later.
-        lines = ["claimed-by: rightful-owner", "claimed-by: interloper"]
-        self.assertEqual(kraken.arbitrate_winner(lines), "rightful-owner")
+        # A control: with no reset, the first (rightful) owner keeps it even if a
+        # newcomer's claim comment lands later.
+        self.assertEqual(
+            kraken.arbitrate_winner([clm("rightful-owner"), clm("interloper")]),
+            "rightful-owner")
 
     def test_heartbeat_does_not_reset(self):
-        # heartbeat: is deliberately NOT a window reset — a worker heartbeating
+        # heartbeat is deliberately NOT a window reset — a worker heartbeating
         # must never make its own claim re-claimable.
-        lines = ["claimed-by: w1", "heartbeat: w1", "claimed-by: w2"]
-        self.assertEqual(kraken.arbitrate_winner(lines), "w1")
+        self.assertEqual(
+            kraken.arbitrate_winner([clm("w1"), hb("w1"), clm("w2")]), "w1")
 
     def test_reset_after_claim_leaves_no_winner(self):
-        # released as the last relevant line -> the window is empty again.
-        lines = ["claimed-by: w1", "released: w1"]
-        self.assertEqual(kraken.arbitrate_winner(lines), "")
+        # released as the last relevant marker -> the window is empty again.
+        self.assertEqual(kraken.arbitrate_winner([clm("w1"), rls("w1")]), "")
 
 
 class MarkerTests(unittest.TestCase):
-    """protocol/2 hidden markers: make_marker/parse_marker round-trip, decoding
-    edge cases, and arbitration over markers — the successor to the protocol/1
-    line grammar."""
+    """protocol/3 hidden markers: make_marker/parse_marker round-trip, decoding
+    edge cases, and arbitration over markers."""
 
     def test_make_marker_is_compact_ascii_json(self):
         m = kraken.make_marker({"type": "claim", "worker": "env-1"})
@@ -98,71 +134,87 @@ class MarkerTests(unittest.TestCase):
         self.assertEqual(kraken.parse_marker(line),
                          {"type": "claim", "worker": "w"})
 
-    def test_first_claim_marker_in_window_wins(self):
-        lines = [kraken.make_marker({"type": "claim", "worker": "alice"}),
-                 kraken.make_marker({"type": "claim", "worker": "bob"})]
-        self.assertEqual(kraken.arbitrate_winner(lines), "alice")
-
-    def test_marker_reset_clears_marker_claim(self):
-        lines = [kraken.make_marker({"type": "claim", "worker": "w1"}),
-                 kraken.make_marker({"type": "delivered", "worker": "w1"}),
-                 kraken.make_marker({"type": "claim", "worker": "w2"})]
-        self.assertEqual(kraken.arbitrate_winner(lines), "w2")
-
-    def test_heartbeat_marker_does_not_reset(self):
-        lines = [kraken.make_marker({"type": "claim", "worker": "w1"}),
-                 kraken.make_marker({"type": "heartbeat", "worker": "w1"}),
-                 kraken.make_marker({"type": "claim", "worker": "w2"})]
-        self.assertEqual(kraken.arbitrate_winner(lines), "w1")
-
     def test_malformed_marker_never_arbitrates(self):
         # An undecodable marker must be ignored, not treated as a live claim.
-        lines = ["<!-- kraken {broken -->",
-                 kraken.make_marker({"type": "claim", "worker": "real"})]
+        lines = ["<!-- kraken {broken -->", clm("real")]
         self.assertEqual(kraken.arbitrate_winner(lines), "real")
 
+    def test_crlf_after_marker_is_tolerated(self):
+        # A body split on "\n" can leave a trailing "\r"; the marker still decodes.
+        self.assertEqual(kraken.arbitrate_winner([clm("w1") + "\r"]), "w1")
 
-class MigrationTests(unittest.TestCase):
-    """The protocol/1 -> /2 migration contract (PROTOCOL.md §4): a consumer reads
-    BOTH formats, so pre-existing legacy threads and mixed threads arbitrate."""
 
-    def test_legacy_only_thread_arbitrates(self):
-        lines = ["claimed-by: dead", "delivered: dead", "claimed-by: heir"]
-        self.assertEqual(kraken.arbitrate_winner(lines), "heir")
+class MarkerOnlyReadingTests(unittest.TestCase):
+    """protocol/3's core invariant (PROTOCOL.md §4, issue #32): consumers read the
+    hidden marker and NOTHING else, so free text — including a line that starts
+    with a former protocol/1 keyword — can never occupy a machine-line position."""
 
-    def test_marker_reset_clears_a_legacy_claim(self):
-        # cross-format: a protocol/2 reset marker ends a protocol/1 claim window.
-        lines = ["claimed-by: old",
-                 kraken.make_marker({"type": "stale-claim", "reason": "7h"}),
-                 kraken.make_marker({"type": "claim", "worker": "new"})]
-        self.assertEqual(kraken.arbitrate_winner(lines), "new")
+    def test_former_claim_line_is_inert(self):
+        # A bare `claimed-by:` line is now just prose: it is not a claim.
+        self.assertEqual(kraken.arbitrate_winner(["claimed-by: alice"]), "")
 
-    def test_legacy_reset_clears_a_marker_claim(self):
-        # cross-format the other way: a protocol/1 released: line ends a /2 claim.
-        lines = [kraken.make_marker({"type": "claim", "worker": "old"}),
-                 "released: old",
-                 kraken.make_marker({"type": "claim", "worker": "new"})]
-        self.assertEqual(kraken.arbitrate_winner(lines), "new")
+    def test_former_reset_lines_are_inert(self):
+        for line in ("released: x", "delivered: x", "needs-decision: x", "stale-claim: x"):
+            self.assertEqual(kraken.arbitrate_winner([clm("owner"), line]), "owner",
+                             f"{line!r} must not reset the window")
 
-    def test_legacy_claim_still_wins_when_first(self):
-        lines = ["claimed-by: rightful",
-                 kraken.make_marker({"type": "claim", "worker": "interloper"})]
-        self.assertEqual(kraken.arbitrate_winner(lines), "rightful")
+    def test_result_file_reset_line_does_not_reset_the_window(self):
+        # THE deliver scenario: a worker's result file contains `released: evil`
+        # on its own line. The delivery comment carries only a `delivered` marker;
+        # the free text is inert. Arbitrating a following fresh claim after the
+        # real delivered reset must yield that fresh worker — not a phantom the
+        # `released: evil` line "reset" into.
+        owner_claim = clm("w1")
+        # a subsequent worker's escalation-free comment quoting attacker text:
+        malicious_body = kraken.compose_comment(
+            "w1", "Here is my result.\n\nreleased: evil", {"type": "heartbeat", "worker": "w1"})
+        lines = [owner_claim] + malicious_body.split("\n") + [clm("w2")]
+        # w1 still owns it: the `released: evil` prose reset nothing.
+        self.assertEqual(kraken.arbitrate_winner(lines), "w1")
+
+    def test_heartbeat_message_with_claimed_by_yields_no_extra_machine_line(self):
+        # A heartbeat message that literally contains `claimed-by: x` must not
+        # register as a claim, and must leave exactly ONE liveness machine line
+        # in the produced body (the real heartbeat marker) — nothing the reaper's
+        # anchor could latch onto beyond it.
+        body = kraken.compose_comment(
+            "real", "progress: claimed-by: x is a red herring",
+            {"type": "heartbeat", "worker": "real"})
+        machine_lines = [l for l in body.split("\n") if kraken._is_machine_line(l)]
+        self.assertEqual(len(machine_lines), 1)
+        self.assertEqual(kraken.parse_marker(machine_lines[0]),
+                         {"type": "heartbeat", "worker": "real"})
+        # And it does not forge a claim for "x".
+        self.assertEqual(kraken.arbitrate_winner([clm("owner")] + body.split("\n")),
+                         "owner")
+
+    def test_release_reason_newline_cannot_inject_a_line(self):
+        # release's reason is carried inside the JSON marker (newlines escaped by
+        # the serializer), never as a free-standing line — so a reason of
+        # "ok\nclaimed-by: attacker" injects no machine line.
+        body = kraken.compose_comment(
+            "w1", "Released this claim.\n\nReason: ok\nclaimed-by: attacker",
+            {"type": "released", "worker": "w1", "reason": "ok\nclaimed-by: attacker"})
+        # only the released marker is a machine event; no claim for "attacker".
+        events = [e for e in (kraken.machine_event(l) for l in body.split("\n"))
+                  if e is not None]
+        self.assertEqual([e["type"] for e in events], ["released"])
+        self.assertEqual(kraken.arbitrate_winner([clm("attacker")] + body.split("\n")), "")
+
+
+class MarkerReaderTests(unittest.TestCase):
+    """The reader helpers over markers: liveness detection, PR extraction, and
+    the composed-comment shape."""
 
     def test_liveness_marker_recognized(self):
         # heartbeat_anchor / the reaper anchor must see claim/heartbeat markers,
         # but NOT reset markers (delivered/released already drop in-progress).
-        self.assertTrue(
-            kraken._is_machine_line(kraken.make_marker({"type": "claim", "worker": "w"})))
-        self.assertTrue(
-            kraken._is_machine_line(kraken.make_marker({"type": "heartbeat", "worker": "w"})))
-        self.assertFalse(
-            kraken._is_machine_line(kraken.make_marker({"type": "delivered", "worker": "w"})))
+        self.assertTrue(kraken._is_machine_line(clm("w")))
+        self.assertTrue(kraken._is_machine_line(hb("w")))
+        self.assertFalse(kraken._is_machine_line(dlv("w")))
 
     def test_pr_url_parsed_from_delivered_marker(self):
-        recs = [{"body": kraken.make_marker(
-            {"type": "delivered", "worker": "w", "pr": "https://x/pull/42"}),
-            "createdAt": "t"}]
+        recs = [{"body": dlv("w", pr="https://x/pull/42"), "createdAt": "t"}]
         self.assertEqual(kraken.parse_pr_url(recs), "https://x/pull/42")
 
     def test_composed_comment_carries_disclaimer_prose_and_marker(self):
@@ -172,6 +224,17 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("Claimed this task.", body)
         # The marker sits on its own line so a flat per-line scan finds it.
         self.assertEqual(kraken.arbitrate_winner(body.split("\n")), "env-1")
+
+    def test_composed_comment_blank_line_separation(self):
+        # disclaimer, prose, and marker are each separated by a blank line, or
+        # GitHub folds the body into the disclaimer's blockquote.
+        body = kraken.compose_comment(
+            "env-1", "Some prose.", {"type": "claim", "worker": "env-1"})
+        parts = body.split("\n\n")
+        self.assertEqual(len(parts), 3)
+        self.assertTrue(parts[0].startswith("> \U0001f419"))
+        self.assertEqual(parts[1], "Some prose.")
+        self.assertTrue(parts[2].startswith("<!-- kraken "))
 
 
 class ContractCommandTests(unittest.TestCase):
@@ -194,59 +257,39 @@ class ContractCommandTests(unittest.TestCase):
         self.assertEqual(self._run("disclaimer", "--worker", "env-1"),
                          [kraken.disclaimer("env-1")])
 
-    def test_reset_prefixes_echo_the_constant(self):
-        self.assertEqual(self._run("reset-prefixes"),
-                         list(kraken.WINDOW_RESET_PREFIXES))
+    def test_reset_types_echo_the_constant(self):
+        self.assertEqual(self._run("reset-types"), list(kraken.RESET_TYPES))
+
+    def test_liveness_types_echo_the_constant(self):
+        self.assertEqual(self._run("liveness-types"), list(kraken.LIVENESS_TYPES))
 
     def test_marker_types_echo_the_constant(self):
         self.assertEqual(self._run("marker-types"), list(kraken.MARKER_TYPES))
 
-    def test_legacy_line_prefixes_echo_the_constant(self):
-        self.assertEqual(self._run("legacy-line-prefixes"),
-                         list(kraken.LEGACY_LINE_PREFIXES))
-
     def test_marker_types_are_the_liveness_and_reset_vocabulary(self):
-        # protocol/2 vocabulary kraken.py builds/arbitrates on — requeue is
+        # protocol/3 vocabulary kraken.py builds/arbitrates on — requeue is
         # operator-only and deliberately absent.
         self.assertEqual(tuple(kraken.MARKER_TYPES),
                          kraken.LIVENESS_TYPES + kraken.RESET_TYPES)
         self.assertNotIn("requeue", kraken.MARKER_TYPES)
 
-    def test_every_reset_prefix_maps_to_a_reset_type(self):
-        # each legacy reset line drops its colon to the marker type it migrates to.
-        self.assertEqual(
-            tuple(p[:-1] for p in kraken.WINDOW_RESET_PREFIXES), kraken.RESET_TYPES)
 
+class MarkerEdgeCaseTests(unittest.TestCase):
+    """Marker decoding edge cases within a multi-line comment body: only a line
+    carrying a well-formed marker is a machine line; prose that merely mentions a
+    former keyword is inert."""
 
-class MachineLineParsingTests(unittest.TestCase):
-    """Machine-line grammar edge cases: CR stripping, spacing, prefix bodies
-    that only look like machine lines."""
-
-    def test_crlf_is_stripped_from_claim(self):
-        self.assertEqual(kraken.arbitrate_winner(["claimed-by: w1\r"]), "w1")
-
-    def test_crlf_is_stripped_from_reset(self):
-        lines = ["claimed-by: w1", "released: w1\r", "claimed-by: w2"]
-        self.assertEqual(kraken.arbitrate_winner(lines), "w2")
-
-    def test_leading_space_after_colon_trimmed(self):
-        self.assertEqual(kraken.arbitrate_winner(["claimed-by:    spaced"]), "spaced")
-
-    def test_no_space_after_colon(self):
-        self.assertEqual(kraken.arbitrate_winner(["claimed-by:tight"]), "tight")
-
-    def test_prose_mentioning_claimed_by_midline_is_ignored(self):
-        # Only a line that STARTS with the prefix is a machine line.
-        lines = ["I think claimed-by: nobody is wrong", "claimed-by: real"]
+    def test_prose_mentioning_a_former_keyword_is_ignored(self):
+        lines = ["I think claimed-by: nobody is wrong", clm("real")]
         self.assertEqual(kraken.arbitrate_winner(lines), "real")
 
     def test_multiline_comment_bodies_scan_per_line(self):
         # comment_bodies returns bodies split to lines; a disclaimer blockquote
-        # above the machine line must not shadow it.
+        # above the marker must not shadow it.
         lines = [
             "> \U0001f419 **Kraken worker `w1`** — automated comment...",
             "",
-            "claimed-by: w1",
+            clm("w1"),
         ]
         self.assertEqual(kraken.arbitrate_winner(lines), "w1")
 
@@ -280,7 +323,7 @@ class CommentPaginationTests(unittest.TestCase):
         # Simulate the transport returning 150 comment bodies (what --paginate
         # yields once every page is walked). The 130th is the live claim.
         bodies = [f"comment number {i}" for i in range(150)]
-        bodies[129] = "claimed-by: winner-past-page-one"
+        bodies[129] = clm("winner-past-page-one")
 
         def fake_run_gh(args):
             return 0, "\n".join(bodies)
@@ -302,9 +345,9 @@ class CommentPaginationTests(unittest.TestCase):
         # A reset at position 120 must still clear a claim from position 5, even
         # when both are far apart across pages.
         bodies = [f"noise {i}" for i in range(150)]
-        bodies[5] = "claimed-by: dead"
-        bodies[120] = "released: dead"
-        bodies[140] = "claimed-by: heir"
+        bodies[5] = clm("dead")
+        bodies[120] = rls("dead")
+        bodies[140] = clm("heir")
 
         def fake_run_gh(args):
             return 0, "\n".join(bodies)
@@ -330,10 +373,10 @@ class CommentPaginationTests(unittest.TestCase):
 
     def test_comment_records_returns_records_past_one_hundred(self):
         # 150 comment records (compact one-per-line, what gh --jq streams); the
-        # 130th carries the live machine line, invisible under a 100 truncation.
+        # 130th carries the live liveness marker, invisible under a 100 truncation.
         recs = [{"body": f"c {i}", "createdAt": f"2026-07-01T00:{i % 60:02d}:00Z"}
                 for i in range(150)]
-        recs[129] = {"body": "heartbeat: late", "createdAt": "2026-07-09T00:00:00Z"}
+        recs[129] = {"body": hb("late"), "createdAt": "2026-07-09T00:00:00Z"}
         out = "\n".join(kraken.json.dumps(r) for r in recs)
 
         def fake_run_gh(args):
@@ -346,8 +389,11 @@ class CommentPaginationTests(unittest.TestCase):
     def test_comment_records_parses_pretty_printed_stream(self):
         # The conformance stub pretty-prints each object across lines; the
         # object-by-object decoder must handle that as well as compact output.
-        pretty = ('{\n  "body": "claimed-by: w1",\n  "createdAt": "2026-07-01T00:00:00Z"\n}\n'
-                  '{\n  "body": "heartbeat: w1",\n  "createdAt": "2026-07-01T05:00:00Z"\n}\n')
+        recs = [
+            {"body": clm("w1"), "createdAt": "2026-07-01T00:00:00Z"},
+            {"body": hb("w1"), "createdAt": "2026-07-01T05:00:00Z"},
+        ]
+        pretty = "".join(kraken.json.dumps(r, indent=2) + "\n" for r in recs)
 
         def fake_run_gh(args):
             return 0, pretty
@@ -479,24 +525,24 @@ class ClaimNextIterationTests(unittest.TestCase):
 
 class StatusHelperTests(unittest.TestCase):
     """The status console's pure helpers, isolated from any transport: the
-    heartbeat anchor (machine-line-only, newest-wins), PR-URL parsing, worker
+    heartbeat anchor (liveness-marker-only, newest-wins), PR-URL parsing, worker
     resolution, and age formatting."""
 
     def _rec(self, body, created):
         return {"body": body, "createdAt": created}
 
-    def test_anchor_is_newest_machine_line(self):
+    def test_anchor_is_newest_liveness_marker(self):
         recs = [
-            self._rec("claimed-by: w1", "2026-07-01T00:00:00Z"),
-            self._rec("heartbeat: w1", "2026-07-01T05:00:00Z"),
+            self._rec(clm("w1"), "2026-07-01T00:00:00Z"),
+            self._rec(hb("w1"), "2026-07-01T05:00:00Z"),
         ]
         self.assertEqual(kraken.heartbeat_anchor(recs), "2026-07-01T05:00:00Z")
 
     def test_anchor_ignores_operator_comments(self):
         # THE anchoring invariant (mirrors the reaper): a fresh operator comment
-        # must NOT reset the clock — only worker machine lines anchor liveness.
+        # must NOT reset the clock — only worker liveness markers anchor liveness.
         recs = [
-            self._rec("> disclaimer\n\nclaimed-by: w1", "2026-07-01T00:00:00Z"),
+            self._rec("> disclaimer\n\n" + clm("w1"), "2026-07-01T00:00:00Z"),
             self._rec("any update? — the operator", "2026-07-01T09:00:00Z"),
         ]
         self.assertEqual(kraken.heartbeat_anchor(recs), "2026-07-01T00:00:00Z")
@@ -505,21 +551,21 @@ class StatusHelperTests(unittest.TestCase):
         recs = [self._rec("someone mislabeled this", "2026-07-01T00:00:00Z")]
         self.assertIsNone(kraken.heartbeat_anchor(recs))
 
-    def test_anchor_finds_machine_line_inside_multiline_body(self):
-        recs = [self._rec("> \U0001f419 worker note\n\nheartbeat: w1\n\nstill going",
+    def test_anchor_finds_marker_inside_multiline_body(self):
+        recs = [self._rec("> \U0001f419 worker note\n\n" + hb("w1") + "\n\nstill going",
                           "2026-07-01T02:00:00Z")]
         self.assertEqual(kraken.heartbeat_anchor(recs), "2026-07-01T02:00:00Z")
 
-    def test_parse_pr_url_from_pr_machine_line(self):
-        recs = [self._rec("delivered: w1\npr: https://github.com/o/r/pull/42\n\nbody",
+    def test_parse_pr_url_from_delivered_marker(self):
+        recs = [self._rec(dlv("w1", pr="https://github.com/o/r/pull/42") + "\n\nbody",
                           "t")]
         self.assertEqual(kraken.parse_pr_url(recs),
                          "https://github.com/o/r/pull/42")
 
     def test_parse_pr_url_newest_wins(self):
         recs = [
-            self._rec("pr: https://github.com/o/r/pull/1", "t1"),
-            self._rec("delivered: w2\npr: https://github.com/o/r/pull/9", "t2"),
+            self._rec(dlv("w1", pr="https://github.com/o/r/pull/1"), "t1"),
+            self._rec(dlv("w2", pr="https://github.com/o/r/pull/9"), "t2"),
         ]
         self.assertEqual(kraken.parse_pr_url(recs),
                          "https://github.com/o/r/pull/9")
@@ -530,14 +576,14 @@ class StatusHelperTests(unittest.TestCase):
                          "https://github.com/o/r/pull/7")
 
     def test_parse_pr_url_none_when_absent(self):
-        recs = [self._rec("delivered: w1\n\njust prose", "t")]
+        recs = [self._rec(dlv("w1") + "\n\njust prose", "t")]
         self.assertIsNone(kraken.parse_pr_url(recs))
 
     def test_worker_resolves_via_arbitration(self):
         recs = [
-            self._rec("claimed-by: dead", "t1"),
-            self._rec("stale-claim: 7h", "t2"),
-            self._rec("claimed-by: heir", "t3"),
+            self._rec(clm("dead"), "t1"),
+            self._rec(stale("7h"), "t2"),
+            self._rec(clm("heir"), "t3"),
         ]
         self.assertEqual(
             kraken.arbitrate_winner(kraken.flat_comment_lines(recs)), "heir")
@@ -593,8 +639,8 @@ class StatusComputeTests(unittest.TestCase):
             self._node(12, "queued", ["kraken-task", "project:app"]),
         ]
         comments = {
-            88: [{"body": "delivered: w\npr: https://x/pull/1", "createdAt": "t"}],
-            99: [{"body": "claimed-by: w1", "createdAt": "2026-07-01T09:00:00Z"}],
+            88: [{"body": dlv("w", pr="https://x/pull/1"), "createdAt": "t"}],
+            99: [{"body": clm("w1"), "createdAt": "2026-07-01T09:00:00Z"}],
         }
         report = kraken.compute_status(
             "o/tasks", "", nodes, self.NOW,
@@ -612,8 +658,8 @@ class StatusComputeTests(unittest.TestCase):
             self._node(2, "b", ["kraken-task", "project:web", "in-progress"]),
         ]
         comments = {
-            1: [{"body": "claimed-by: w", "createdAt": "2026-07-01T09:00:00Z"}],
-            2: [{"body": "claimed-by: w", "createdAt": "2026-07-01T09:00:00Z"}],
+            1: [{"body": clm("w"), "createdAt": "2026-07-01T09:00:00Z"}],
+            2: [{"body": clm("w"), "createdAt": "2026-07-01T09:00:00Z"}],
         }
         report = kraken.compute_status(
             "o/tasks", "web", nodes, self.NOW, **self._readers(comments=comments))
@@ -628,8 +674,8 @@ class StatusComputeTests(unittest.TestCase):
                        created="2026-07-01T01:00:00Z"),
         ]
         comments = {
-            88: [{"body": "pr: https://x/pull/5", "createdAt": "t"}],
-            91: [{"body": "pr: https://x/pull/6", "createdAt": "t"}],
+            88: [{"body": dlv("w", pr="https://x/pull/5"), "createdAt": "t"}],
+            91: [{"body": dlv("w", pr="https://x/pull/6"), "createdAt": "t"}],
         }
         merged = {"https://x/pull/5": True, "https://x/pull/6": False}
         report = kraken.compute_status(
@@ -640,7 +686,7 @@ class StatusComputeTests(unittest.TestCase):
         self.assertTrue(flags[88])
         self.assertFalse(flags[91])
 
-    def test_no_machine_line_yields_unknown_age(self):
+    def test_no_liveness_marker_yields_unknown_age(self):
         nodes = [self._node(99, "silent", ["kraken-task", "project:app", "in-progress"])]
         comments = {99: [{"body": "operator note", "createdAt": "2026-07-01T09:00:00Z"}]}
         report = kraken.compute_status(
@@ -664,7 +710,7 @@ class StatusComputeTests(unittest.TestCase):
 
     def test_pr_read_failure_propagates_none(self):
         nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]
-        comments = {88: [{"body": "pr: https://x/pull/5", "createdAt": "t"}]}
+        comments = {88: [{"body": dlv("w", pr="https://x/pull/5"), "createdAt": "t"}]}
         report = kraken.compute_status(
             "o/tasks", "", nodes, self.NOW,
             comment_reader=lambda r, i: comments.get(i, []),

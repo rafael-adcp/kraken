@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# kraken.py deliver: result posted with delivered: + pr: lines, labels swapped — and
+# kraken.py deliver: result posted with a delivered marker, labels swapped — and
 # after a review bounce (human removes awaiting-merge), ANY worker wins the
-# fresh window. That last part is the review-bounce gap: without delivered: as
-# a window reset, the original claimed-by: would win every future arbitration
+# fresh window. That last part is the review-bounce gap: without delivered as
+# a window reset, the original claim marker would win every future arbitration
 # and the task could never be re-claimed by anyone else.
 . "$ROOT/tests/lib.sh"
 
 mk_issue 7 "shipped task" kraken-task "project:app" in-progress
-mk_comment 7 "claimed-by: w1"
+mk_comment 7 '<!-- kraken {"type":"claim","worker":"w1"} -->'
 
 r="$STATE/result.md"
 printf 'Added cursor pagination. Acceptance run: 12/12 green.\n' > "$r"

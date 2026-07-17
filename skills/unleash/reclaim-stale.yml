@@ -8,8 +8,7 @@
 # investigate.
 #
 # Staleness is anchored to the worker's last liveness marker (the newest
-# `claim`/`heartbeat` marker, or a legacy `claimed-by:`/`heartbeat:` line),
-# NOT the issue's updatedAt. An operator
+# `claim`/`heartbeat` marker), NOT the issue's updatedAt. An operator
 # comment on a dead worker's issue must shorten time-to-triage, not extend it —
 # reading updatedAt would let any human comment keep a dead claim alive for
 # another MAX_HOURS. An in-progress issue with no worker liveness marker at all is
@@ -39,17 +38,15 @@ jobs:
         run: |
           now=$(date -u +%s)
           # Per issue, emit "<number> <anchor>" where <anchor> is the createdAt of
-          # the newest comment carrying a worker liveness payload — a protocol/1
-          # ^claimed-by:/^heartbeat: line OR a protocol/2 hidden marker
-          # (<!-- kraken {"type":"claim"|"heartbeat", ...} -->) — or the literal
-          # "none" when the worker never spoke. Both formats are read so migrated
-          # and pre-existing threads anchor identically. Only claim/heartbeat mark
-          # liveness: delivered/released already drop in-progress, so they never
-          # appear on a still-held claim. Operator comments are ignored — they
-          # must not reset the clock.
+          # the newest comment carrying a worker liveness payload — a protocol/3
+          # hidden marker (<!-- kraken {"type":"claim"|"heartbeat", ...} -->) —
+          # or the literal "none" when the worker never spoke. Only claim/heartbeat
+          # mark liveness: delivered/released already drop in-progress, so they
+          # never appear on a still-held claim. Operator comments are ignored —
+          # they must not reset the clock.
           gh issue list -R "$GITHUB_REPOSITORY" --label in-progress --state open \
             --json number,comments \
-            --jq '.[] | "\(.number) \([.comments[] | select(.body | test("(?m)^(claimed-by|heartbeat): ") or test("<!-- kraken \\{\"type\":\"(claim|heartbeat)\"")) | .createdAt] | max // "none")"' |
+            --jq '.[] | "\(.number) \([.comments[] | select(.body | test("<!-- kraken \\{\"type\":\"(claim|heartbeat)\"")) | .createdAt] | max // "none")"' |
           while read -r num anchor; do
             if [ "$anchor" = "none" ]; then
               age="" # no worker liveness marker at all: infinitely stale
