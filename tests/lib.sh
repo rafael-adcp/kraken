@@ -66,6 +66,22 @@ mk_label() {
   printf '%s\n' "$1" >> "$STATE/labels"
 }
 
+# mk_repo SLUG — seed an already-existing coordination repo so init's verify
+# step finds it (and does not create it).
+mk_repo() {
+  mkdir -p "$STATE/repo"
+  printf '%s\n' "$1" > "$STATE/repo/nameWithOwner"
+}
+
+# mk_content PATH FILE — seed an existing file at PATH in the coordination repo
+# (the contents API the init subcommand reads), with FILE's bytes — so init's
+# compare step sees it as present (byte-identical → unchanged; differing →
+# customized).
+mk_content() {
+  mkdir -p "$STATE/contents/$(dirname "$1")"
+  cp "$2" "$STATE/contents/$1"
+}
+
 fail() { echo "FAIL: $*"; exit 1; }
 
 assert_eq() { # actual expected context

@@ -250,10 +250,20 @@ issue's notes say otherwise:
 
   ```
   Co-Authored-By: Claude <your model name> <noreply@anthropic.com>
-  Kraken-Task: <coordination-repo>#<issue> (worker: <worker-name>, kraken@<plugin version if known>)
+  Kraken-Task: <coordination-repo>#<issue> (worker: <worker-name>, kraken@<version>)
   ```
-  `<coordination-repo>` is the slug you were invoked with (e.g. `OWNER/work-tasks`) —
-  substitute it, don't paste a literal `tasks`.
+
+  The `Co-Authored-By` line is yours (your own model identity). Do **not**
+  hand-assemble the `Kraken-Task:` line — its format and the `kraken@<version>`
+  stamp are single-sourced in `kraken.py`; the worker can't reliably know the
+  installed plugin version, so ask the script for the exact line:
+
+  ```
+  python3 "<this skill's folder>/kraken.py" contract task-trailer --repo OWNER/tasks --issue <issue> --worker <worker-name>
+  ```
+
+  where `--repo OWNER/tasks` is the coordination-repo slug you were invoked with
+  (e.g. `OWNER/work-tasks`) — substitute it, don't paste a literal `tasks`.
 - **Never push to the default branch. Never merge.** Merging is always the human's.
 - Put **`Closes <coordination-repo>#<issue>`** in the PR body when the work repo is on
   GitHub — merging then closes the task automatically, at the moment the work truly

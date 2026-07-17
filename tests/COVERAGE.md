@@ -29,7 +29,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| L43 | Coordination repo **MUST** be private and **MUST NOT** hold work code | 📋 operational | Enforced at queue setup (`skills/init`); not a worker transition. |
+| L43 | Coordination repo **MUST** be private and **MUST NOT** hold work code | 📋 operational + ✅ pinned | `kraken.py init` creates the repo **private** (never public); `tests/t/26` asserts the `repo create … --private` bootstrap and the private-only contract. |
 | L49 | Assignees **MUST NOT** be used to arbitrate anything | 🏗 structural | Arbitration (`kraken.py` `arbitrate_winner`) reads only claim markers in the claim window; assignees are never fetched or consulted. Pinned indirectly by `tests/t/04`, `tests/t/05`, `tests/unit` (arbitration ignores everything but claim markers/lines). |
 
 ## §2 Task shape
@@ -91,7 +91,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
 | §8 delivery | Post `delivered:` + `pr:`, then swap `in-progress`→`awaiting-merge`; comment first | ✅ pinned | `tests/t/10`; `tests/t/11` (gh failure ordering); review-bounce window reset: `tests/t/10` and `tests/unit` `test_delivered_is_a_review_bounce_reset`. |
-| L277 | Every delivered commit **MUST** carry the `Co-Authored-By` and `Kraken-Task:` trailers | 🕳 gap | No test verifies delivered commit trailers (the conformance stub has no git). Follow-up: rafael-adcp/personal-tasks#36 (gap **G2** below). |
+| L277 | Every delivered commit **MUST** carry the `Co-Authored-By` and `Kraken-Task:` trailers | 🏗 structural + 🕳 gap | The `Kraken-Task:` trailer's format and its `kraken@<version>` stamp are single-sourced in `kraken.py` (`contract task-trailer`, `task_trailer`/`plugin_version`) and unit-pinned (`tests/unit` `ContractCommandTests`, `PluginVersionTests`). What remains uncovered: that a worker actually applies both trailers to real git commits (the conformance stub has no git). Follow-up: rafael-adcp/personal-tasks#36 (gap **G2** below). |
 | L284 | The PR body **SHOULD** carry `Closes …` when the work repo is on GitHub | 🧠 agent | PR authorship is agent behavior — `tests/agent/`. |
 | L294 | Work **MUST NOT** be silently lost (fall back to the diff in a comment) | 🧠 agent | Fallback behavior is judgment — `tests/agent/`. |
 
@@ -131,7 +131,9 @@ and the follow-up number recorded here:
   an open claim. Needs a claim-guard test extending the `tests/t/15` state-file
   fixtures. Mind the §5 network-failure caveat ("or while a claim of its own is
   in an unknown state after a network failure — re-check first").
-- **G2 — §8 L229, commit attribution trailers** ([personal-tasks#36](https://github.com/rafael-adcp/personal-tasks/issues/36)). No test asserts that delivered
-  commits carry the `Co-Authored-By` and `Kraken-Task:` trailers. Needs a
-  git-integration harness (a throwaway work repo) the conformance stub does not
-  currently model.
+- **G2 — §8 L229, commit attribution trailers** ([personal-tasks#36](https://github.com/rafael-adcp/personal-tasks/issues/36)). The `Kraken-Task:`
+  trailer format and its `kraken@<version>` stamp are now single-sourced in
+  `kraken.py` (`contract task-trailer`) and unit-tested, so the format itself no
+  longer drifts. What is still unpinned: that delivered commits actually carry
+  the `Co-Authored-By` and `Kraken-Task:` trailers — needs a git-integration
+  harness (a throwaway work repo) the conformance stub does not currently model.

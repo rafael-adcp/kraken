@@ -71,11 +71,13 @@ unlock() { rmdir "$STATE/.lock"; }
 # repo (the conformance paths ignore it) so a PR is attributable to a repo.
 sub="" issue="" jsonf="" jqexpr="" add_label="" remove_label="" body="" endpoint="" limit=""
 repo="" pr_sub="" title="" head="" base="" draft=0 gql_query="" label_sub=""
+repo_sub="" method="" put_content="" put_message="" color="" desc=""
 label_filters=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -R)             repo="$2"; shift 2 ;;
     issue)          sub="$2"; shift 2 ;;
+    repo)           sub="repo"; repo_sub="$2"; shift 2 ;;
     pr)             sub="pr"; pr_sub="$2"; shift 2 ;;
     label)          sub="label"; label_sub="$2"; shift 2 ;;
     api)            sub="api"; endpoint="$2"; shift 2 ;;
@@ -88,11 +90,19 @@ while [ $# -gt 0 ]; do
     --head)         head="$2"; shift 2 ;;
     --base)         base="$2"; shift 2 ;;
     --draft | -d)   draft=1; shift ;;
+    -X | --method)  method="$2"; shift 2 ;;
+    --color)        color="$2"; shift 2 ;;
+    --description)  desc="$2"; shift 2 ;;
+    --force)        shift ;;
     --body)         body="$2"; shift 2 ;;
     --body-file)    body="$(cat "$2")"; shift 2 ;;
     --limit)        limit="$2"; shift 2 ;;
     --state)        shift 2 ;;
-    -f | -F)        case "$2" in query=*) gql_query="${2#query=}" ;; esac; shift 2 ;;
+    -f | -F)        case "$2" in
+                      query=*)   gql_query="${2#query=}" ;;
+                      content=*) put_content="${2#content=}" ;;
+                      message=*) put_message="${2#message=}" ;;
+                    esac; shift 2 ;;
     -*)             shift ;;
     *)              issue="$1"; shift ;;
   esac
@@ -382,6 +392,26 @@ case "$sub" in
       graphql)
         emit "$(graphql_dispatch "$gql_query")"
         ;;
+      */contents/*)
+        # The init contents API: GET returns {content:<base64>} of the stored
+        # file (used by kraken.py's `--jq .content`), a 404 (exit 1) when absent;
+        # PUT (-X PUT -f content=<base64>) creates the file. Files live under
+        # $STATE/contents/<path>, not namespaced by repo (the conformance paths
+        # use a single repo). This is what lets init be tested for create /
+        # skip-unchanged / flag-customized without a real GitHub.
+        cpath="${endpoint#*/contents/}"
+        cfile="$STATE/contents/$cpath"
+        if [ "$method" = "PUT" ]; then
+          lock
+          mkdir -p "$(dirname "$cfile")"
+          printf '%s' "$put_content" | tr -d '\n' | base64 -d > "$cfile"
+          unlock
+          jq -n --arg p "$cpath" '{content:{path:$p}}'
+        else
+          [ -f "$cfile" ] || { echo "gh-stub: 404 contents/$cpath" >&2; exit 1; }
+          emit "$(jq -n --arg c "$(base64 < "$cfile" | tr -d '\n')" '{content:$c}')"
+        fi
+        ;;
       *)
         echo "gh-stub: unsupported api endpoint '$endpoint'" >&2; exit 1
         ;;
@@ -438,8 +468,47 @@ case "$sub" in
         emit "$(cat "$STATE/.labels.$$")"
         rm -f "$STATE/.labels.$$"
         ;;
+      create)
+        # `label create NAME --force --color C --description D`: init's canonical
+        # label upsert. --force makes it idempotent, so this always succeeds and
+        # re-canonicalizes. Register the name (dedup) and record color/description
+        # under labels-meta/<name> so a test can assert the canonical values.
+        lock
+        mkdir -p "$STATE/labels-meta"
+        { [ -f "$STATE/labels" ] && grep -qxF -- "$issue" "$STATE/labels"; } \
+          || printf '%s\n' "$issue" >> "$STATE/labels"
+        printf 'color=%s\ndescription=%s\n' "$color" "$desc" \
+          > "$STATE/labels-meta/$issue"
+        unlock
+        ;;
       *)
         echo "gh-stub: unsupported invocation: label $label_sub" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
+  repo)
+    # init's verify-or-create step. `repo view SLUG --json nameWithOwner` succeeds
+    # (prints the slug) iff the repo was seeded (mk_repo) or already created here;
+    # a missing repo exits 1 so kraken.py's gh_repo_exists reads False. `repo
+    # create SLUG --private` records the repo so a re-run's view then finds it.
+    case "$repo_sub" in
+      view)
+        if [ -f "$STATE/repo/nameWithOwner" ]; then
+          emit "$(jq -n --arg n "$(cat "$STATE/repo/nameWithOwner")" '{nameWithOwner:$n}')"
+        else
+          echo "gh-stub: repo not found: $issue" >&2; exit 1
+        fi
+        ;;
+      create)
+        lock
+        mkdir -p "$STATE/repo"
+        printf '%s\n' "$issue" > "$STATE/repo/nameWithOwner"
+        unlock
+        ;;
+      *)
+        echo "gh-stub: unsupported invocation: repo $repo_sub" >&2
         exit 1
         ;;
     esac
