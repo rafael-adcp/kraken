@@ -58,12 +58,89 @@ EXIT_USAGE = 2
 # delivered — never startable, never re-claimable without a window reset.
 HELD_LABELS = ("in-progress", "needs-decision", "awaiting-merge")
 
-# Claim-window reset prefixes: a claimed-by: line older than the most recent of
-# these no longer counts, so a dead worker's claim (stale-claim:), an honest
-# hand-back (released:), an escalation (needs-decision:), or a delivered task
-# bounced back by review (delivered:) can all be re-claimed. Every keyword here
-# must appear as a machine line in PROTOCOL.md — the lint enforces that.
+# --- protocol version --------------------------------------------------------
+# The wire contract this program speaks (PROTOCOL.md). protocol/2 carries every
+# machine payload in a structured hidden marker (see MARKER_* below); it still
+# READS protocol/1's visible line grammar so pre-existing threads keep
+# arbitrating, but every comment it WRITES is protocol/2 only.
+PROTOCOL_VERSION = 2
+
+# --- structured hidden markers (kraken-protocol/2) ---------------------------
+# A state-changing comment carries its machine payload in ONE hidden HTML-comment
+# marker — invisible in the rendered GitHub UI, so the visible prose is pure
+# human courtesy — of the form:
+#     <!-- kraken {"type":"claim","worker":"env-1"} -->
+# The payload is compact one-line JSON with a required string "type". Encoding it
+# with json.dumps (not string interpolation) is the whole point of protocol/2: it
+# retires the CRLF/quoting/prefix-scan hazard class the visible line grammar
+# inherited from the shell era. ensure_ascii keeps the marker pure ASCII (no
+# astral-plane bytes) so the reaper's grep and the requeue filter never hit a
+# locale-dependent match the way the 🐙 disclaimer does.
+MARKER_PREFIX = "<!-- kraken "
+MARKER_SUFFIX = " -->"
+MARKER_RE = re.compile(r"<!--\s*kraken\s+(\{.*?\})\s*-->")
+
+# The claim-window reset transition types: the most recent of these ends the
+# current claim window, so a dead worker's claim (stale-claim), an honest
+# hand-back (released), an escalation (needs-decision), or a delivered task
+# bounced back by review (delivered) can all be re-claimed. Marker "type" values
+# and the legacy prefixes below MUST agree, and each MUST appear in PROTOCOL.md —
+# the lint enforces that.
+RESET_TYPES = ("released", "stale-claim", "needs-decision", "delivered")
+
+# The two liveness types: a comment carrying either proves the worker is alive,
+# anchoring the reaper's staleness clock (PROTOCOL.md §6). Nothing else does.
+LIVENESS_TYPES = ("claim", "heartbeat")
+
+# Legacy (protocol/1) claim-window reset prefixes, still read so pre-existing
+# threads arbitrate correctly during migration. Each maps to the RESET_TYPES
+# value that drops its trailing colon (released: -> released, etc.). Every
+# keyword here must appear in PROTOCOL.md's protocol/1 migration section — the
+# lint enforces that.
 WINDOW_RESET_PREFIXES = ("released:", "stale-claim:", "needs-decision:", "delivered:")
+
+
+def make_marker(payload):
+    """Render a machine payload dict as the protocol/2 hidden marker. Compact,
+    ASCII-only JSON so the marker never carries a byte the reaper/requeue greps
+    could miss under a C locale."""
+    return MARKER_PREFIX + json.dumps(payload, separators=(",", ":")) + MARKER_SUFFIX
+
+
+def parse_marker(line):
+    """Decode the kraken marker payload on a line, or None if the line carries no
+    well-formed marker. A marker with a non-dict body or no string "type" is
+    treated as absent — a malformed marker never silently arbitrates."""
+    m = MARKER_RE.search(line)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(1))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if isinstance(obj, dict) and isinstance(obj.get("type"), str):
+        return obj
+    return None
+
+
+def machine_event(line, *, reset_prefixes=WINDOW_RESET_PREFIXES):
+    """Normalize one comment line to a {"type", ...} machine event, reading BOTH
+    wire formats: a protocol/2 marker takes precedence, else the protocol/1
+    visible line grammar. Returns None for a line that is neither. This single
+    normalizer is what lets every consumer read the two formats identically."""
+    line = line.rstrip("\r")
+    marker = parse_marker(line)
+    if marker is not None:
+        return marker
+    # protocol/1 fallback: the visible line grammar.
+    if line.startswith("claimed-by:"):
+        return {"type": "claim", "worker": line[len("claimed-by:"):].lstrip(" ")}
+    for prefix in reset_prefixes:
+        if line.startswith(prefix):
+            return {"type": prefix[:-1]}
+    if line.startswith("heartbeat:"):
+        return {"type": "heartbeat", "worker": line[len("heartbeat:"):].lstrip(" ")}
+    return None
 
 # The attribution disclaimer. Every worker authenticates as the operator, so a
 # worker comment reads exactly like a human's without this blockquote. It heads
@@ -75,6 +152,19 @@ DISCLAIMER = "> 🐙 **Kraken worker `{worker}`** — automated comment from a C
 
 def disclaimer(worker):
     return DISCLAIMER.format(worker=worker)
+
+
+def compose_comment(worker, prose, payload):
+    """Assemble a protocol/2 state-changing comment: the attribution disclaimer,
+    the human-facing prose (courtesy only — never machine-parsed), then the one
+    hidden marker carrying the machine payload. Blank lines separate the three so
+    GitHub does not fold the body into the disclaimer's blockquote."""
+    parts = [disclaimer(worker)]
+    prose = (prose or "").strip("\n")
+    if prose:
+        parts.append(prose)
+    parts.append(make_marker(payload))
+    return "\n\n".join(parts)
 
 
 # --- transport ---------------------------------------------------------------
@@ -132,8 +222,8 @@ def comment_bodies(repo, issue):
     if rc != 0:
         return None
     # `--jq .[].body` prints one body per line (multi-line bodies span several
-    # lines); machine lines are one-per-line, so a flat line scan downstream is
-    # exactly what arbitration needs.
+    # lines); markers (and legacy machine lines) sit on their own line, so a
+    # flat line scan downstream is exactly what arbitration needs.
     return out.split("\n")
 
 
@@ -178,23 +268,27 @@ def comment_records(repo, issue):
     return records
 
 
-# --- machine-line grammar ----------------------------------------------------
+# --- machine marker + legacy line grammar ------------------------------------
 
 def arbitrate_winner(lines, *, reset_prefixes=WINDOW_RESET_PREFIXES):
     """The claim-window tiebreaker, isolated for testing.
 
-    Scan machine lines in server order: any reset line clears the running
-    winner (older claimed-by: lines no longer count), and the FIRST claimed-by:
-    of the current window wins. Returns the winning worker name, or "" if the
-    window holds no live claim."""
+    Scan each comment line in server order, reading BOTH wire formats through
+    machine_event (a protocol/2 marker or the protocol/1 line grammar): any
+    reset event clears the running winner (older claims no longer count), and the
+    FIRST claim of the current window wins. Returns the winning worker name, or
+    "" if the window holds no live claim."""
     winner = ""
     for raw in lines:
-        line = raw.rstrip("\r")
-        if any(line.startswith(p) for p in reset_prefixes):
+        event = machine_event(raw, reset_prefixes=reset_prefixes)
+        if event is None:
+            continue
+        etype = event.get("type")
+        if etype in RESET_TYPES:
             winner = ""
-        elif line.startswith("claimed-by:"):
+        elif etype == "claim":
             if not winner:
-                winner = line[len("claimed-by:"):].lstrip(" ")
+                winner = event.get("worker", "")
     return winner
 
 
@@ -406,17 +500,20 @@ def _claim_once(repo, issue, worker):
             print(f"claim: held issue={issue} label={held}")
             return EXIT_NOT_CLEAR
 
-    # 2. Label, then 3. the claim comment (disclaimer, blank line, machine line).
+    # 2. Label, then 3. the claim comment (disclaimer, courtesy prose, marker).
     if not swap_labels(repo, issue, add="in-progress"):
         print(f"claim: gh-failure issue={issue} stage=label")
         return EXIT_TRANSPORT
-    body = f"{disclaimer(worker)}\n\nclaimed-by: {worker}"
+    body = compose_comment(
+        worker, "Claimed this task — starting work now.",
+        {"type": "claim", "worker": worker},
+    )
     if not post_comment(repo, issue, body):
         print(f"claim: gh-failure issue={issue} stage=comment")
         return EXIT_TRANSPORT
 
     # 4. Arbitrate — re-read the (fully paginated) comment history; the first
-    #    claimed-by: of the current claim window wins.
+    #    claim of the current claim window wins.
     bodies = comment_bodies(repo, issue)
     if bodies is None:
         print(f"claim: gh-failure issue={issue} stage=arbitrate")
@@ -480,7 +577,7 @@ def cmd_claim_next(args):
 
 def cmd_heartbeat(args):
     repo, issue, worker, message = args.repo, args.issue, args.worker, args.message
-    body = f"{disclaimer(worker)}\n\nheartbeat: {worker}\n\n{message}"
+    body = compose_comment(worker, message, {"type": "heartbeat", "worker": worker})
     if not post_comment(repo, issue, body):
         print(f"heartbeat: gh-failure issue={issue}")
         return EXIT_TRANSPORT
@@ -503,7 +600,10 @@ def cmd_escalate(args):
         print(f"escalate: no such file {question_file}", file=sys.stderr)
         return EXIT_USAGE
 
-    body = f"{disclaimer(worker)}\n\nneeds-decision: {worker}\n\n{read_body_file(question_file)}"
+    body = compose_comment(
+        worker, read_body_file(question_file),
+        {"type": "needs-decision", "worker": worker},
+    )
     if not post_comment(repo, issue, body):
         print(f"escalate: gh-failure issue={issue} stage=comment")
         return EXIT_TRANSPORT
@@ -525,10 +625,12 @@ def cmd_deliver(args):
         print(f"deliver: no such file {result_file}", file=sys.stderr)
         return EXIT_USAGE
 
-    machine = f"delivered: {worker}"
+    payload = {"type": "delivered", "worker": worker}
+    prose = read_body_file(result_file)
     if pr_url:
-        machine += f"\npr: {pr_url}"
-    body = f"{disclaimer(worker)}\n\n{machine}\n\n{read_body_file(result_file)}"
+        payload["pr"] = pr_url
+        prose = f"{prose}\n\nPR: {pr_url}"
+    body = compose_comment(worker, prose, payload)
     if not post_comment(repo, issue, body):
         print(f"deliver: gh-failure issue={issue} stage=comment")
         return EXIT_TRANSPORT
@@ -546,9 +648,12 @@ def cmd_deliver(args):
 
 def cmd_release(args):
     repo, issue, worker, reason = args.repo, args.issue, args.worker, args.reason
-    body = f"{disclaimer(worker)}\n\nreleased: {worker}"
+    payload = {"type": "released", "worker": worker}
+    prose = "Released this claim — the task rejoins the queue."
     if reason:
-        body += f"\nreason: {reason}"
+        payload["reason"] = reason
+        prose = f"{prose}\n\nReason: {reason}"
+    body = compose_comment(worker, prose, payload)
     if not post_comment(repo, issue, body):
         print(f"release: gh-failure issue={issue} stage=comment")
         return EXIT_TRANSPORT
@@ -648,8 +753,12 @@ def parse_iso(ts):
 
 
 def _is_machine_line(line):
-    line = line.rstrip("\r")
-    return line.startswith("claimed-by:") or line.startswith("heartbeat:")
+    """Whether a line carries a worker-liveness machine payload — a protocol/2
+    claim/heartbeat marker or the protocol/1 ^claimed-by:/^heartbeat: line. Reset
+    lines (delivered:/released:/…) are not liveness: they already drop
+    in-progress, so they never anchor a still-held claim (PROTOCOL.md §6)."""
+    event = machine_event(line)
+    return event is not None and event.get("type") in LIVENESS_TYPES
 
 
 def heartbeat_anchor(records):
@@ -681,22 +790,27 @@ def flat_comment_lines(records):
 
 
 def parse_pr_url(records):
-    """The delivery PR URL for an awaiting-merge task: the newest `pr:` machine
-    line's URL (what `deliver` records), falling back to the newest GitHub
-    pull-request URL anywhere in the thread. None when no PR was recorded."""
-    from_line = None
+    """The delivery PR URL for an awaiting-merge task: the newest structured
+    source wins — a protocol/2 delivered marker's "pr" field or the protocol/1
+    `pr:` line — falling back to the newest GitHub pull-request URL
+    anywhere in the thread. None when no PR was recorded."""
+    from_marker = None
     fallback = None
     for rec in records:  # server order — keep overwriting so the newest wins
         for raw in (rec.get("body") or "").split("\n"):
-            line = raw.rstrip("\r").strip()
-            if line.startswith("pr:"):
-                url = line[len("pr:"):].strip()
-                if url:
-                    from_line = url
+            marker = parse_marker(raw)
+            if marker is not None and marker.get("pr"):
+                from_marker = marker["pr"]
+            else:
+                line = raw.rstrip("\r").strip()
+                if line.startswith("pr:"):
+                    url = line[len("pr:"):].strip()
+                    if url:
+                        from_marker = url
             m = _PR_URL_RE.search(raw)
             if m:
                 fallback = m.group(0)
-    return from_line or fallback
+    return from_marker or fallback
 
 
 def pr_is_merged(pr_url):
@@ -726,7 +840,7 @@ def list_projects(repo):
 
 def format_age(seconds):
     """A compact human age: '42s', '12m', '3h', '4d'. 'unknown' when there is no
-    anchor (a worker that never left a machine line)."""
+    anchor (a worker that never left a liveness marker)."""
     if seconds is None:
         return "unknown"
     seconds = int(seconds)

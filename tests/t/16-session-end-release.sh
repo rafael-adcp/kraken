@@ -25,8 +25,8 @@ assert_rc $? 0 "hook must never block session exit (exit 0)"
 has_label 7 in-progress && fail "hook did not drop in-progress"
 [ -f "$KRAKEN_STATE_DIR/claim-w1.json" ] && fail "hook did not delete the state file"
 c="$(last_comment 7)"
-printf '%s' "$c" | grep -q '^released: w1$' || fail "hook did not post released: via kraken.py release"
-printf '%s' "$c" | grep -q '^reason: session ended$' || fail "hook did not post the session-ended reason"
+printf '%s' "$c" | grep -qF '<!-- kraken {"type":"released","worker":"w1","reason":"session ended"} -->' \
+  || fail "hook did not post the released marker via kraken.py release"
 [ "$(comment_count 7)" -gt "$before" ] || fail "hook posted no release comment"
 
 # The released task is claimable again — end to end, proving the window closed.

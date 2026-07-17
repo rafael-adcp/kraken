@@ -16,7 +16,7 @@ assert_eq "$out" "escalate: escalated issue=7 worker=w1" "machine line"
 has_label 7 in-progress && fail "in-progress still present after escalate"
 has_label 7 needs-decision || fail "needs-decision missing after escalate"
 c="$(last_comment 7)"
-printf '%s' "$c" | grep -q '^needs-decision: w1$' || fail "needs-decision machine line missing"
+assert_marker 7 '{"type":"needs-decision","worker":"w1"}'
 printf '%s' "$c" | grep -q '^Should pagination be cursor- or offset-based?$' || fail "question body missing"
 printf '%s' "$c" | grep -q '^- A: cursor (recommended)$' || fail "options missing"
 

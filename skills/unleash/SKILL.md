@@ -11,9 +11,9 @@ can live anywhere (GitHub, GitLab, private servers) — each issue says which pr
 belongs to. GitHub's UI/CLI does the tracking: status, history, notifications, and the
 dependency graph come for free.
 
-The coordination contract itself — task shape, label state machine, machine lines,
+The coordination contract itself — task shape, label state machine, the machine marker,
 claim algorithm, authorization boundaries — is normatively specified in
-[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/1`). This file is how a Claude
+[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/2`). This file is how a Claude
 Code worker executes that contract (subagent-per-task, Monitor watcher, the bundled
 scripts); if the two ever disagree, the spec wins.
 
@@ -100,11 +100,13 @@ time:
   means gh/network failure with the write possibly half-landed: re-check the
   issue's real state before retrying, and never move on while a claim is
   ambiguous.
-- It composes the attribution disclaimer and the machine-readable lines
-  (`claimed-by:`, `heartbeat:`, `needs-decision:`, `delivered:`, `released:`)
-  itself — never hand-write those. The escalation question and the result
-  comment stay yours to write: put the body in a file and hand the file to the
-  subcommand.
+- It composes the attribution disclaimer and the hidden machine marker
+  (`<!-- kraken {"type":...} -->`, carrying protocol/2 `claim`, `heartbeat`,
+  `needs-decision`, `delivered`, `released` payloads — the successors to
+  protocol/1's `claimed-by:` / `heartbeat:` / `needs-decision:` / `delivered:` /
+  `released:` lines) itself — never hand-write those. The escalation question
+  and the result comment stay yours to write: put the body in a file and hand
+  the file to the subcommand.
 
 ## Protocol
 
@@ -113,7 +115,7 @@ time:
    **without `in-progress`, `needs-decision`, or `awaiting-merge`** and **not
    dependency-blocked** — blocked-by checked server-side, honoring a
    `depends-on: #N` body line as a fallback, see `PROTOCOL.md` §3), then walks
-   them oldest-first — guard, label, `claimed-by:` comment, claim-window
+   them oldest-first — guard, label, `claim` marker comment, claim-window
    arbitration — stopping at the first task it wins:
 
    ```

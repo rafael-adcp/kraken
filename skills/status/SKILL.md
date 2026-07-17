@@ -73,8 +73,9 @@ orchestration left to do by hand.
         /kraken:unleash OWNER/tasks --worker-name <worker-name> --project <name-2>
    ```
 
-   The heartbeat age is anchored to the worker's last machine line
-   (`^claimed-by:`/`^heartbeat:`), NOT the issue's `updatedAt` — an operator comment on
+   The heartbeat age is anchored to the worker's last liveness marker (a
+   protocol/2 `claim`/`heartbeat` marker, or a protocol/1 `^claimed-by:`/`^heartbeat:`
+   line), NOT the issue's `updatedAt` — an operator comment on
    a dead worker's issue must not make it look alive (the reaper moves silent
    `in-progress` issues to `needs-decision` after 6h off that same anchor). The orphan
    line **flags, it never acts** — no label change, no close; the decision is mine. The

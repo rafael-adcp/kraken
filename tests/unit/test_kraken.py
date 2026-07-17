@@ -70,6 +70,110 @@ class ArbitrationTests(unittest.TestCase):
         self.assertEqual(kraken.arbitrate_winner(lines), "")
 
 
+class MarkerTests(unittest.TestCase):
+    """protocol/2 hidden markers: make_marker/parse_marker round-trip, decoding
+    edge cases, and arbitration over markers — the successor to the protocol/1
+    line grammar."""
+
+    def test_make_marker_is_compact_ascii_json(self):
+        m = kraken.make_marker({"type": "claim", "worker": "env-1"})
+        self.assertEqual(m, '<!-- kraken {"type":"claim","worker":"env-1"} -->')
+
+    def test_make_marker_round_trips_through_parse(self):
+        payload = {"type": "delivered", "worker": "w1", "pr": "https://x/pull/9"}
+        self.assertEqual(kraken.parse_marker(kraken.make_marker(payload)), payload)
+
+    def test_parse_marker_ignores_a_line_without_a_marker(self):
+        self.assertIsNone(kraken.parse_marker("just some prose"))
+
+    def test_parse_marker_rejects_undecodable_json(self):
+        self.assertIsNone(kraken.parse_marker("<!-- kraken {not json} -->"))
+
+    def test_parse_marker_rejects_a_payload_without_a_string_type(self):
+        self.assertIsNone(kraken.parse_marker('<!-- kraken {"worker":"w"} -->'))
+        self.assertIsNone(kraken.parse_marker('<!-- kraken {"type":5} -->'))
+
+    def test_parse_marker_tolerates_surrounding_prose(self):
+        line = 'context here <!-- kraken {"type":"claim","worker":"w"} --> trailing'
+        self.assertEqual(kraken.parse_marker(line),
+                         {"type": "claim", "worker": "w"})
+
+    def test_first_claim_marker_in_window_wins(self):
+        lines = [kraken.make_marker({"type": "claim", "worker": "alice"}),
+                 kraken.make_marker({"type": "claim", "worker": "bob"})]
+        self.assertEqual(kraken.arbitrate_winner(lines), "alice")
+
+    def test_marker_reset_clears_marker_claim(self):
+        lines = [kraken.make_marker({"type": "claim", "worker": "w1"}),
+                 kraken.make_marker({"type": "delivered", "worker": "w1"}),
+                 kraken.make_marker({"type": "claim", "worker": "w2"})]
+        self.assertEqual(kraken.arbitrate_winner(lines), "w2")
+
+    def test_heartbeat_marker_does_not_reset(self):
+        lines = [kraken.make_marker({"type": "claim", "worker": "w1"}),
+                 kraken.make_marker({"type": "heartbeat", "worker": "w1"}),
+                 kraken.make_marker({"type": "claim", "worker": "w2"})]
+        self.assertEqual(kraken.arbitrate_winner(lines), "w1")
+
+    def test_malformed_marker_never_arbitrates(self):
+        # An undecodable marker must be ignored, not treated as a live claim.
+        lines = ["<!-- kraken {broken -->",
+                 kraken.make_marker({"type": "claim", "worker": "real"})]
+        self.assertEqual(kraken.arbitrate_winner(lines), "real")
+
+
+class MigrationTests(unittest.TestCase):
+    """The protocol/1 -> /2 migration contract (PROTOCOL.md §4): a consumer reads
+    BOTH formats, so pre-existing legacy threads and mixed threads arbitrate."""
+
+    def test_legacy_only_thread_arbitrates(self):
+        lines = ["claimed-by: dead", "delivered: dead", "claimed-by: heir"]
+        self.assertEqual(kraken.arbitrate_winner(lines), "heir")
+
+    def test_marker_reset_clears_a_legacy_claim(self):
+        # cross-format: a protocol/2 reset marker ends a protocol/1 claim window.
+        lines = ["claimed-by: old",
+                 kraken.make_marker({"type": "stale-claim", "reason": "7h"}),
+                 kraken.make_marker({"type": "claim", "worker": "new"})]
+        self.assertEqual(kraken.arbitrate_winner(lines), "new")
+
+    def test_legacy_reset_clears_a_marker_claim(self):
+        # cross-format the other way: a protocol/1 released: line ends a /2 claim.
+        lines = [kraken.make_marker({"type": "claim", "worker": "old"}),
+                 "released: old",
+                 kraken.make_marker({"type": "claim", "worker": "new"})]
+        self.assertEqual(kraken.arbitrate_winner(lines), "new")
+
+    def test_legacy_claim_still_wins_when_first(self):
+        lines = ["claimed-by: rightful",
+                 kraken.make_marker({"type": "claim", "worker": "interloper"})]
+        self.assertEqual(kraken.arbitrate_winner(lines), "rightful")
+
+    def test_liveness_marker_recognized(self):
+        # heartbeat_anchor / the reaper anchor must see claim/heartbeat markers,
+        # but NOT reset markers (delivered/released already drop in-progress).
+        self.assertTrue(
+            kraken._is_machine_line(kraken.make_marker({"type": "claim", "worker": "w"})))
+        self.assertTrue(
+            kraken._is_machine_line(kraken.make_marker({"type": "heartbeat", "worker": "w"})))
+        self.assertFalse(
+            kraken._is_machine_line(kraken.make_marker({"type": "delivered", "worker": "w"})))
+
+    def test_pr_url_parsed_from_delivered_marker(self):
+        recs = [{"body": kraken.make_marker(
+            {"type": "delivered", "worker": "w", "pr": "https://x/pull/42"}),
+            "createdAt": "t"}]
+        self.assertEqual(kraken.parse_pr_url(recs), "https://x/pull/42")
+
+    def test_composed_comment_carries_disclaimer_prose_and_marker(self):
+        body = kraken.compose_comment(
+            "env-1", "Claimed this task.", {"type": "claim", "worker": "env-1"})
+        self.assertTrue(body.startswith("> \U0001f419 **Kraken worker `env-1`**"))
+        self.assertIn("Claimed this task.", body)
+        # The marker sits on its own line so a flat per-line scan finds it.
+        self.assertEqual(kraken.arbitrate_winner(body.split("\n")), "env-1")
+
+
 class MachineLineParsingTests(unittest.TestCase):
     """Machine-line grammar edge cases: CR stripping, spacing, prefix bodies
     that only look like machine lines."""

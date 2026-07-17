@@ -21,7 +21,10 @@
 #     worker re-escalates.
 #   - awaiting-merge: the task is already DELIVERED. Requeuing on a bare comment
 #     ("I'll merge tomorrow") would bounce a ready branch back to a worker. So it
-#     is left held UNLESS the comment carries an explicit `requeue:` line.
+#     is left held UNLESS the comment carries an explicit, STRUCTURED requeue
+#     directive: a protocol/2 `<!-- kraken {"type":"requeue"} -->` marker, or a
+#     standalone `requeue`/`requeue:` line (nothing after it). A `requeue:`
+#     buried in a prose sentence no longer bounces delivered work by accident.
 #
 # No-ops, all proven by tests/t/18-requeue-on-reply.sh:
 #   - worker comments (disclaimer present),
@@ -97,16 +100,25 @@ jobs:
           fi
 
           # awaiting-merge: DELIVERED work — never requeue on a bare comment. Only
-          # an explicit `requeue:` line (its own line) bounces it back for rework.
+          # an EXPLICIT, STRUCTURED requeue directive bounces it back for rework,
+          # so a prose sentence that merely starts a line with "requeue:" (e.g.
+          # "requeue: is something I considered, but hold off") no longer bounces
+          # a ready branch by accident. The two accepted forms:
+          #   - a protocol/2 kraken requeue marker: <!-- kraken {"type":"requeue"} -->
+          #   - a standalone directive line whose only content is `requeue` /
+          #     `requeue:` (nothing after it) — a deliberate one-word gesture.
           if printf '%s\n' "$labels" | grep -qx 'awaiting-merge'; then
-            if printf '%s' "$COMMENT_BODY" | grep -qiE '^[[:space:]]*requeue:'; then
+            if printf '%s' "$COMMENT_BODY" \
+                 | grep -qE '<!--[[:space:]]*kraken[[:space:]]+\{"type":"requeue"' \
+               || printf '%s' "$COMMENT_BODY" \
+                 | grep -qiE '^[[:space:]]*requeue:?[[:space:]]*$'; then
               gh issue edit "$NUM" -R "$REPO" --remove-label awaiting-merge
               gh issue comment "$NUM" -R "$REPO" \
-                --body "requeue: explicit \`requeue:\` on a delivered task — awaiting-merge removed, the worker continues on the existing branch."
-              echo "requeue: awaiting-merge removed on #$NUM (explicit requeue: keyword)"
+                --body "requeue: explicit requeue on a delivered task — awaiting-merge removed, the worker continues on the existing branch."
+              echo "requeue: awaiting-merge removed on #$NUM (explicit requeue directive)"
               exit 0
             fi
-            echo "requeue: awaiting-merge on #$NUM left held (no explicit requeue: keyword) — no-op"
+            echo "requeue: awaiting-merge on #$NUM left held (no explicit requeue directive) — no-op"
             exit 0
           fi
 

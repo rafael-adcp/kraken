@@ -66,7 +66,7 @@ assert_rc $? 0 "reaper run"
 # #1 reclaimed to needs-decision, in-progress dropped, stale-claim: posted.
 has_label 1 needs-decision || fail "#1 (dead) not moved to needs-decision"
 has_label 1 in-progress && fail "#1 (dead) still in-progress after reaping"
-last_comment 1 | grep -q '^stale-claim: ' || fail "#1 missing stale-claim comment"
+last_comment 1 | grep -qF '<!-- kraken {"type":"stale-claim"' || fail "#1 missing stale-claim marker"
 
 # #2 untouched: the fresh heartbeat kept it inside the window.
 has_label 2 in-progress || fail "#2 (live) was reclaimed despite a fresh heartbeat"
@@ -76,6 +76,6 @@ assert_eq "$(comment_count 2)" "2" "#2 got a stale-claim comment it should not h
 # #3 reclaimed: no worker machine line means no liveness proof.
 has_label 3 needs-decision || fail "#3 (no machine line) not reclaimed"
 has_label 3 in-progress && fail "#3 (no machine line) still in-progress"
-last_comment 3 | grep -q '^stale-claim: ' || fail "#3 missing stale-claim comment"
+last_comment 3 | grep -qF '<!-- kraken {"type":"stale-claim"' || fail "#3 missing stale-claim marker"
 
 exit 0

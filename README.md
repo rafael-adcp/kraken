@@ -22,7 +22,7 @@ AI coding agents made each change cheap — but you are still the bus between th
 | Concern            | Kraken's answer                                             |
 | ------------------ | ----------------------------------------------------------- |
 | Queue & state      | GitHub Issues in a private coordination repo you own        |
-| Claiming (no race) | Label + `claimed-by` comment; server-side ordering wins     |
+| Claiming (no race) | Label + `claim` marker comment; server-side ordering wins   |
 | Dependencies       | Native `blocked-by` relationships — closing a task unblocks |
 | Parallelism        | Capacity = how many workers you launch; 1 task per worker   |
 | Dead workers       | Heartbeat comments + an hourly reaper workflow              |
@@ -128,7 +128,7 @@ bouncing) a PR. The tentacles drive everything else.
 
 The coordination contract — task shape, state machine, machine-readable comment
 lines, the claim algorithm — is normatively specified in
-[`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/1`); it is agent-agnostic, so any
+[`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/2`); it is agent-agnostic, so any
 tool that follows it can be a tentacle on the same queue. How a Claude Code worker
 executes it — subagents, the watcher, the bundled transition program — lives in
 [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md).
@@ -323,7 +323,7 @@ a fresh, ephemeral runner is exactly the clean context you want; nothing here
 beats that, so wire it up. Kraken is for the other case: a queue you drain
 unattended against long-lived services and a toolchain that would cost minutes
 to rebuild on every runner. And because a tentacle speaks the agent-agnostic
-[`kraken-protocol/1`](PROTOCOL.md), the queue isn't wed to one vendor's action —
+[`kraken-protocol/2`](PROTOCOL.md), the queue isn't wed to one vendor's action —
 any tool that follows the protocol can drain it. **Prefer `claude-code-action`
 when** your automation is CI-shaped and a disposable runner is the correct
 environment; prefer Kraken when the environment is the point and you want no
