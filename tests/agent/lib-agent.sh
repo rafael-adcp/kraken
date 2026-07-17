@@ -145,7 +145,7 @@ labels_of() { cat "$GH_STUB_STATE/issues/$1/labels" 2>/dev/null; }
 has_label() { grep -qxF -- "$2" "$GH_STUB_STATE/issues/$1/labels" 2>/dev/null; }
 no_label()  { ! has_label "$1" "$2"; }
 
-# Concatenated comment bodies in server order — the machine-line assertion
+# Concatenated comment bodies in server order — the machine-payload assertion
 # surface, exactly what kraken.py's arbitration reads.
 comment_stream() {
   local f
@@ -154,13 +154,28 @@ comment_stream() {
     cat "$f"; echo
   done
 }
-# has_machine_line ISSUE REGEX — a machine line (anchored at line start) exists.
-has_machine_line() { comment_stream "$1" | grep -Eq "$2"; }
+# Machine state lives in a hidden kraken marker — an HTML comment carrying JSON
+# (PROTOCOL.md §4), read marker-only under kraken-protocol/3. The retired
+# protocol/1 visible line grammar (`^<keyword>: <value>`) is no longer a machine
+# surface, so these helpers scan the stream for a marker of a given "type"
+# (optionally carrying a non-empty field). "type" is always the first key
+# kraken.py serializes, so a field, when present, follows it in the object.
+#
+# has_marker ISSUE TYPE — a marker with "type":"TYPE" exists in the stream.
+has_marker() {
+  comment_stream "$1" \
+    | grep -Eq "<!--[[:space:]]*kraken[[:space:]]+\{[^}]*\"type\":\"$2\"[^}]*\}[[:space:]]*-->"
+}
+# has_marker_field ISSUE TYPE FIELD — a TYPE marker carries a non-empty FIELD.
+has_marker_field() {
+  comment_stream "$1" \
+    | grep -Eq "<!--[[:space:]]*kraken[[:space:]]+\{[^}]*\"type\":\"$2\"[^}]*\"$3\":\"[^\"]+\"[^}]*\}[[:space:]]*-->"
+}
 
 assert_label()    { has_label "$1" "$2" || fail "issue $1: expected label '$2' (have: $(labels_of "$1" | tr '\n' ' '))"; }
 assert_no_label() { no_label  "$1" "$2" || fail "issue $1: label '$2' must NOT be present (have: $(labels_of "$1" | tr '\n' ' '))"; }
-assert_machine_line() { has_machine_line "$1" "$2" || fail "issue $1: expected machine line matching /$2/ in comment stream"; }
-assert_no_machine_line() { has_machine_line "$1" "$2" && fail "issue $1: machine line matching /$2/ must NOT be present" || true; }
+assert_marker() { has_marker "$1" "$2" || fail "issue $1: expected hidden kraken marker of type '$2' in comment stream (§4)"; }
+assert_marker_field() { has_marker_field "$1" "$2" "$3" || fail "issue $1: expected '$2' marker carrying field '$3' in comment stream"; }
 
 # Work-repo git state.
 pushed_branches() { git --git-dir="$WORK_BARE" for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null; }
