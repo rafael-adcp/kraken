@@ -35,9 +35,13 @@ startable_count="$(printf '%s\n' "$snapshot" | grep -c ':startable$')" || true
 assert_eq "$startable_count" "1" "once the blocker closes, the snapshot has exactly the newly-clear task startable"
 
 # The watch gate is textually verifiable too. `watch` lives in kraken.py, so
-# assert against the module: it must not carry the false-alarm re-emission timer
-# this task removed, and it must gate emission on count>0 AND the snapshot
-# changing — nothing else.
+# assert against the module: it must not carry the false-alarm REMIND_SECONDS
+# blind timer (removed when list-startable became the sole owner of
+# "startable"), and it must gate emission on count>0 AND (the snapshot changed
+# OR a lost-wake retry is due — wake_retry_due fires only when the StopFailure
+# hook stamped the wake-retry flag after this watcher's last emission, i.e. a
+# wake's turn provably died on a usage limit; tests/unit pins that it is not a
+# timer).
 grep -q 'REMIND_SECONDS' "$SCRIPTS/kraken.py" && fail "kraken.py watch must not retain the 30-min re-emission safety net"
-grep -q 'count > 0 and snapshot != prev' "$SCRIPTS/kraken.py" \
-  || fail "kraken.py watch must gate emission on count>0 AND snapshot changed, nothing else"
+grep -q 'count > 0 and (snapshot != prev or due)' "$SCRIPTS/kraken.py" \
+  || fail "kraken.py watch must gate emission on count>0 AND (snapshot changed OR lost-wake retry due), nothing else"

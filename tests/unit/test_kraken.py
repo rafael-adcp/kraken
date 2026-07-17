@@ -833,5 +833,39 @@ class StatusComputeTests(unittest.TestCase):
         self.assertIsNone(report)
 
 
+class WakeRetryDueTests(unittest.TestCase):
+    """The watcher's lost-wake retry gate (wake_retry_due): re-emit ONLY when
+    the StopFailure hook stamped the wake-retry flag after the watcher's last
+    emission (the turn that wake started provably died on a usage limit) and
+    the retry spacing has elapsed. Pins that it is not a blind re-emission
+    timer — the REMIND_SECONDS regression tests/t/13 guards against."""
+
+    def test_no_flag_means_no_retry(self):
+        # No failed turn on record: never due, however long the queue sits.
+        self.assertFalse(kraken.wake_retry_due(None, 1000.0, 300, 999999.0))
+
+    def test_flag_after_last_emit_and_spacing_elapsed_is_due(self):
+        # Emit at t=1000, hook stamped the flag at t=1001 (the wake's turn
+        # died), spacing (300) elapsed by t=1300: retry owed.
+        self.assertTrue(kraken.wake_retry_due(1001.0, 1000.0, 300, 1300.0))
+
+    def test_flag_before_last_emit_is_stale(self):
+        # The flag predates the last emission: that wake's turn survived, so
+        # no retry — this is exactly what keeps it from being a timer.
+        self.assertFalse(kraken.wake_retry_due(900.0, 1000.0, 300, 999999.0))
+
+    def test_spacing_not_elapsed_yet(self):
+        # Flag is fresh but the retry spacing hasn't passed: hold — one failed
+        # wake per KRAKEN_WATCH_RETRY_SECONDS, not one per poll.
+        self.assertFalse(kraken.wake_retry_due(1001.0, 1000.0, 300, 1299.0))
+
+    def test_refreshed_flag_re_arms_after_each_failed_retry(self):
+        # A retry emit at t=1300 whose turn also died (flag re-stamped at
+        # t=1301): due again only at t>=1600 — the cycle ends when a turn
+        # finally survives and stops refreshing the flag.
+        self.assertFalse(kraken.wake_retry_due(1301.0, 1300.0, 300, 1500.0))
+        self.assertTrue(kraken.wake_retry_due(1301.0, 1300.0, 300, 1600.0))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

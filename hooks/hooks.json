@@ -1,5 +1,5 @@
 {
-  "description": "Auto-release an open claim when a worker's Claude Code session ends gracefully, so the task requeues in seconds instead of waiting ~6h for the reaper (PROTOCOL.md §9, coordination-repo #13).",
+  "description": "Self-healing for a worker that stops while holding a claim: SessionEnd (graceful exit) auto-releases so the task requeues in seconds instead of waiting ~6h for the reaper (PROTOCOL.md §9, coordination-repo #13); StopFailure matcher rate_limit (a usage limit kills the turn but not the session, so SessionEnd never fires) auto-releases too and stamps the wake-retry flag kraken.py watch uses to resume the drain after the limit window resets (#60).",
   "hooks": {
     "SessionEnd": [
       {
@@ -7,6 +7,17 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-end-release.sh\""
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "matcher": "rate_limit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/stop-failure-release.sh\""
           }
         ]
       }

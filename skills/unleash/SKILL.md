@@ -220,7 +220,10 @@ time:
    queue snapshot changes and at least one task is startable (it delegates the filter
    to `kraken.py list-startable` — the same startable classification step 1's
    `claim-next` lists through) — an idle queue never
-   invokes the model. Do not inline a rewritten
+   invokes the model. One deliberate exception: when the bundled `StopFailure` hook
+   records that a previous wake's turn died on a usage limit, the watcher re-emits
+   the wake (default spacing 5 min), so a drain interrupted by a limit resumes on
+   its own once the window resets. Do not inline a rewritten
    script — the bundled one is versioned with the plugin. Cannot arm it (no Monitor
    tool, script missing)? Say so, offer `/loop /kraken:unleash ... --once` as the
    fallback, and end the turn as if `--once` — do not improvise a watcher.
