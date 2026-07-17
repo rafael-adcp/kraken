@@ -66,7 +66,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | L150 | A loser **MUST** back off removing nothing | ✅ pinned | `tests/t/04` (the claim race: loser exits 10, removes nothing). |
 | L157 | `claimed-by:` lines before the window start **MUST** be ignored | ✅ pinned | `tests/t/05`; `tests/unit` `test_released_resets_window`, `test_stale_claim_resets_window`, `test_needs_decision_resets_window`, `test_reset_after_claim_leaves_no_winner`. |
 | L160 | `heartbeat:` **MUST NOT** reset the window | ✅ pinned | (same as §4 L113) `tests/t/08`, `tests/unit` `test_heartbeat_does_not_reset`. |
-| L167 | A worker **MUST** work one task at a time; **MUST NOT** claim a second while holding a claim | 🕳 gap | `kraken.py claim` does not refuse a second claim while a `claim-<worker>.json` state file exists. State-file lifecycle is pinned (`tests/t/15`) but the one-at-a-time guard is not. Follow-up: gap **G1** below. |
+| L167 | A worker **MUST** work one task at a time; **MUST NOT** claim a second while holding a claim | 🕳 gap | `kraken.py claim` does not refuse a second claim while a `claim-<worker>.json` state file exists. State-file lifecycle is pinned (`tests/t/15`) but the one-at-a-time guard is not. Follow-up: rafael-adcp/personal-tasks#35 (gap **G1** below). |
 
 ## §6 Heartbeats and the reaper
 
@@ -88,7 +88,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
 | §8 delivery | Post `delivered:` + `pr:`, then swap `in-progress`→`awaiting-merge`; comment first | ✅ pinned | `tests/t/10`; `tests/t/11` (gh failure ordering); review-bounce window reset: `tests/t/10` and `tests/unit` `test_delivered_is_a_review_bounce_reset`. |
-| L229 | Every delivered commit **MUST** carry the `Co-Authored-By` and `Kraken-Task:` trailers | 🕳 gap | No test verifies delivered commit trailers (the conformance stub has no git). Follow-up: gap **G2** below. |
+| L229 | Every delivered commit **MUST** carry the `Co-Authored-By` and `Kraken-Task:` trailers | 🕳 gap | No test verifies delivered commit trailers (the conformance stub has no git). Follow-up: rafael-adcp/personal-tasks#36 (gap **G2** below). |
 | L236 | The PR body **SHOULD** carry `Closes …` when the work repo is on GitHub | 🧠 agent | PR authorship is agent behavior — `tests/agent/`. |
 | L246 | Work **MUST NOT** be silently lost (fall back to the diff in a comment) | 🧠 agent | Fallback behavior is judgment — `tests/agent/`. |
 
@@ -123,12 +123,12 @@ should introduce; each should be filed as its own task in the coordination
 queue (`rafael-adcp/personal-tasks`, labels `kraken-task` + `project:kraken`)
 and the follow-up number recorded here:
 
-- **G1 — §5 L167, one-task-at-a-time.** `kraken.py claim` should refuse (or
+- **G1 — §5 L167, one-task-at-a-time** ([personal-tasks#35](https://github.com/rafael-adcp/personal-tasks/issues/35)). `kraken.py claim` should refuse (or
   warn and exit non-zero) when a `claim-<worker>.json` state file already marks
   an open claim. Needs a claim-guard test extending the `tests/t/15` state-file
   fixtures. Mind the §5 network-failure caveat ("or while a claim of its own is
   in an unknown state after a network failure — re-check first").
-- **G2 — §8 L229, commit attribution trailers.** No test asserts that delivered
+- **G2 — §8 L229, commit attribution trailers** ([personal-tasks#36](https://github.com/rafael-adcp/personal-tasks/issues/36)). No test asserts that delivered
   commits carry the `Co-Authored-By` and `Kraken-Task:` trailers. Needs a
   git-integration harness (a throwaway work repo) the conformance stub does not
   currently model.
