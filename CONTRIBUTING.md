@@ -83,11 +83,24 @@ These are the conventions the history already follows — match them:
   branch names, PR titles and bodies. No exceptions.
 - **Green checks.** The deterministic lint and conformance suite must pass; run
   them locally before you push.
-- **Touching the protocol?** A backward-incompatible change to the contract
-  bumps the integer (`kraken-protocol/2`); clarifications and strictly additive
-  rules amend `PROTOCOL.md` in place by PR. Keep every skill, script, and the
-  README consistent with the spec in the same change — the linter cross-checks
-  labels, machine lines, and the attribution disclaimer across all of them.
+- **Touching the protocol? Spec-first is a process rule, not a preference.** A
+  behavior change to the coordination contract lands as a `PROTOCOL.md`
+  amendment **plus a conformance test** (`tests/t/**` or `tests/unit/**`) in the
+  same PR as — or before — the implementation. The spec is the source of truth:
+  on any disagreement between spec, skills, scripts, and tests, **the spec
+  wins**, and the fix brings the others back into line (never the reverse). A
+  backward-incompatible change bumps the integer (`kraken-protocol/2`);
+  clarifications and strictly additive rules amend `PROTOCOL.md` in place by PR.
+  Keep every skill, script, and the README consistent with the spec in the same
+  change — the linter cross-checks labels, machine lines, and the attribution
+  disclaimer across all of them.
+- **Every normative clause is backed by a test.** `tests/COVERAGE.md` is the
+  clause-by-clause audit mapping each `PROTOCOL.md` **MUST**/**SHOULD** to the
+  test that pins it. When you amend the spec, add or update the pinning test and
+  its `tests/COVERAGE.md` row in the same PR; a new normative clause with no
+  test (or marked a gap without a follow-up issue) is not done. "The spec says
+  it but no test pins it" is a defect: the reference implementation passing is
+  not evidence a third-party implementation would.
 
 ## Where design discussion happens
 
