@@ -28,7 +28,7 @@
 # A per-issue concurrency group serializes an edit burst so two racing runs don't
 # both post. All four behaviors — missing label, missing Acceptance, compliant
 # (no comment), and edit-after-fix (no duplicate / no re-flag) — are pinned by
-# tests/t/25-validate-task.sh.
+# tests/conformance/test_25_validate_task.py.
 name: Validate task on arrival
 on:
   issues:

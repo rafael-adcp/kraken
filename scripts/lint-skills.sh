@@ -157,14 +157,15 @@ done
 
 # --- 5. Shell / YAML / JSON snippets parse ----------------------------------
 echo "[5] snippets & assets"
-for sh in scripts/*.sh skills/*/*.sh tests/*.sh tests/t/*.sh; do
+for sh in scripts/*.sh skills/*/*.sh; do
   [ -f "$sh" ] || continue
   bash -n "$sh" 2>/dev/null || err "$sh has a bash syntax error"
 done
 if command -v python3 >/dev/null 2>&1; then
   # tests/gh-stub/gh is the Python `gh` stub (issue #38): extensionless so it
-  # stays on PATH as `gh`, but it is Python, so it is syntax-checked here.
-  for py in skills/*/*.py tests/unit/*.py tests/gh-stub/gh; do
+  # stays on PATH as `gh`, but it is Python, so it is syntax-checked here. The
+  # conformance suite (tests/conformance) and its harness are Python too.
+  for py in skills/*/*.py tests/*.py tests/unit/*.py tests/conformance/*.py tests/gh-stub/gh; do
     [ -f "$py" ] || continue
     python3 -m py_compile "$py" 2>/dev/null || err "$py has a python syntax error"
   done

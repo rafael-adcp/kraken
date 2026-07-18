@@ -865,7 +865,7 @@ class WakeRetryDueTests(unittest.TestCase):
     the StopFailure hook stamped the wake-retry flag after the watcher's last
     emission (the turn that wake started provably died on a usage limit) and
     the retry spacing has elapsed. Pins that it is not a blind re-emission
-    timer — the REMIND_SECONDS regression tests/t/13 guards against."""
+    timer — the REMIND_SECONDS regression tests/conformance/test_13_watch_queue_blocked.py guards against."""
 
     def test_no_flag_means_no_retry(self):
         # No failed turn on record: never due, however long the queue sits.

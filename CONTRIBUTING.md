@@ -27,16 +27,18 @@ checks. These two are token-free (no model calls, no network) and run in CI on
 every PR:
 
 ```bash
-make test    # conformance suite (bash tests/run-tests.sh) — needs jq
+make test    # conformance + unit suites (python3 tests/run.py) — conformance needs jq
 make lint    # deterministic skill lint (bash scripts/lint-skills.sh)
 make check   # both of the above
 ```
 
-- **`make test`** runs the conformance suite: each case drives the bundled
-  transition program against a stateful `gh` stub, proving the queue protocol
-  mechanically (the claim race, claim-window arbitration, honest release, …). It
-  **requires `jq`**; without it the suite skips cleanly (exit 0), so it's safe on
-  a minimal machine, but install `jq` to actually exercise it.
+- **`make test`** runs the Python test runner (`tests/run.py`), which executes
+  the `unittest` conformance suite (`tests/conformance/`) — each case drives the
+  bundled transition program against a stateful `gh` stub, proving the queue
+  protocol mechanically (the claim race, claim-window arbitration, honest
+  release, …) — plus the `kraken.py` unit tests (`tests/unit/`). The conformance
+  suite **requires `jq`**; without it those cases skip cleanly, so it's safe on
+  a minimal machine, but install `jq` to actually exercise them.
 - **`make lint`** is the deterministic guard against the silent breakage a prose
   skill is exposed to: label drift across files, orphan "step N" references,
   task-template field drift, broken relative links/images, and unparseable
@@ -85,7 +87,7 @@ These are the conventions the history already follows — match them:
   them locally before you push.
 - **Touching the protocol? Spec-first is a process rule, not a preference.** A
   behavior change to the coordination contract lands as a `PROTOCOL.md`
-  amendment **plus a conformance test** (`tests/t/**` or `tests/unit/**`) in the
+  amendment **plus a conformance test** (`tests/conformance/**` or `tests/unit/**`) in the
   same PR as — or before — the implementation. The spec is the source of truth:
   on any disagreement between spec, skills, scripts, and tests, **the spec
   wins**, and the fix brings the others back into line (never the reverse). A

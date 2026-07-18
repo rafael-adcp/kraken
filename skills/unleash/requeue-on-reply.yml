@@ -23,7 +23,7 @@
 #     `<!-- kraken {"type":"requeue"} -->` marker, or a standalone
 #     `requeue`/`requeue:` line.
 #
-# No-ops (all proven by tests/t/18-requeue-on-reply.sh): worker comments
+# No-ops (all proven by tests/conformance/test_18_requeue_on_reply.py): worker comments
 # (disclaimer present), comments on issues carrying no held label, and bot/self
 # comments (the reaper's stale-claim comment, this workflow's own confirmation,
 # the validator) — user.type == Bot.
