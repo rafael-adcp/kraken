@@ -2,8 +2,9 @@ name: Conformance
 
 # Mechanical proof of the queue protocol: the bundled transition program (kraken.py)
 # runs against a stateful gh stub — claim guard, claim race (exactly one winner),
-# claim-window arbitration, honest release, failure surfacing. No secrets, no
-# tokens, no model calls (see #48 item 1).
+# claim-window arbitration, honest release, failure surfacing. Plus the kraken.py
+# unit tests. All Python (the conformance suite was ported from bash in #41). No
+# secrets, no tokens, no model calls (see #48 item 1).
 on:
   pull_request:
     paths:
@@ -18,5 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run conformance suite
-        run: bash tests/run-tests.sh
+      - name: Run the test suite (conformance + unit)
+        # Streams each tests/{conformance,unit}/test_*.py invocation and its
+        # `Ran N tests` summary, so the PR log literally shows every Python test
+        # file (e.g. `python3 tests/unit/test_kraken.py`) running.
+        run: python3 tests/run.py
