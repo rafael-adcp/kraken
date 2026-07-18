@@ -1,521 +1,586 @@
-#!/usr/bin/env bash
-# Programmable `gh` stub for the kraken conformance suite (tests/run-tests.sh
-# puts this directory first on PATH). It models just enough of GitHub for the
-# bundled transition program (kraken.py): issue state, labels, and — the part that matters —
-# server-side comment ordering. The scripts' own --jq expressions are evaluated
-# by the real `jq`, so the filters under test are the shipped ones, never a
-# reimplementation.
-#
-# State layout (under $GH_STUB_STATE):
-#   issues/<n>/title       one line
-#   issues/<n>/createdAt   ISO timestamp
-#   issues/<n>/state       "open" | "closed"
-#   issues/<n>/labels      one label per line
-#   issues/<n>/body        issue body text (optional; absent = empty body)
-#   issues/<n>/blocked_by  one blocker issue number per line (optional;
-#                          absent = no native blockers, i.e. the real API's [])
-#   issues/<n>/comments/NNNN.md   bodies, NNNN = server order
-#   issues/<n>/comments/NNNN.at   optional ISO timestamp for that comment
-#                          (absent = derived from the issue's createdAt); the
-#                          reaper reads comment createdAt to anchor staleness
-#   log                    every invocation, one per line
-#
-# Knobs:
-#   GH_STUB_FAIL=<ERE>    any invocation whose args match exits 1 (network sim)
-#   GH_STUB_BARRIER=<n>   `issue view --json labels` blocks until n callers
-#                         arrive — holds every racer inside the claim window so
-#                         the race test is deterministic, not timing-dependent
-#
-# `gh api repos/OWNER/REPO/issues/N/dependencies/blocked_by` models GitHub's
-# native blocked-by relationships: emits a JSON array of {number, state},
-# state read from each blocker's own issues/<n>/state file, so closing a
-# blocker in the stub is exactly `echo closed > issues/<n>/state`.
-#
-# `gh api graphql -f query=...` models the two shapes kraken.py's batched
-# listing sends (real GraphQL enum state comes back UPPERCASE, unlike the
-# REST endpoints above, so both shapes below emit OPEN/CLOSED):
-#   issues(states: OPEN, labels: [...], first: N[, after: "cursor"])
-#     -> a page of {number,title,createdAt,body,labels,blockedBy} nodes, real
-#        cursor pagination (pageInfo.hasNextPage/endCursor) so an over-100
-#        queue still takes the number of calls its page count needs.
-#   aliased `iN: issue(number: N) { state }` fields (the depends-on fallback's
-#     batched target-state lookup) -> one {data:{repository:{iN:{state}}}} per
-#     alias, in a single round trip regardless of how many aliases are asked.
-set -u
+#!/usr/bin/env python3
+"""Programmable `gh` stub for the kraken conformance suite (tests/run-tests.sh
+puts this directory first on PATH). It models just enough of GitHub for the
+bundled transition program (kraken.py): issue state, labels, and — the part that
+matters — server-side comment ordering.
 
-STATE="${GH_STUB_STATE:?gh stub: GH_STUB_STATE not set}"
-printf 'gh %s\n' "$*" >> "$STATE/log"
+This is the Python port of the original bash stub (issue #38): the internal JSON
+assembly moves from `jq` to Python's `json` module, which retires the
+CRLF/quoting/locale hazard class that motivated consolidating the transition
+scripts into `kraken.py` (#16). The suite's defining property is preserved: the
+scripts' own `--jq` expressions are still evaluated by the *real* `jq` (see
+`emit`), so the filters under test are the shipped ones, never a reimplementation.
+Being on PATH as an executable named `gh`, it is still what a third-party
+implementation points its own transition executables at to validate conformance
+(PROTOCOL.md §12).
 
-if [ -n "${GH_STUB_FAIL:-}" ] && printf '%s' "$*" | grep -Eq "$GH_STUB_FAIL"; then
-  echo "gh-stub: injected failure for: $*" >&2
-  exit 1
-fi
+State layout (under $GH_STUB_STATE):
+  issues/<n>/title       one line
+  issues/<n>/createdAt   ISO timestamp
+  issues/<n>/state       "open" | "closed"
+  issues/<n>/labels      one label per line
+  issues/<n>/body        issue body text (optional; absent = empty body)
+  issues/<n>/blocked_by  one blocker issue number per line (optional;
+                         absent = no native blockers, i.e. the real API's [])
+  issues/<n>/comments/NNNN.md   bodies, NNNN = server order
+  issues/<n>/comments/NNNN.at   optional ISO timestamp for that comment
+                         (absent = derived from the issue's createdAt); the
+                         reaper reads comment createdAt to anchor staleness
+  log                    every invocation, one per line
+
+Knobs:
+  GH_STUB_FAIL=<ERE>    any invocation whose args match exits 1 (network sim)
+  GH_STUB_BARRIER=<n>   `issue view --json labels` blocks until n callers
+                        arrive — holds every racer inside the claim window so
+                        the race test is deterministic, not timing-dependent
+
+`gh api repos/OWNER/REPO/issues/N/dependencies/blocked_by` models GitHub's
+native blocked-by relationships: emits a JSON array of {number, state}, state
+read from each blocker's own issues/<n>/state file.
+
+`gh api graphql -f query=...` models the two shapes kraken.py's batched listing
+sends (real GraphQL enum state comes back UPPERCASE, unlike the REST endpoints,
+so both shapes emit OPEN/CLOSED):
+  issues(states: OPEN, labels: [...], first: N[, after: "cursor"])
+    -> a page of {number,title,createdAt,body,labels,blockedBy} nodes, real
+       cursor pagination (pageInfo.hasNextPage/endCursor).
+  aliased `iN: issue(number: N) { state }` fields (the depends-on fallback's
+    batched target-state lookup) -> one {data:{repository:{iN:{state}}}} per
+    alias, in a single round trip.
+"""
+import base64
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+STATE = os.environ.get("GH_STUB_STATE")
+if not STATE:
+    sys.stderr.write("gh stub: GH_STUB_STATE not set\n")
+    sys.exit(1)
+
+ARGV = sys.argv[1:]
+JOINED = " ".join(ARGV)
+
+# Every invocation, one per line — tests assert on call presence/count/order.
+with open(os.path.join(STATE, "log"), "a", encoding="utf-8") as _log:
+    _log.write("gh %s\n" % JOINED)
+
+_fail = os.environ.get("GH_STUB_FAIL")
+if _fail and re.search(_fail, JOINED):
+    sys.stderr.write("gh-stub: injected failure for: %s\n" % JOINED)
+    sys.exit(1)
+
+LOCKDIR = os.path.join(STATE, ".lock")
+
+
+def die(msg, code=1):
+    sys.stderr.write(msg + "\n")
+    sys.exit(code)
+
 
 # mkdir is the only portable atomic primitive (Git Bash has no flock) — it
 # serializes writes, which is exactly GitHub's server-side ordering.
-lock() {
-  local i=0
-  until mkdir "$STATE/.lock" 2>/dev/null; do
-    sleep 0.05
-    i=$((i + 1))
-    [ "$i" -gt 200 ] && { echo "gh-stub: lock timeout" >&2; exit 99; }
-  done
+def lock():
+    i = 0
+    while True:
+        try:
+            os.mkdir(LOCKDIR)
+            return
+        except FileExistsError:
+            time.sleep(0.05)
+            i += 1
+            if i > 200:
+                die("gh-stub: lock timeout", 99)
+
+
+def unlock():
+    os.rmdir(LOCKDIR)
+
+
+def read_text(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def cmdsub(text):
+    """Trailing-newline stripping, matching bash `$(cat ...)`."""
+    return text.rstrip("\n")
+
+
+def rtrimnl(text):
+    """jq rtrimstr("\\n"): drop a single trailing newline."""
+    return text[:-1] if text.endswith("\n") else text
+
+
+def lines_of(content):
+    """The lines `jq -R` would read from `content` (each newline-terminated
+    line; a final unterminated line still counts; an empty file yields none)."""
+    parts = content.split("\n")
+    if parts and parts[-1] == "":
+        parts.pop()
+    return parts
+
+
+def label_names(labels_content):
+    """issue_json-style label parse: split, drop empty entries."""
+    return [x for x in rtrimnl(labels_content).split("\n") if x != ""]
+
+
+# --- argument parsing (only the shapes kraken.py uses) -----------------------
+def parse_args(args):
+    p = {
+        "sub": "", "issue": "", "jsonf": "", "jqexpr": "", "add_label": "",
+        "remove_label": "", "body": "", "endpoint": "", "limit": "", "repo": "",
+        "pr_sub": "", "title": "", "head": "", "base": "", "draft": 0,
+        "gql_query": "", "label_sub": "", "repo_sub": "", "method": "",
+        "put_content": "", "put_message": "", "color": "", "desc": "",
+        "label_filters": [],
+    }
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        nxt = args[i + 1] if i + 1 < n else ""
+        if a == "-R":
+            p["repo"] = nxt; i += 2
+        elif a == "issue":
+            p["sub"] = nxt; i += 2
+        elif a == "repo":
+            p["sub"] = "repo"; p["repo_sub"] = nxt; i += 2
+        elif a == "pr":
+            p["sub"] = "pr"; p["pr_sub"] = nxt; i += 2
+        elif a == "label":
+            p["sub"] = "label"; p["label_sub"] = nxt; i += 2
+        elif a == "api":
+            p["sub"] = "api"; p["endpoint"] = nxt; i += 2
+        elif a == "--json":
+            p["jsonf"] = nxt; i += 2
+        elif a == "--jq":
+            p["jqexpr"] = nxt; i += 2
+        elif a == "--label":
+            p["label_filters"].append(nxt); i += 2
+        elif a == "--add-label":
+            p["add_label"] = nxt; i += 2
+        elif a == "--remove-label":
+            p["remove_label"] = nxt; i += 2
+        elif a == "--title":
+            p["title"] = nxt; i += 2
+        elif a == "--head":
+            p["head"] = nxt; i += 2
+        elif a == "--base":
+            p["base"] = nxt; i += 2
+        elif a in ("--draft", "-d"):
+            p["draft"] = 1; i += 1
+        elif a in ("-X", "--method"):
+            p["method"] = nxt; i += 2
+        elif a == "--color":
+            p["color"] = nxt; i += 2
+        elif a == "--description":
+            p["desc"] = nxt; i += 2
+        elif a == "--force":
+            i += 1
+        elif a == "--body":
+            p["body"] = nxt; i += 2
+        elif a == "--body-file":
+            p["body"] = cmdsub(read_text(nxt)); i += 2
+        elif a == "--limit":
+            p["limit"] = nxt; i += 2
+        elif a == "--state":
+            i += 2
+        elif a in ("-f", "-F"):
+            if nxt.startswith("query="):
+                p["gql_query"] = nxt[len("query="):]
+            elif nxt.startswith("content="):
+                p["put_content"] = nxt[len("content="):]
+            elif nxt.startswith("message="):
+                p["put_message"] = nxt[len("message="):]
+            i += 2
+        elif a.startswith("-"):
+            i += 1
+        else:
+            p["issue"] = a; i += 1
+    return p
+
+
+P = parse_args(ARGV)
+
+
+# --- JSON assembly (was jq -n / --rawfile in the bash stub) ------------------
+def comments_json(d):
+    """[{body, createdAt}] in server order. A comment's createdAt comes from its
+    .at sidecar when present, else derived from the issue's createdAt."""
+    created = cmdsub(read_text(os.path.join(d, "createdAt")))
+    cdir = os.path.join(d, "comments")
+    out = []
+    for f in sorted(_glob_md(cdir)):
+        at_file = f[:-3] + ".at"
+        at = cmdsub(read_text(at_file)) if os.path.isfile(at_file) else created
+        # jq -Rs slurps the whole file as one string, trailing newline included.
+        out.append({"body": read_text(f), "createdAt": at})
+    return out
+
+
+def _glob_md(cdir):
+    if not os.path.isdir(cdir):
+        return []
+    return [os.path.join(cdir, e) for e in os.listdir(cdir) if e.endswith(".md")]
+
+
+def issue_json(d):
+    """{number,title,createdAt,updatedAt,labels:[{name}],comments}."""
+    n = int(os.path.basename(d.rstrip("/")))
+    title = rtrimnl(read_text(os.path.join(d, "title")))
+    created = rtrimnl(read_text(os.path.join(d, "createdAt")))
+    comments = comments_json(d)
+    labels = [{"name": x} for x in label_names(read_text(os.path.join(d, "labels")))]
+    updated = max([c["createdAt"] for c in comments] + [created])
+    return {
+        "number": n, "title": title, "createdAt": created,
+        "updatedAt": updated, "labels": labels, "comments": comments,
+    }
+
+
+def blocked_by_nodes(d, upper):
+    """[{number,state}] — state UPPERCASE (graphql) or lowercase (REST)."""
+    items = []
+    bf = os.path.join(d, "blocked_by")
+    if os.path.isfile(bf):
+        for bn in lines_of(read_text(bf)):
+            if not bn:
+                continue
+            sf = os.path.join(STATE, "issues", bn, "state")
+            default = "CLOSED" if upper else "closed"
+            st = cmdsub(read_text(sf)) if os.path.isfile(sf) else default
+            if upper:
+                st = st.upper()
+            items.append({"number": int(bn), "state": st})
+    return items
+
+
+def issue_node_json(d):
+    """The GraphQL-shaped issue node."""
+    n = int(os.path.basename(d.rstrip("/")))
+    title = rtrimnl(read_text(os.path.join(d, "title")))
+    created = rtrimnl(read_text(os.path.join(d, "createdAt")))
+    labels = [{"name": x} for x in label_names(read_text(os.path.join(d, "labels")))]
+    bpath = os.path.join(d, "body")
+    body = cmdsub(read_text(bpath)) if os.path.isfile(bpath) else ""
+    return {
+        "number": n, "title": title, "createdAt": created, "body": body,
+        "labels": {"nodes": labels},
+        "blockedBy": {"nodes": blocked_by_nodes(d, upper=True)},
+    }
+
+
+def issue_dirs():
+    idir = os.path.join(STATE, "issues")
+    if not os.path.isdir(idir):
+        return []
+    out = []
+    for e in sorted(os.listdir(idir)):
+        d = os.path.join(idir, e)
+        if os.path.isdir(d):
+            out.append(d)
+    return out
+
+
+def is_open(d):
+    return cmdsub(read_text(os.path.join(d, "state"))) == "open"
+
+
+def has_all_labels(d, labels):
+    present = label_names(read_text(os.path.join(d, "labels")))
+    return all(l in present for l in labels)
+
+
+# --- graphql: query-shape dispatch -------------------------------------------
+def graphql_list_issues(q):
+    m = re.search(r'name: "([^"]*)"', q)
+    name = m.group(1) if m else ""
+    if not name:
+        die("gh-stub: graphql listing query missing repository name")
+    lm = re.search(r"labels: \[[^\]]*\]", q)
+    labels = re.findall(r'"([^"]*)"', lm.group(0)) if lm else []
+    fm = re.search(r"first: ([0-9]+)", q)
+    first = int(fm.group(1)) if fm else 100
+    am = re.search(r'after: "([^"]*)"', q)
+    after = am.group(1) if am else ""
+
+    nodes = []
+    for d in issue_dirs():
+        if not is_open(d):
+            continue
+        if not has_all_labels(d, labels):
+            continue
+        nodes.append(issue_node_json(d))
+    nodes.sort(key=lambda x: (x["createdAt"], x["number"]))
+    if after != "":
+        after_n = int(after)
+        nodes = [x for x in nodes if x["number"] > after_n]
+    count = len(nodes)
+    page = nodes[:first]
+    has_next = count > first
+    end_cursor = str(page[-1]["number"]) if page else ""
+    return {"data": {"repository": {"issues": {
+        "pageInfo": {"hasNextPage": has_next, "endCursor": end_cursor},
+        "nodes": page,
+    }}}}
+
+
+def graphql_issue_states(q):
+    fields = {}
+    for m in re.finditer(r"([a-zA-Z_][a-zA-Z0-9_]*): issue\(number: ([0-9]+)\)", q):
+        alias, num = m.group(1), m.group(2)
+        sf = os.path.join(STATE, "issues", num, "state")
+        st = cmdsub(read_text(sf)).upper() if os.path.isfile(sf) else "CLOSED"
+        fields[alias] = {"state": st}
+    return {"data": {"repository": fields}}
+
+
+def graphql_dispatch(q):
+    if "issues(states: OPEN" in q:
+        return graphql_list_issues(q)
+    return graphql_issue_states(q)
+
+
+# --- output ------------------------------------------------------------------
+def emit(obj):
+    """Print JSON; apply --jq like gh does (raw strings, like jq -r). The
+    scripts' own --jq expressions are handed to the REAL jq, so the filters
+    under test are the shipped ones. CR is stripped: harmless on LF output,
+    but a stray \\r poisons a consumer reading a timestamp/number off a line."""
+    data = json.dumps(obj)
+    if P["jqexpr"]:
+        proc = subprocess.run(
+            ["jq", "-r", P["jqexpr"]],
+            input=data, capture_output=True, text=True,
+        )
+        sys.stdout.write(proc.stdout.replace("\r", ""))
+        if proc.returncode != 0:
+            sys.stderr.write(proc.stderr)
+            sys.exit(proc.returncode)
+    else:
+        sys.stdout.write((data + "\n").replace("\r", ""))
+
+
+def issue_dir(n):
+    d = os.path.join(STATE, "issues", str(n))
+    if not os.path.isdir(d):
+        die("gh-stub: no such issue %s" % n)
+    return d
+
+
+# --- subcommand dispatch -----------------------------------------------------
+def do_list():
+    items = [issue_json(d) for d in issue_dirs()
+             if is_open(d) and has_all_labels(d, P["label_filters"])]
+    # Honor --limit like real gh: page-fetch newest-first (created desc) and
+    # stop at the ceiling — an over-limit queue silently loses its OLDEST tasks.
+    items.sort(key=lambda x: x["createdAt"])
+    items.reverse()
+    if P["limit"]:
+        items = items[:int(P["limit"])]
+    emit(items)
+
+
+def do_view():
+    d = issue_dir(P["issue"])
+    jsonf = P["jsonf"]
+    labels_src = os.path.join(d, "labels")
+    barrier = os.environ.get("GH_STUB_BARRIER")
+    if jsonf == "labels" and barrier:
+        bdir = os.path.join(STATE, ".barrier")
+        os.makedirs(bdir, exist_ok=True)
+        open(os.path.join(bdir, str(os.getpid())), "w").close()
+        i = 0
+        while len(os.listdir(bdir)) < int(barrier):
+            time.sleep(0.05)
+            i += 1
+            if i > 600:  # ~30s ceiling: a cold interpreter must not look stuck.
+                break
+        # All racers arrived. The first arriver snapshots the labels under the
+        # lock; every racer reads that pre-race snapshot, so all guards see the
+        # identical clear state the race is meant to test.
+        lock()
+        snap = os.path.join(bdir, "labels.snap")
+        if not os.path.isfile(snap):
+            with open(snap, "w", encoding="utf-8") as out:
+                out.write(read_text(labels_src))
+        unlock()
+        labels_src = snap
+
+    if jsonf == "labels":
+        names = lines_of(read_text(labels_src))
+        emit({"labels": [{"name": x} for x in names]})
+    elif jsonf == "body":
+        bpath = os.path.join(d, "body")
+        body = cmdsub(read_text(bpath)) if os.path.isfile(bpath) else ""
+        emit({"body": body})
+    elif jsonf == "state":
+        st = cmdsub(read_text(os.path.join(d, "state"))).upper()
+        emit({"state": st})
+    elif jsonf == "comments":
+        c = [{"body": read_text(f)} for f in sorted(_glob_md(os.path.join(d, "comments")))]
+        emit({"comments": c})
+    else:
+        die("gh-stub: unsupported --json '%s' for issue view" % jsonf)
+
+
+def do_edit():
+    d = issue_dir(P["issue"])
+    lpath = os.path.join(d, "labels")
+    lock()
+    try:
+        labels = lines_of(read_text(lpath))
+        if P["add_label"] and P["add_label"] not in labels:
+            labels.append(P["add_label"])
+        if P["remove_label"]:
+            labels = [l for l in labels if l != P["remove_label"]]
+        with open(lpath, "w", encoding="utf-8") as f:
+            f.write("".join(l + "\n" for l in labels))
+    finally:
+        unlock()
+
+
+def do_comment():
+    d = issue_dir(P["issue"])
+    cdir = os.path.join(d, "comments")
+    lock()
+    try:
+        n = len(_glob_md(cdir)) + 1
+        tmp = os.path.join(cdir, ".tmp.%d" % os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(P["body"] + "\n")
+        os.replace(tmp, os.path.join(cdir, "%04d.md" % n))
+    finally:
+        unlock()
+
+
+def do_api():
+    endpoint = P["endpoint"]
+    if re.search(r"/issues/[0-9]+/comments", endpoint):
+        m = re.search(r"/issues/([0-9]+)/comments", endpoint)
+        d = issue_dir(m.group(1))
+        emit(comments_json(d))
+    elif re.search(r"/issues/[0-9]+/dependencies/blocked_by", endpoint):
+        m = re.search(r"/issues/([0-9]+)/dependencies/blocked_by", endpoint)
+        d = issue_dir(m.group(1))
+        emit(blocked_by_nodes(d, upper=False))
+    elif endpoint == "graphql":
+        emit(graphql_dispatch(P["gql_query"]))
+    elif "/contents/" in endpoint:
+        cpath = endpoint.split("/contents/", 1)[1]
+        cfile = os.path.join(STATE, "contents", cpath)
+        if P["method"] == "PUT":
+            lock()
+            try:
+                os.makedirs(os.path.dirname(cfile), exist_ok=True)
+                raw = base64.b64decode(P["put_content"].replace("\n", ""))
+                with open(cfile, "wb") as f:
+                    f.write(raw)
+            finally:
+                unlock()
+            sys.stdout.write(json.dumps({"content": {"path": cpath}}) + "\n")
+        else:
+            if not os.path.isfile(cfile):
+                die("gh-stub: 404 contents/%s" % cpath)
+            with open(cfile, "rb") as f:
+                enc = base64.b64encode(f.read()).decode("ascii")
+            emit({"content": enc})
+    else:
+        die("gh-stub: unsupported api endpoint '%s'" % endpoint)
+
+
+def do_pr():
+    if P["pr_sub"] == "create":
+        lock()
+        try:
+            prdir = os.path.join(STATE, "pr")
+            os.makedirs(prdir, exist_ok=True)
+            n = len(os.listdir(prdir)) + 1
+            repo = P["repo"] or "owner/repo"
+            url = "https://github.com/%s/pull/%d" % (repo, n)
+            obj = {
+                "repo": P["repo"], "title": P["title"], "body": P["body"],
+                "head": P["head"], "base": P["base"], "draft": P["draft"] == 1,
+                "url": url, "state": "OPEN", "mergedAt": None,
+            }
+            with open(os.path.join(prdir, "%04d.json" % n), "w", encoding="utf-8") as f:
+                f.write(json.dumps(obj))
+        finally:
+            unlock()
+        sys.stdout.write(url + "\n")
+    elif P["pr_sub"] == "view":
+        m = re.search(r"/pull/([0-9]+)", P["issue"])
+        prn = m.group(1) if m else ""
+        f = os.path.join(STATE, "pr", "%04d.json" % int(prn)) if prn else ""
+        if not f or not os.path.isfile(f):
+            die("gh-stub: no such pr %s" % P["issue"])
+        emit(json.loads(read_text(f)))
+    else:
+        die("gh-stub: unsupported invocation: pr %s" % P["pr_sub"])
+
+
+def do_label():
+    if P["label_sub"] == "list":
+        names = set()
+        for d in issue_dirs():
+            for l in lines_of(read_text(os.path.join(d, "labels"))):
+                if l:
+                    names.add(l)
+        reg = os.path.join(STATE, "labels")
+        if os.path.isfile(reg):
+            for l in lines_of(read_text(reg)):
+                if l:
+                    names.add(l)
+        emit([{"name": x} for x in sorted(names)])
+    elif P["label_sub"] == "create":
+        name = P["issue"]
+        lock()
+        try:
+            meta = os.path.join(STATE, "labels-meta")
+            os.makedirs(meta, exist_ok=True)
+            reg = os.path.join(STATE, "labels")
+            existing = lines_of(read_text(reg)) if os.path.isfile(reg) else []
+            if name not in existing:
+                with open(reg, "a", encoding="utf-8") as f:
+                    f.write(name + "\n")
+            with open(os.path.join(meta, name), "w", encoding="utf-8") as f:
+                f.write("color=%s\ndescription=%s\n" % (P["color"], P["desc"]))
+        finally:
+            unlock()
+    else:
+        die("gh-stub: unsupported invocation: label %s" % P["label_sub"])
+
+
+def do_repo():
+    slug_file = os.path.join(STATE, "repo", "nameWithOwner")
+    if P["repo_sub"] == "view":
+        if os.path.isfile(slug_file):
+            emit({"nameWithOwner": cmdsub(read_text(slug_file))})
+        else:
+            die("gh-stub: repo not found: %s" % P["issue"])
+    elif P["repo_sub"] == "create":
+        lock()
+        try:
+            os.makedirs(os.path.join(STATE, "repo"), exist_ok=True)
+            with open(slug_file, "w", encoding="utf-8") as f:
+                f.write(P["issue"] + "\n")
+        finally:
+            unlock()
+    else:
+        die("gh-stub: unsupported invocation: repo %s" % P["repo_sub"])
+
+
+DISPATCH = {
+    "list": do_list, "view": do_view, "edit": do_edit, "comment": do_comment,
+    "api": do_api, "pr": do_pr, "label": do_label, "repo": do_repo,
 }
-unlock() { rmdir "$STATE/.lock"; }
 
-# --- argument parsing (only the shapes kraken.py uses) -----------
-# `pr` is here only for the agent-behavior harness (tests/agent): the unleash
-# skill opens the delivery PR with `gh pr create`, which kraken.py never
-# calls, so the conformance suite never reaches this branch. We record the PR
-# as an artifact (pr/NNNN.json) instead of talking to GitHub, and capture -R's
-# repo (the conformance paths ignore it) so a PR is attributable to a repo.
-sub="" issue="" jsonf="" jqexpr="" add_label="" remove_label="" body="" endpoint="" limit=""
-repo="" pr_sub="" title="" head="" base="" draft=0 gql_query="" label_sub=""
-repo_sub="" method="" put_content="" put_message="" color="" desc=""
-label_filters=()
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -R)             repo="$2"; shift 2 ;;
-    issue)          sub="$2"; shift 2 ;;
-    repo)           sub="repo"; repo_sub="$2"; shift 2 ;;
-    pr)             sub="pr"; pr_sub="$2"; shift 2 ;;
-    label)          sub="label"; label_sub="$2"; shift 2 ;;
-    api)            sub="api"; endpoint="$2"; shift 2 ;;
-    --json)         jsonf="$2"; shift 2 ;;
-    --jq)           jqexpr="$2"; shift 2 ;;
-    --label)        label_filters+=("$2"); shift 2 ;;
-    --add-label)    add_label="$2"; shift 2 ;;
-    --remove-label) remove_label="$2"; shift 2 ;;
-    --title)        title="$2"; shift 2 ;;
-    --head)         head="$2"; shift 2 ;;
-    --base)         base="$2"; shift 2 ;;
-    --draft | -d)   draft=1; shift ;;
-    -X | --method)  method="$2"; shift 2 ;;
-    --color)        color="$2"; shift 2 ;;
-    --description)  desc="$2"; shift 2 ;;
-    --force)        shift ;;
-    --body)         body="$2"; shift 2 ;;
-    --body-file)    body="$(cat "$2")"; shift 2 ;;
-    --limit)        limit="$2"; shift 2 ;;
-    --state)        shift 2 ;;
-    -f | -F)        case "$2" in
-                      query=*)   gql_query="${2#query=}" ;;
-                      content=*) put_content="${2#content=}" ;;
-                      message=*) put_message="${2#message=}" ;;
-                    esac; shift 2 ;;
-    -*)             shift ;;
-    *)              issue="$1"; shift ;;
-  esac
-done
-
-comments_json() { # $1 = issue dir; emit [{body, createdAt}] in server order.
-  # A comment's createdAt comes from its .at sidecar when present, else it is
-  # derived from the issue's createdAt so ordering stays stable — the reaper
-  # anchors staleness to the newest worker machine line's createdAt.
-  local d="$1" f at bodies="" created
-  created="$(cat "$d/createdAt")"
-  for f in "$d"/comments/*.md; do
-    [ -f "$f" ] || continue
-    if [ -f "${f%.md}.at" ]; then
-      at="$(cat "${f%.md}.at")"
-    else
-      at="$created"
-    fi
-    bodies="${bodies}$(jq -Rs --arg at "$at" '{body: ., createdAt: $at}' < "$f")"
-  done
-  printf '%s' "$bodies" | jq -s .
-}
-
-issue_json() { # $1 = issue dir; emit {number,title,createdAt,updatedAt,labels:[{name}],comments}
-  # One jq per issue (not four): the list case builds a whole queue, so a
-  # tighter fork budget here is what keeps large-queue cases (tests/t/14)
-  # from dominating the suite. Files are read straight into jq via --rawfile.
-  # updatedAt is the newest comment createdAt (or the issue createdAt when no
-  # comment exists), so a list caller reading .updatedAt sees a plausible value.
-  local d="$1" comments
-  comments="$(comments_json "$d")"
-  jq -n \
-    --arg n "$(basename "$d")" \
-    --rawfile title "$d/title" \
-    --rawfile created "$d/createdAt" \
-    --argjson comments "$comments" \
-    --rawfile labels "$d/labels" \
-    '{
-       number: ($n | tonumber),
-       title: ($title | rtrimstr("\n")),
-       createdAt: ($created | rtrimstr("\n")),
-       updatedAt: ([$comments[].createdAt] + [($created | rtrimstr("\n"))] | max),
-       labels: ($labels | rtrimstr("\n") | split("\n") | map(select(. != "") | {name: .})),
-       comments: $comments
-     }'
-}
-
-# --- graphql: query-shape dispatch ------------------------------------------
-# kraken.py never uses gh's -F (typed) vs -f (string) distinction meaningfully
-# here — every value it needs (owner, repo, project, labels, cursor) is
-# embedded straight into the query text, one clause per line, so a per-line
-# grep -oE finds each token without a real GraphQL parser.
-
-blocked_by_nodes_json() { # $1 = issue dir; emit [{number,state}] UPPERCASE
-  local d="$1" items="" bn bstate
-  if [ -f "$d/blocked_by" ]; then
-    while IFS= read -r bn; do
-      [ -n "$bn" ] || continue
-      bstate="CLOSED"
-      [ -f "$STATE/issues/$bn/state" ] && bstate="$(cat "$STATE/issues/$bn/state" | tr '[:lower:]' '[:upper:]')"
-      items="${items}$(jq -n --argjson num "$bn" --arg state "$bstate" '{number:$num, state:$state}')"
-    done < "$d/blocked_by"
-  fi
-  printf '%s' "$items" | jq -s .
-}
-
-issue_node_json() { # $1 = issue dir; emit the GraphQL-shaped issue node
-  local d="$1"
-  jq -n \
-    --arg n "$(basename "$d")" \
-    --rawfile title "$d/title" \
-    --rawfile created "$d/createdAt" \
-    --rawfile labels "$d/labels" \
-    --arg body "$([ -f "$d/body" ] && cat "$d/body" || true)" \
-    --argjson blockedby "$(blocked_by_nodes_json "$d")" \
-    '{
-       number: ($n | tonumber),
-       title: ($title | rtrimstr("\n")),
-       createdAt: ($created | rtrimstr("\n")),
-       body: $body,
-       labels: {nodes: ($labels | rtrimstr("\n") | split("\n") | map(select(. != "") | {name: .}))},
-       blockedBy: {nodes: $blockedby}
-     }'
-}
-
-graphql_list_issues() { # $1 = query text; a paginated kraken-task listing page
-  local q="$1" name label_line labels=() first after items="" all count page has_next end_cursor
-  name="$(printf '%s\n' "$q" | grep -oE 'name: "[^"]*"' | head -1 | sed -E 's/^name: "//; s/"$//')"
-  label_line="$(printf '%s\n' "$q" | grep -oE 'labels: \[[^]]*\]' | head -1)"
-  while IFS= read -r l; do labels+=("$l"); done < <(printf '%s' "$label_line" | grep -oE '"[^"]*"' | tr -d '"')
-  first="$(printf '%s\n' "$q" | grep -oE 'first: [0-9]+' | head -1 | grep -oE '[0-9]+')"
-  after="$(printf '%s\n' "$q" | grep -oE 'after: "[^"]*"' | head -1 | sed -E 's/^after: "//; s/"$//')"
-  : "${name:?gh-stub: graphql listing query missing repository name}"
-
-  for d in "$STATE"/issues/*/; do
-    [ -d "$d" ] || continue
-    [ "$(cat "$d/state")" = "open" ] || continue
-    ok=1
-    for lf in ${labels[@]+"${labels[@]}"}; do
-      grep -qxF -- "$lf" "$d/labels" || { ok=0; break; }
-    done
-    [ "$ok" -eq 1 ] || continue
-    items="${items}$(issue_node_json "$d")"
-  done
-  all="$(printf '%s' "$items" | jq -s 'sort_by(.createdAt, .number)')"
-  if [ -n "$after" ]; then
-    all="$(printf '%s' "$all" | jq --argjson after "$after" '[.[] | select(.number > $after)]')"
-  fi
-  count="$(printf '%s' "$all" | jq 'length')"
-  page="$(printf '%s' "$all" | jq --argjson n "${first:-100}" '.[:$n]')"
-  has_next="false"
-  [ "$count" -gt "${first:-100}" ] && has_next="true"
-  end_cursor=""
-  [ "$(printf '%s' "$page" | jq 'length')" -gt 0 ] && end_cursor="$(printf '%s' "$page" | jq -r '.[-1].number')"
-  jq -n --argjson nodes "$page" --argjson hasNext "$has_next" --arg endCursor "$end_cursor" \
-    '{data:{repository:{issues:{pageInfo:{hasNextPage:$hasNext, endCursor:$endCursor}, nodes:$nodes}}}}'
-}
-
-graphql_issue_states() { # $1 = query text; batched `iN: issue(number: N) { state }` aliases
-  local q="$1" m alias num st fields=""
-  while IFS= read -r m; do
-    [ -n "$m" ] || continue
-    alias="$(printf '%s' "$m" | sed -E 's/^([a-zA-Z_][a-zA-Z0-9_]*): issue.*/\1/')"
-    num="$(printf '%s' "$m" | sed -E 's/.*issue\(number: ([0-9]+)\).*/\1/')"
-    st="CLOSED"
-    [ -f "$STATE/issues/$num/state" ] && st="$(cat "$STATE/issues/$num/state" | tr '[:lower:]' '[:upper:]')"
-    fields="${fields}$(jq -n --arg k "$alias" --arg st "$st" '{($k): {state:$st}}')"
-  done < <(printf '%s\n' "$q" | grep -oE '[a-zA-Z_][a-zA-Z0-9_]*: issue\(number: [0-9]+\)')
-  jq -n --argjson repo "$(printf '%s' "$fields" | jq -s 'add // {}')" '{data:{repository:$repo}}'
-}
-
-graphql_dispatch() { # $1 = query text
-  if printf '%s\n' "$1" | grep -q 'issues(states: OPEN'; then
-    graphql_list_issues "$1"
-  else
-    graphql_issue_states "$1"
-  fi
-}
-
-emit() { # $1 = JSON; apply --jq like gh does (raw strings, like jq -r)
-  # Strip CR: real gh (and Linux CI's jq) emit LF, but jq's Windows build writes
-  # CRLF, and a trailing \r poisons a consumer that reads a timestamp/number off
-  # a line (the reaper's `date -d "$anchor"`). Harmless on LF-only output.
-  { if [ -n "$jqexpr" ]; then
-    printf '%s' "$1" | jq -r "$jqexpr"
-  else
-    printf '%s\n' "$1"
-  fi ; } | tr -d '\r'
-}
-
-case "$sub" in
-  list)
-    items=""
-    for d in "$STATE"/issues/*/; do
-      [ -d "$d" ] || continue
-      [ "$(cat "$d/state")" = "open" ] || continue
-      ok=1
-      for lf in ${label_filters[@]+"${label_filters[@]}"}; do
-        grep -qxF -- "$lf" "$d/labels" || { ok=0; break; }
-      done
-      [ "$ok" -eq 1 ] || continue
-      items="${items}$(issue_json "$d")"
-    done
-    # Honor --limit like real gh: it page-fetches newest-first (created desc)
-    # and stops at the ceiling, so an over-limit queue silently loses its
-    # OLDEST tasks. Modeling that truncation is what gives the pagination
-    # conformance case (tests/t/14) its teeth; absent --limit means no cap.
-    all="$(printf '%s' "$items" | jq -s 'sort_by(.createdAt) | reverse')"
-    if [ -n "$limit" ]; then
-      all="$(printf '%s' "$all" | jq --argjson lim "$limit" '.[:$lim]')"
-    fi
-    emit "$all"
-    ;;
-
-  view)
-    d="$STATE/issues/$issue"
-    [ -d "$d" ] || { echo "gh-stub: no such issue $issue" >&2; exit 1; }
-    labels_src="$d/labels"
-    if [ "$jsonf" = "labels" ] && [ -n "${GH_STUB_BARRIER:-}" ]; then
-      mkdir -p "$STATE/.barrier"
-      : > "$STATE/.barrier/$$"
-      i=0
-      while [ "$(ls "$STATE/.barrier" | wc -l)" -lt "$GH_STUB_BARRIER" ]; do
-        sleep 0.05
-        i=$((i + 1))
-        # A stuck partner must not hang the suite. The ceiling is generous (~30s)
-        # so a cold-started worker — kraken.py's interpreter warm-up is slower
-        # than a bash script's, especially on a network/overlay filesystem — is
-        # never mistaken for a stuck one, which would break the race's pairing.
-        [ "$i" -gt 600 ] && break
-      done
-      # All racers have arrived. The barrier only guaranteed simultaneous
-      # ARRIVAL, not a simultaneous read: whoever's guard-gh returns first lets
-      # its worker add `in-progress` before a slower racer's read runs, and that
-      # racer would then wrongly see a held task and skip (exit 11) instead of
-      # racing the claim. So the first arriver snapshots the labels under the
-      # lock, and every racer reads that pre-race snapshot — so all guards see
-      # the identical clear state the race is meant to test, no matter how the
-      # worker interpreters are scheduled.
-      lock
-      [ -f "$STATE/.barrier/labels.snap" ] || cp "$d/labels" "$STATE/.barrier/labels.snap"
-      unlock
-      labels_src="$STATE/.barrier/labels.snap"
-    fi
-    case "$jsonf" in
-      labels)
-        emit "$(jq -n --argjson labels "$(jq -R '{name: .}' < "$labels_src" | jq -s .)" '{labels: $labels}')"
-        ;;
-      body)
-        emit "$(jq -n --arg body "$([ -f "$d/body" ] && cat "$d/body" || true)" '{body: $body}')"
-        ;;
-      state)
-        st="$(cat "$d/state" | tr '[:lower:]' '[:upper:]')"
-        emit "$(jq -n --arg state "$st" '{state: $state}')"
-        ;;
-      comments)
-        bodies=""
-        for f in "$d"/comments/*.md; do
-          [ -f "$f" ] || continue
-          bodies="${bodies}$(jq -Rs '{body: .}' < "$f")"
-        done
-        emit "$(jq -n --argjson c "$(printf '%s' "$bodies" | jq -s .)" '{comments: $c}')"
-        ;;
-      *)
-        echo "gh-stub: unsupported --json '$jsonf' for issue view" >&2; exit 1
-        ;;
-    esac
-    ;;
-
-  edit)
-    d="$STATE/issues/$issue"
-    [ -d "$d" ] || { echo "gh-stub: no such issue $issue" >&2; exit 1; }
-    lock
-    if [ -n "$add_label" ]; then
-      grep -qxF -- "$add_label" "$d/labels" || printf '%s\n' "$add_label" >> "$d/labels"
-    fi
-    if [ -n "$remove_label" ]; then
-      grep -vxF -- "$remove_label" "$d/labels" > "$d/labels.tmp" || true
-      mv "$d/labels.tmp" "$d/labels"
-    fi
-    unlock
-    ;;
-
-  comment)
-    d="$STATE/issues/$issue"
-    [ -d "$d" ] || { echo "gh-stub: no such issue $issue" >&2; exit 1; }
-    lock
-    n=$(( $(ls "$d/comments"/*.md 2>/dev/null | wc -l) + 1 ))
-    printf '%s\n' "$body" > "$d/comments/.tmp.$$"
-    mv "$d/comments/.tmp.$$" "$d/comments/$(printf '%04d' "$n").md"
-    unlock
-    ;;
-
-  api)
-    # The shapes the transitions need:
-    #   repos/OWNER/REPO/issues/N/dependencies/blocked_by -> [{number,state}]
-    #   repos/OWNER/REPO/issues/N/comments               -> [{body}]  (paginated
-    #     claim-window arbitration; --paginate is a no-op here — the whole thread
-    #     is returned in one array, in server order, which is all kraken.py's
-    #     line scan needs).
-    case "$endpoint" in
-      */issues/*/comments)
-        n="$(printf '%s' "$endpoint" | sed -n 's#.*/issues/\([0-9][0-9]*\)/comments#\1#p')"
-        d="$STATE/issues/$n"
-        [ -d "$d" ] || { echo "gh-stub: no such issue $n" >&2; exit 1; }
-        # [{body, createdAt}] in server order — comment_bodies' `--jq .[].body`
-        # still selects the bodies, while status' comment_records reads the
-        # createdAt the heartbeat-age anchor needs (from each .at sidecar, else
-        # the issue createdAt), so both paths share this one endpoint.
-        emit "$(comments_json "$d")"
-        ;;
-      */issues/*/dependencies/blocked_by)
-        n="$(printf '%s' "$endpoint" | sed -n 's#.*/issues/\([0-9][0-9]*\)/dependencies/blocked_by#\1#p')"
-        d="$STATE/issues/$n"
-        [ -d "$d" ] || { echo "gh-stub: no such issue $n" >&2; exit 1; }
-        items=""
-        if [ -f "$d/blocked_by" ]; then
-          while IFS= read -r bn; do
-            [ -n "$bn" ] || continue
-            bstate="closed"
-            [ -f "$STATE/issues/$bn/state" ] && bstate="$(cat "$STATE/issues/$bn/state")"
-            items="${items}$(jq -n --argjson num "$bn" --arg state "$bstate" '{number: $num, state: $state}')"
-          done < "$d/blocked_by"
-        fi
-        emit "$(printf '%s' "$items" | jq -s .)"
-        ;;
-      graphql)
-        emit "$(graphql_dispatch "$gql_query")"
-        ;;
-      */contents/*)
-        # The init contents API: GET returns {content:<base64>} of the stored
-        # file (used by kraken.py's `--jq .content`), a 404 (exit 1) when absent;
-        # PUT (-X PUT -f content=<base64>) creates the file. Files live under
-        # $STATE/contents/<path>, not namespaced by repo (the conformance paths
-        # use a single repo). This is what lets init be tested for create /
-        # skip-unchanged / flag-customized without a real GitHub.
-        cpath="${endpoint#*/contents/}"
-        cfile="$STATE/contents/$cpath"
-        if [ "$method" = "PUT" ]; then
-          lock
-          mkdir -p "$(dirname "$cfile")"
-          printf '%s' "$put_content" | tr -d '\n' | base64 -d > "$cfile"
-          unlock
-          jq -n --arg p "$cpath" '{content:{path:$p}}'
-        else
-          [ -f "$cfile" ] || { echo "gh-stub: 404 contents/$cpath" >&2; exit 1; }
-          emit "$(jq -n --arg c "$(base64 < "$cfile" | tr -d '\n')" '{content:$c}')"
-        fi
-        ;;
-      *)
-        echo "gh-stub: unsupported api endpoint '$endpoint'" >&2; exit 1
-        ;;
-    esac
-    ;;
-
-  pr)
-    # Only `pr create` — the delivery PR the unleash skill opens on the work
-    # repo. Record it as an artifact (never a real GitHub call) and print a
-    # plausible URL on stdout, exactly what real `gh pr create` emits, so the
-    # skill can quote it back in the result comment / pr: machine line.
-    case "$pr_sub" in
-      create)
-        lock
-        mkdir -p "$STATE/pr"
-        n=$(( $(ls "$STATE/pr" 2>/dev/null | wc -l) + 1 ))
-        url="https://github.com/${repo:-owner/repo}/pull/${n}"
-        jq -n \
-          --arg repo "$repo" --arg title "$title" --arg body "$body" \
-          --arg head "$head" --arg base "$base" \
-          --argjson draft "$draft" --arg url "$url" \
-          '{repo:$repo, title:$title, body:$body, head:$head, base:$base, draft:($draft==1), url:$url, state:"OPEN", mergedAt:null}' \
-          > "$STATE/pr/$(printf '%04d' "$n").json"
-        unlock
-        printf '%s\n' "$url"
-        ;;
-      view)
-        # `gh pr view <url> --json state,mergedAt` — the orphan heuristic's only
-        # PR read. The URL's /pull/<n> maps to pr/<n>.json (seeded by mk_pr, or
-        # written by `pr create` above). Emit the stored object; --json field
-        # selection is honored by kraken.py reading .state/.mergedAt off it.
-        prn="$(printf '%s' "$issue" | sed -n 's#.*/pull/\([0-9][0-9]*\).*#\1#p')"
-        f="$STATE/pr/$(printf '%04d' "$prn").json"
-        [ -f "$f" ] || { echo "gh-stub: no such pr $issue" >&2; exit 1; }
-        emit "$(cat "$f")"
-        ;;
-      *)
-        echo "gh-stub: unsupported invocation: pr $pr_sub" >&2
-        exit 1
-        ;;
-    esac
-    ;;
-
-  label)
-    # Only `label list --json name`: the launch recon's project enumeration.
-    # Registry = every label the launch recon may point at, whether or not it
-    # is currently on an open issue: the union of $STATE/labels (empty projects
-    # seeded by mk_label) and every label applied to any issue.
-    case "$label_sub" in
-      list)
-        { for d in "$STATE"/issues/*/; do [ -d "$d" ] && cat "$d/labels"; done
-          [ -f "$STATE/labels" ] && cat "$STATE/labels"; } \
-          | sed '/^$/d' | sort -u | jq -R '{name: .}' | jq -s . > "$STATE/.labels.$$"
-        emit "$(cat "$STATE/.labels.$$")"
-        rm -f "$STATE/.labels.$$"
-        ;;
-      create)
-        # `label create NAME --force --color C --description D`: init's canonical
-        # label upsert. --force makes it idempotent, so this always succeeds and
-        # re-canonicalizes. Register the name (dedup) and record color/description
-        # under labels-meta/<name> so a test can assert the canonical values.
-        lock
-        mkdir -p "$STATE/labels-meta"
-        { [ -f "$STATE/labels" ] && grep -qxF -- "$issue" "$STATE/labels"; } \
-          || printf '%s\n' "$issue" >> "$STATE/labels"
-        printf 'color=%s\ndescription=%s\n' "$color" "$desc" \
-          > "$STATE/labels-meta/$issue"
-        unlock
-        ;;
-      *)
-        echo "gh-stub: unsupported invocation: label $label_sub" >&2
-        exit 1
-        ;;
-    esac
-    ;;
-
-  repo)
-    # init's verify-or-create step. `repo view SLUG --json nameWithOwner` succeeds
-    # (prints the slug) iff the repo was seeded (mk_repo) or already created here;
-    # a missing repo exits 1 so kraken.py's gh_repo_exists reads False. `repo
-    # create SLUG --private` records the repo so a re-run's view then finds it.
-    case "$repo_sub" in
-      view)
-        if [ -f "$STATE/repo/nameWithOwner" ]; then
-          emit "$(jq -n --arg n "$(cat "$STATE/repo/nameWithOwner")" '{nameWithOwner:$n}')"
-        else
-          echo "gh-stub: repo not found: $issue" >&2; exit 1
-        fi
-        ;;
-      create)
-        lock
-        mkdir -p "$STATE/repo"
-        printf '%s\n' "$issue" > "$STATE/repo/nameWithOwner"
-        unlock
-        ;;
-      *)
-        echo "gh-stub: unsupported invocation: repo $repo_sub" >&2
-        exit 1
-        ;;
-    esac
-    ;;
-
-  *)
-    echo "gh-stub: unsupported invocation: issue $sub" >&2
-    exit 1
-    ;;
-esac
+handler = DISPATCH.get(P["sub"])
+if handler is None:
+    die("gh-stub: unsupported invocation: issue %s" % P["sub"])
+handler()
