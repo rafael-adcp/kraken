@@ -1662,6 +1662,49 @@ def cmd_validate(args):
     return EXIT_OK
 
 
+def is_identity_label(name):
+    """A label cleanup MUST preserve on a closed task: the task-type label
+    (kraken-task) and its project routing label (project:<name>). Everything else
+    — every state-machine label (in-progress / needs-decision / awaiting-merge)
+    and any unrelated label — is stripped, so a closed issue reads clean and
+    label-based queue filters never match dead state (PROTOCOL.md §10)."""
+    return name == "kraken-task" or name.startswith("project:")
+
+
+def cmd_cleanup(args):
+    """Strip every non-identity label off a CLOSED kraken-task issue except
+    kraken-task itself and its project:<name> label (cleanup-closed.yml). Closing
+    a task (the PR's `Closes` line, or a manual close) otherwise leaves whatever
+    state-machine label it carried — awaiting-merge, needs-decision, even a stale
+    in-progress — attached forever, so label-based filters keep matching dead
+    state. A no-op when nothing but identity labels remain. The close event gates
+    the workflow; this reads the issue's live labels and removes the rest, one at
+    a time (idempotent — each removal targets a label the read just returned).
+    Exit 0 on success, 20 on any gh/transport failure."""
+    repo, issue = args.repo, args.issue
+
+    labels = issue_label_names(repo, issue)
+    if labels is None:
+        print(f"cleanup: gh-failure stage=labels issue={issue}", file=sys.stderr)
+        return EXIT_TRANSPORT
+    if "kraken-task" not in labels:
+        print(f"cleanup: #{issue} is not a kraken-task issue — no-op")
+        return EXIT_OK
+
+    stripped = 0
+    for name in labels:
+        if is_identity_label(name):
+            continue
+        if not swap_labels(repo, issue, remove=name):
+            print(f"cleanup: gh-failure stage=remove issue={issue} label={name}",
+                  file=sys.stderr)
+            return EXIT_TRANSPORT
+        stripped += 1
+
+    print(f"cleanup: #{issue} done stripped={stripped}")
+    return EXIT_OK
+
+
 # is the read side of single-sourcing: the disclaimer format and the machine
 # marker / claim-window vocabulary live in the constants above, and every other
 # consumer derives from or is verified against them by executing this command
@@ -1778,6 +1821,15 @@ def build_parser():
     p.add_argument("repo")
     p.add_argument("issue")
     p.set_defaults(func=cmd_validate)
+
+    p = sub.add_parser(
+        "cleanup",
+        help="cleanup-closed.yml: strip every state/non-identity label off a "
+             "closed task, keeping only kraken-task and project:<name>",
+    )
+    p.add_argument("repo")
+    p.add_argument("issue")
+    p.set_defaults(func=cmd_cleanup)
 
     p = sub.add_parser(
         "status",
