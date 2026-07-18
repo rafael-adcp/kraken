@@ -135,8 +135,3 @@ coordination queue (`rafael-adcp/personal-tasks`, labels `kraken-task` +
 
 (**G1 — §5 L211, one-task-at-a-time** — now pinned by `tests/t/28`; see the §5
 row above.)
-  trailer format and its `kraken@<version>` stamp are now single-sourced in
-  `kraken.py` (`contract task-trailer`) and unit-tested, so the format itself no
-  longer drifts. What is still unpinned: that delivered commits actually carry
-  the `Co-Authored-By` and `Kraken-Task:` trailers — needs a git-integration
-  harness (a throwaway work repo) the conformance stub does not currently model.

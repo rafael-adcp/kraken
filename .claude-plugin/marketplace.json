@@ -8,7 +8,7 @@
     {
       "name": "kraken",
       "source": "./",
-      "description": "One head, many tentacles: a task queue built on GitHub Issues where named Claude Code workers claim tasks, execute them, validate against acceptance criteria, and record the evidence.",
+      "description": "One head, many tentacles: a task queue built on GitHub Issues where named agent workers (Claude Code, GitHub Copilot CLI, or any protocol-conforming tool) claim tasks, execute them, validate against acceptance criteria, and record the evidence.",
       "homepage": "https://github.com/rafael-adcp/kraken",
       "repository": "https://github.com/rafael-adcp/kraken",
       "license": "MIT",
@@ -19,7 +19,8 @@
         "autonomous-agents",
         "agent-orchestrator",
         "parallel-workers",
-        "claude-code"
+        "claude-code",
+        "github-copilot"
       ]
     }
   ]
