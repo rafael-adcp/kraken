@@ -34,23 +34,31 @@ for t in "$ROOT"/tests/t/*.sh; do
   fi
 done
 
-# Unit tests (every tests/unit/test_*.py) — kraken.py arbitration, machine-line
-# parsing, comment pagination past 100, and the workflow commands, all with a
-# mocked transport (no gh, no stub).
+# Unit tests — kraken.py arbitration, machine-line parsing, comment pagination
+# past 100, and the vendored workflow commands, all with a mocked transport (no
+# gh, no stub). Each tests/unit/test_*.py runs individually and its output is
+# STREAMED (not swallowed), so `make check` and the CI log both show the actual
+# `python3 tests/unit/<file>` invocation and its `Ran N tests` summary.
 if [ -d "$ROOT/tests/unit" ]; then
-  name="unit (tests/unit/test_*.py)"
-  # discover exits 0 even when it collects zero tests, which would silently pass
-  # this step if the pattern ever stops matching — guard against that false green
-  # by asserting unittest reported at least one test ("Ran N tests").
-  if out="$(cd "$ROOT" && python3 -m unittest discover -s tests/unit -p 'test_*.py' 2>&1)" \
-     && ! printf '%s\n' "$out" | grep -Eq '^Ran 0 tests'; then
-    printf 'ok    %s\n' "$name"
-    pass=$((pass + 1))
-  else
-    printf 'FAIL  %s\n' "$name"
-    printf '%s\n' "$out" | sed 's/^/      /'
+  shopt -s nullglob
+  units=("$ROOT"/tests/unit/test_*.py)
+  shopt -u nullglob
+  # A missing/renamed layout must not pass green with nothing run.
+  if [ "${#units[@]}" -eq 0 ]; then
+    printf 'FAIL  unit (tests/unit): no test_*.py collected\n'
     fail=$((fail + 1))
   fi
+  for u in "${units[@]}"; do
+    rel="tests/unit/$(basename "$u")"
+    printf '\n--- python3 %s ---\n' "$rel"
+    if (cd "$ROOT" && python3 "$u"); then
+      printf 'ok    %s\n' "$rel"
+      pass=$((pass + 1))
+    else
+      printf 'FAIL  %s\n' "$rel"
+      fail=$((fail + 1))
+    fi
+  done
 fi
 
 echo

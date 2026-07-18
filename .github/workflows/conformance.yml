@@ -20,3 +20,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run conformance suite
         run: bash tests/run-tests.sh
+
+  # Distinct, visible unit-tests check: runs each tests/unit/test_*.py directly
+  # (verbose), so the PR gets its own "unit" check and the log literally shows
+  # `python3 tests/unit/test_kraken.py` running with its per-test names + count.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run unit tests
+        run: |
+          set -e
+          shopt -s nullglob
+          files=(tests/unit/test_*.py)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no tests/unit/test_*.py found"; exit 1
+          fi
+          for f in "${files[@]}"; do
+            echo "== python3 $f =="
+            python3 "$f"
+          done
