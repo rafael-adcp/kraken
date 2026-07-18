@@ -47,8 +47,8 @@ check_label() {
 # the three held labels; escalate/deliver each swap in-progress for their target;
 # release only touches in-progress
 check_label "kraken-task"    "$SKILL" "$INIT" "$README" "$PROTOCOL" "$TEMPLATE" "$LISTER"
-check_label "in-progress"    "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$REAPER" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER"
-check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$REAPER" "$LISTER" "$CLAIM" "$ESCALATE"
+check_label "in-progress"    "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER"
+check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$ESCALATE"
 check_label "awaiting-merge" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$DELIVER"
 # common typo class: labels use hyphens, never underscores
 for bad in kraken_task in_progress needs_decision awaiting_merge; do
@@ -62,22 +62,19 @@ done
 # (its DISCLAIMER, MARKER_TYPES, RESET_TYPES constants, surfaced by
 # `kraken.py contract`). Instead of re-declaring those literals here and diffing
 # prose against prose, we EXECUTE the program and check the spec documents
-# everything it reads/emits, and that the requeue workflow's own filter accepts
-# what it emits. Structural, not byte-equality between files.
+# everything it reads/emits. Structural, not byte-equality between files. Since
+# the coordination workflows became thin execs of kraken.py (issue #37), there
+# is no second in-YAML parser/emitter left to cross-check — the stale-claim
+# marker and the human-vs-tentacle disclaimer filter now live in kraken.py and
+# are covered by its unit tests, so those execute-both checks collapse to the
+# vocabulary and docs-presence checks below.
 if command -v python3 >/dev/null 2>&1; then
   kcontract() { python3 "$KRAKEN" contract "$@"; }
 
-  # [1b] The reaper is the one non-kraken.py emitter left; its stale-claim reset
-  # must stay a structured protocol/3 marker.
-  echo "[1b] reaper stale-claim marker"
-  fail_before=$fail
-  grep -qF -- '"type":"stale-claim"' "$REAPER" \
-    || err "reaper missing the protocol/3 stale-claim marker"
-  [ "$fail" -eq "$fail_before" ] && note "reaper emits the structured stale-claim marker"
-
-  # [1b'] Every protocol/3 marker "type" kraken.py builds/arbitrates on is named
-  # in PROTOCOL.md's marker table.
-  echo "[1b'] marker type vocabulary (kraken.py vs PROTOCOL.md)"
+  # [1b] Every protocol/3 marker "type" kraken.py builds/arbitrates on is named
+  # in PROTOCOL.md's marker table (the stale-claim reset among them — kraken.py's
+  # `reap` is now its only emitter).
+  echo "[1b] marker type vocabulary (kraken.py vs PROTOCOL.md)"
   fail_before=$fail
   while read -r t; do
     [ -z "$t" ] && continue
@@ -85,32 +82,18 @@ if command -v python3 >/dev/null 2>&1; then
   done < <(kcontract marker-types)
   [ "$fail" -eq "$fail_before" ] && note "every marker type kraken.py emits is specified in PROTOCOL.md"
 
-  # [1c] Attribution disclaimer: verify the requeue workflow's human-vs-tentacle
-  # filter against kraken.py's emitter by EXECUTING both — emit a real disclaimer,
-  # then require the workflow's OWN grep pattern to accept it and reject a bare
-  # human comment. No second hand-maintained copy of the format anywhere.
-  echo "[1c] attribution disclaimer filter (requeue workflow vs kraken.py)"
+  # [1c] Attribution disclaimer: the human-vs-tentacle filter is now kraken.py's
+  # (requeue-check reads it off the DISCLAIMER constant), unit-tested there, so
+  # there is no in-YAML pattern left to cross-check. All that remains here is
+  # that the docs still quote the disclaimer illustratively.
+  echo "[1c] attribution disclaimer quoted in the docs"
   fail_before=$fail
-  emitted="$(kcontract disclaimer --worker lint-probe)"
-  # the single-quoted pattern the workflow feeds to `grep -q` on its disclaimer
-  # branch. LC_ALL=C so the astral-plane 🐙 (U+1F419) extracts bytewise.
-  wf_pat="$(LC_ALL=C grep -oE "grep -q '[^']*Kraken worker[^']*'" "$REQUEUE" | head -1 \
-             | sed -E "s/^grep -q '//; s/'$//")"
-  if [ -z "$wf_pat" ]; then
-    err "could not extract the disclaimer filter pattern from $REQUEUE"
-  else
-    printf '%s' "$emitted" | LC_ALL=C grep -q "$wf_pat" \
-      || err "requeue filter pattern does not accept the disclaimer kraken.py emits"
-    printf '%s' 'a bare human reply, option B' | LC_ALL=C grep -q "$wf_pat" \
-      && err "requeue filter pattern also matches a bare human comment (worker/human distinction broken)"
-  fi
-  # docs quote the disclaimer illustratively — presence, not cross-file equality.
   for f in "$PROTOCOL" "$SKILL"; do
     LC_ALL=C grep -qF -- '> 🐙 **Kraken worker' "$f" \
       || err "$f no longer quotes the attribution disclaimer illustratively"
   done
   [ "$fail" -eq "$fail_before" ] \
-    && note "requeue filter accepts kraken.py's disclaimer and rejects bare comments; docs quote it"
+    && note "docs quote the attribution disclaimer illustratively"
 
   # [1d] Claim-window resets: every reset type kraken.py treats as a window reset
   # is documented as a marker type in PROTOCOL.md — catches the dangerous drift

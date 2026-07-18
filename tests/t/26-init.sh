@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # init conformance (issue #30): the bootstrap kraken.py init mechanizes — verify
-# or create the coordination repo PRIVATE, install the five bundled assets via
+# or create the coordination repo PRIVATE, install the six bundled assets via
 # the contents API (create / skip-unchanged / flag-customized), and upsert the
 # canonical labels — proven against the gh stub with no LLM. Pins: fresh-repo
 # bootstrap, idempotent re-run (no repo create, no asset PUT), and the
@@ -10,10 +10,12 @@
 BUNDLE="$ROOT/skills/unleash"
 kp() { python3 "$SCRIPTS/kraken.py" "$@"; }
 
-# The five (bundled file, destination path) pairs init installs.
-ASSET_SRCS=(task-template.yml reclaim-stale.yml cleanup-closed.yml requeue-on-reply.yml validate-task.yml)
+# The six (bundled file, destination path) pairs init installs — including the
+# vendored kraken.py the coordination workflows exec (issue #37).
+ASSET_SRCS=(task-template.yml kraken.py reclaim-stale.yml cleanup-closed.yml requeue-on-reply.yml validate-task.yml)
 ASSET_DSTS=(
   .github/ISSUE_TEMPLATE/task.yml
+  .github/kraken.py
   .github/workflows/reclaim-stale.yml
   .github/workflows/cleanup-closed.yml
   .github/workflows/requeue-on-reply.yml

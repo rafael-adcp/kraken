@@ -372,15 +372,22 @@ class InitConstantsTests(unittest.TestCase):
                             f"asset {name} destination not under .github/")
             self.assertTrue(message, f"asset {name} has no commit message")
 
-    def test_the_five_documented_assets_are_installed(self):
+    def test_the_six_documented_assets_are_installed(self):
         dests = {dest for _, dest, _ in kraken.INIT_ASSETS}
         self.assertEqual(dests, {
             ".github/ISSUE_TEMPLATE/task.yml",
+            ".github/kraken.py",
             ".github/workflows/reclaim-stale.yml",
             ".github/workflows/cleanup-closed.yml",
             ".github/workflows/requeue-on-reply.yml",
             ".github/workflows/validate-task.yml",
         })
+
+    def test_kraken_py_is_vendored_as_an_asset(self):
+        # The transition program vendors a copy of itself so the coordination
+        # workflows exec one parser instead of four dialects (issue #37).
+        dests = {dest for _, dest, _ in kraken.INIT_ASSETS}
+        self.assertIn(".github/kraken.py", dests)
 
     def test_canonical_labels_are_six_hex_colors(self):
         for name, color, desc in kraken.CANONICAL_LABELS:

@@ -165,19 +165,21 @@ worker reuses that same skill with the harness deltas in [`AGENTS.md`](AGENTS.md
    <details>
    <summary>Not running the plugin? The same setup by hand</summary>
 
-   The five assets land at `.github/ISSUE_TEMPLATE/task.yml` and the four
-   `.github/workflows/` files (`reclaim-stale.yml`, `cleanup-closed.yml`,
-   `requeue-on-reply.yml`, `validate-task.yml`):
+   The six assets land at `.github/ISSUE_TEMPLATE/task.yml`, the vendored
+   transition program `.github/kraken.py` (which the coordination workflows
+   exec), and the four `.github/workflows/` files (`reclaim-stale.yml`,
+   `cleanup-closed.yml`, `requeue-on-reply.yml`, `validate-task.yml`):
 
    ```bash
    gh repo create OWNER/tasks --private --clone && cd tasks
    mkdir -p .github/ISSUE_TEMPLATE .github/workflows
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/task-template.yml -o .github/ISSUE_TEMPLATE/task.yml
+   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/kraken.py -o .github/kraken.py
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/reclaim-stale.yml -o .github/workflows/reclaim-stale.yml
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/cleanup-closed.yml -o .github/workflows/cleanup-closed.yml
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/requeue-on-reply.yml -o .github/workflows/requeue-on-reply.yml
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/validate-task.yml -o .github/workflows/validate-task.yml
-   git add -A && git commit -m "chore: kraken task template, reaper, cleanup, requeue, and validator" && git push
+   git add -A && git commit -m "chore: kraken task template, transition program, reaper, cleanup, requeue, and validator" && git push
 
    gh -R OWNER/tasks label create kraken-task
    gh -R OWNER/tasks label create in-progress
