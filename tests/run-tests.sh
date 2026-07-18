@@ -49,5 +49,5 @@ if [ -d "$ROOT/tests/unit" ]; then
 fi
 
 echo
-echo "conformance: $pass passed, $fail failed"
+echo "conformance: $pass passed, $fail failed ($((pass + fail)) total)"
 [ "$fail" -eq 0 ]
