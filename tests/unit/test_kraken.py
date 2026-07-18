@@ -298,6 +298,26 @@ class ContractCommandTests(unittest.TestCase):
         self.assertNotIn("requeue", kraken.MARKER_TYPES)
 
 
+class AgentAgnosticDisclaimerTests(unittest.TestCase):
+    """The disclaimer names no implementation, so every conforming worker — Claude
+    Code, GitHub Copilot, or any other agent sharing this kraken.py — emits the
+    identical line (PROTOCOL.md §4). This is what lets a second implementation drain
+    the same queue without forging or diverging the human-vs-tentacle discriminator."""
+
+    def test_disclaimer_names_no_agent(self):
+        line = kraken.disclaimer("env-1")
+        self.assertNotIn("Claude", line)
+        self.assertNotIn("Copilot", line)
+        self.assertIn("from a kraken tentacle, not a human.", line)
+
+    def test_disclaimer_keeps_the_machine_matched_blockquote(self):
+        # The requeue filter / lint match only up to the worker-name backtick;
+        # that prefix is the contract and must be exactly this shape.
+        self.assertTrue(
+            kraken.disclaimer("env-1").startswith(
+                "> \U0001f419 **Kraken worker `env-1`**"))
+
+
 class PluginVersionTests(unittest.TestCase):
     """plugin_version() sources the Kraken-Task trailer's kraken@<version> from
     the bundled manifest the release workflow bumps — read at runtime, so the

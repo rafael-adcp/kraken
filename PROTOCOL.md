@@ -197,16 +197,21 @@ so the disclaimer is what lets the timeline distinguish tentacle comments
 from human ones:
 
 ```
-> 🐙 **Kraken worker `<worker-name>`** — automated comment from a Claude Code tentacle, not a human.
+> 🐙 **Kraken worker `<worker-name>`** — automated comment from a kraken tentacle, not a human.
 ```
 
-(Non–Claude Code implementations substitute their own tool name; the
-blockquote + worker name shape is the contract.) The disclaimer sits *above*
-the prose and marker with a blank line between, or GitHub folds the body into
-the quote. The block above is **illustrative**: the Kraken reference
-implementation defines the format once as the `DISCLAIMER` constant in
-`skills/unleash/kraken.py` and every other occurrence derives from it —
-`kraken.py contract disclaimer` prints the authoritative line, and consumers
+The disclaimer is deliberately **agent-agnostic**: it names no implementation
+("a kraken tentacle", never "a Claude Code tentacle"), so every conforming worker
+— whatever agent drives it — emits the *identical* line and the timeline reads
+uniformly. This is what lets a second implementation drain the same queue without
+diverging the human-vs-tentacle discriminator. The machine-recognized part is the
+blockquote **up to the worker-name backtick** (`> 🐙 **Kraken worker \``): that
+shape is the contract, and it is all the `requeue-on-reply.yml` filter matches on.
+The disclaimer sits *above* the prose and marker with a blank line between, or
+GitHub folds the body into the quote. The block above is **illustrative**: the
+Kraken reference implementation defines the format once as the `DISCLAIMER`
+constant in `skills/unleash/kraken.py` and every other occurrence derives from it
+— `kraken.py contract disclaimer` prints the authoritative line, and consumers
 that must recognize a worker comment (the `requeue-on-reply.yml` filter) are
 verified against it by executing both rather than by copying the literal.
 
