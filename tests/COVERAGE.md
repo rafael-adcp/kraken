@@ -69,7 +69,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | L194 | A loser **MUST** back off removing nothing | ✅ pinned | `tests/t/04` (the claim race: loser exits 10, removes nothing); `tests/t/22` + `tests/unit` `ClaimNextIterationTests` (`claim-next` skips a lost/held candidate forward — never retries it — and two concurrent `claim-next` workers claim two different tasks). |
 | L201 | Claim markers before the window start **MUST** be ignored | ✅ pinned | `tests/t/05`; `tests/unit` `ArbitrationTests` (`test_released_resets_window`, `test_stale_claim_resets_window`, `test_needs_decision_resets_window`, `test_reset_after_claim_leaves_no_winner`, `test_delivered_is_a_review_bounce_reset`). |
 | L204 | A liveness signal **MUST NOT** reset the window | ✅ pinned | (same as §4 L147) `tests/t/08`, `tests/unit` `ArbitrationTests.test_heartbeat_does_not_reset`. |
-| L211 | A worker **MUST** work one task at a time; **MUST NOT** claim a second while holding a claim | 🕳 gap | `kraken.py claim` does not refuse a second claim while a `claim-<worker>.json` state file exists. State-file lifecycle is pinned (`tests/t/15`) but the one-at-a-time guard is not. Follow-up: rafael-adcp/personal-tasks#35 (gap **G1** below). |
+| L211 | A worker **MUST** work one task at a time; **MUST NOT** claim a second while holding a claim | ✅ pinned | `tests/t/28`: `kraken.py claim` refuses (exit 11, writing nothing — no label, no comment) a claim on a *different* issue while a `claim-<worker>.json` state file marks an open claim, and `claim-next` refuses on any open claim; re-claiming the *same* issue is permitted (the §5 network-failure caveat), and resolving the claim (deliver / escalate / release) clears the guard. State-file lifecycle: `tests/t/15`. |
 
 ## §6 Heartbeats and the reaper
 
@@ -121,17 +121,20 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 
 ## Open gaps (follow-up issues)
 
-Two clauses are mechanically pinnable but need a harness larger than this PR
-should introduce; each should be filed as its own task in the coordination
-queue (`rafael-adcp/personal-tasks`, labels `kraken-task` + `project:kraken`)
-and the follow-up number recorded here:
+One clause is mechanically pinnable but needs a harness larger than its
+follow-up should introduce; it should be filed as its own task in the
+coordination queue (`rafael-adcp/personal-tasks`, labels `kraken-task` +
+`project:kraken`) and the follow-up number recorded here:
 
-- **G1 — §5 L167, one-task-at-a-time** ([personal-tasks#35](https://github.com/rafael-adcp/personal-tasks/issues/35)). `kraken.py claim` should refuse (or
-  warn and exit non-zero) when a `claim-<worker>.json` state file already marks
-  an open claim. Needs a claim-guard test extending the `tests/t/15` state-file
-  fixtures. Mind the §5 network-failure caveat ("or while a claim of its own is
-  in an unknown state after a network failure — re-check first").
 - **G2 — §8 L229, commit attribution trailers** ([personal-tasks#36](https://github.com/rafael-adcp/personal-tasks/issues/36)). The `Kraken-Task:`
+  trailer format and its `kraken@<version>` stamp are now single-sourced in
+  `kraken.py` (`contract task-trailer`) and unit-tested, so the format itself no
+  longer drifts. What is still unpinned: that delivered commits actually carry
+  the `Co-Authored-By` and `Kraken-Task:` trailers — needs a git-integration
+  harness (a throwaway work repo) the conformance stub does not currently model.
+
+(**G1 — §5 L211, one-task-at-a-time** — now pinned by `tests/t/28`; see the §5
+row above.)
   trailer format and its `kraken@<version>` stamp are now single-sourced in
   `kraken.py` (`contract task-trailer`) and unit-tested, so the format itself no
   longer drifts. What is still unpinned: that delivered commits actually carry

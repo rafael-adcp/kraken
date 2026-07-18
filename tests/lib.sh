@@ -6,6 +6,10 @@ set -u
 SCRIPTS="$ROOT/skills/unleash"
 STATE="$(mktemp -d)"
 export GH_STUB_STATE="$STATE"
+# Isolate the claim state dir into this test's scratch so kraken.py never reads
+# or writes the real ~/.kraken — claims from one test must not leak a held-claim
+# state file into the next (the one-task-at-a-time guard, tests/t/28, reads it).
+export KRAKEN_STATE_DIR="$STATE/kraken"
 mkdir -p "$STATE/issues"
 : > "$STATE/log"
 trap 'rm -rf "$STATE"' EXIT
