@@ -166,11 +166,14 @@ def machine_event(line):
 # Every worker authenticates as the operator, so a worker comment reads exactly
 # like a human's without this blockquote. It heads every comment a transition
 # writes; a blank line must follow it or GitHub folds the body into the quote.
-# {worker} is the only placeholder. Docs (SKILL.md, PROTOCOL.md §4) quote it
-# illustratively and every other consumer (the requeue workflow filter, the test
-# helpers, the skill lint) derives from or is verified against this constant via
-# `kraken.py contract` — nothing re-declares the format by hand.
-DISCLAIMER = "> 🐙 **Kraken worker `{worker}`** — automated comment from a Claude Code tentacle, not a human."
+# {worker} is the only placeholder. The line is deliberately **agent-agnostic** —
+# it names no implementation ("a kraken tentacle", not "a Claude Code tentacle") —
+# so every conforming worker sharing this kraken.py, whatever agent drives it,
+# emits the identical disclaimer and the timeline reads uniformly. Docs (SKILL.md,
+# PROTOCOL.md §4) quote it illustratively and every other consumer (the requeue
+# workflow filter, the test helpers, the skill lint) derives from or is verified
+# against this constant via `kraken.py contract` — nothing re-declares it by hand.
+DISCLAIMER = "> 🐙 **Kraken worker `{worker}`** — automated comment from a kraken tentacle, not a human."
 
 
 def disclaimer(worker):

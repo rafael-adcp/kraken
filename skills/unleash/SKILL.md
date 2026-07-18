@@ -61,7 +61,7 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
   **by hand** (assumptions, free-form notes):
 
   ```
-  > 🐙 **Kraken worker `<worker-name>`** — automated comment from a Claude Code tentacle, not a human.
+  > 🐙 **Kraken worker `<worker-name>`** — automated comment from a kraken tentacle, not a human.
   ```
 
   Leave a blank line between it and the rest of the body, or GitHub folds the body
