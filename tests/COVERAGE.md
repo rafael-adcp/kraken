@@ -91,7 +91,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
 | §8 delivery | Post `delivered:` + `pr:`, then swap `in-progress`→`awaiting-merge`; comment first | ✅ pinned | `tests/t/10`; `tests/t/11` (gh failure ordering); review-bounce window reset: `tests/t/10` and `tests/unit` `test_delivered_is_a_review_bounce_reset`. |
-| L277 | Every delivered commit **MUST** carry the `Co-Authored-By` and `Kraken-Task:` trailers | 🏗 structural + 🕳 gap | The `Kraken-Task:` trailer's format and its `kraken@<version>` stamp are single-sourced in `kraken.py` (`contract task-trailer`, `task_trailer`/`plugin_version`) and unit-pinned (`tests/unit` `ContractCommandTests`, `PluginVersionTests`). What remains uncovered: that a worker actually applies both trailers to real git commits (the conformance stub has no git). Follow-up: rafael-adcp/personal-tasks#36 (gap **G2** below). |
+| L277 | Every delivered commit **MUST** carry the `Co-Authored-By` and `Kraken-Task:` trailers | ✅ pinned | The `Kraken-Task:` trailer's format and its `kraken@<version>` stamp are single-sourced in `kraken.py` (`contract task-trailer`, `task_trailer`/`plugin_version`) and unit-pinned (`tests/unit` `ContractCommandTests`, `PluginVersionTests`). That delivered commits actually carry **both** trailers on real git commits is pinned by `tests/t/29`: a throwaway work repo builds a multi-commit delivery whose `Kraken-Task:` line is taken verbatim from `kraken.py contract task-trailer`, then asserts every `base..HEAD` commit carries both trailers — well-formed, read through git's own `%(trailers:...)` parser — and that the check fails on a trailer-less and a malformed commit. |
 | L284 | The PR body **SHOULD** carry `Closes …` when the work repo is on GitHub | 🧠 agent | PR authorship is agent behavior — `tests/agent/`. |
 | L294 | Work **MUST NOT** be silently lost (fall back to the diff in a comment) | 🧠 agent | Fallback behavior is judgment — `tests/agent/`. |
 
@@ -121,17 +121,9 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 
 ## Open gaps (follow-up issues)
 
-One clause is mechanically pinnable but needs a harness larger than its
-follow-up should introduce; it should be filed as its own task in the
-coordination queue (`rafael-adcp/personal-tasks`, labels `kraken-task` +
-`project:kraken`) and the follow-up number recorded here:
+No open gaps: every mechanically pinnable clause is pinned.
 
-- **G2 — §8 L229, commit attribution trailers** ([personal-tasks#36](https://github.com/rafael-adcp/personal-tasks/issues/36)). The `Kraken-Task:`
-  trailer format and its `kraken@<version>` stamp are now single-sourced in
-  `kraken.py` (`contract task-trailer`) and unit-tested, so the format itself no
-  longer drifts. What is still unpinned: that delivered commits actually carry
-  the `Co-Authored-By` and `Kraken-Task:` trailers — needs a git-integration
-  harness (a throwaway work repo) the conformance stub does not currently model.
-
-(**G1 — §5 L211, one-task-at-a-time** — now pinned by `tests/t/28`; see the §5
-row above.)
+- (**G2 — §8 L229, commit attribution trailers** — now pinned by `tests/t/29`;
+  see the §8 L277 row above.)
+- (**G1 — §5 L211, one-task-at-a-time** — now pinned by `tests/t/28`; see the §5
+  row above.)
