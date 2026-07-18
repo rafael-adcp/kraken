@@ -394,6 +394,15 @@ so it is never truncated past 100 comments. It performs no writes; `--json`
 emits a stable schema for downstream tooling. Like `claim-next`, it is a
 reference-implementation ergonomic, not part of the wire contract.
 
+A worker that cannot arm an in-session watcher (a harness with no
+background-monitor primitive) MAY instead be driven by an **external drain
+loop** — a shell that runs one `--once` pass per tick, gated on the free
+`list-startable` check so an idle queue still costs nothing. Like `claim-next`
+and `status`, this is a worker-side ergonomic and not part of the wire
+contract; because the loop simply shells out to whatever agent CLI drives the
+drain, the choice of harness stays outside both the contract and the loop — no
+per-agent switch belongs in either.
+
 The **conformance suite** in [`tests/`](tests/) exercises the contract's
 invariants against a stateful GitHub stub — the claim guard, the claim race
 (exactly one winner), claim-window arbitration including the review-bounce

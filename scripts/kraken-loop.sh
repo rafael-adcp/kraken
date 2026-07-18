@@ -1,25 +1,15 @@
 #!/usr/bin/env bash
-# kraken-loop.sh — external "ambush" loop for a kraken tentacle, harness-agnostic.
+# kraken-loop.sh — external "ambush" loop for a GitHub Copilot CLI tentacle.
 #
-# The ONE shared drain loop for both supported agent CLIs — GitHub Copilot CLI
-# (`--agent copilot`, the default) and Claude Code (`--agent claude`) — so both
-# harnesses fall into the exact same flow when you don't want (or can't arm) an
-# in-session watcher. It runs OUTSIDE the model: one `--once`-style drain pass
-# per iteration, gated on a free queue check. A fresh agent process per pass also
-# gives each task the fresh-context isolation SKILL.md would otherwise get from a
-# per-task subagent.
-#
-# Why an external loop at all: Copilot CLI has no Monitor tool to arm kraken's
-# zero-token background watcher (SKILL.md step 4), so it MUST use this fallback.
-# Claude Code's preferred watcher is still the in-session `kraken.py watch`
-# Monitor path — but pointing Claude at this same script (via `--agent claude`)
-# is exactly what unifies the two harnesses onto one flow: a scheduled container,
-# a cron entry, or an operator who just wants both workers driven identically.
+# Copilot CLI has no Monitor tool to arm kraken's zero-token background watcher
+# (SKILL.md step 4), so this is the fallback SKILL.md documents: an
+# OUTSIDE-the-model shell loop that runs ONE `--once`-style drain pass per
+# iteration. A fresh `copilot` process per pass also gives each task the
+# fresh-context isolation SKILL.md would otherwise get from a per-task subagent.
 #
 # Cost control: each poll first runs the FREE, read-only `kraken.py
 # list-startable` (one `gh issue list`). The model is only invoked when the queue
-# actually has a startable task — an idle queue never spends a token, whichever
-# agent is selected.
+# actually has a startable task — an idle queue never spends a token.
 #
 # The operator owns cadence + stop: Ctrl-C ends it, and it never outlives this
 # terminal. This is the versioned home of the loop — run it straight from a
@@ -27,19 +17,14 @@
 #
 # Usage:
 #   scripts/kraken-loop.sh OWNER/tasks --worker-name <name> --project <name> \
-#                          [--agent copilot|claude] [--poll <seconds>] [--once]
+#                          [--poll <seconds>] [--once]
 #
-# Example (Copilot, the default):
+# Example:
 #   scripts/kraken-loop.sh rafael-adcp/personal-tasks \
 #     --worker-name kraken-copilot-env-1 --project kraken
 #
-# Example (Claude Code, same loop):
-#   scripts/kraken-loop.sh rafael-adcp/personal-tasks \
-#     --worker-name kraken-claude-env-1 --project kraken --agent claude
-#
 # Every flag also has an env-var fallback (KRAKEN_TASKS, KRAKEN_WORKER,
-# KRAKEN_PROJECT, KRAKEN_AGENT, KRAKEN_POLL_SECONDS); an explicit flag wins over
-# the env var.
+# KRAKEN_PROJECT, KRAKEN_POLL_SECONDS); an explicit flag wins over the env var.
 set -u
 
 # --- locate the repo -------------------------------------------------------
@@ -53,17 +38,15 @@ usage() {
   cat <<'EOF'
 Usage:
   scripts/kraken-loop.sh OWNER/tasks --worker-name <name> --project <name> \
-                         [--agent copilot|claude] [--poll <seconds>] [--once]
+                         [--poll <seconds>] [--once]
 
-The one shared "ambush" loop for a kraken tentacle — drives GitHub Copilot CLI
-or Claude Code (same loop, --agent selects which). Each poll runs the free,
-read-only `kraken.py list-startable` and only invokes the model when the queue
-has a startable task. Ctrl-C to stop; it never outlives this terminal.
+Continuous "ambush" loop for a GitHub Copilot CLI tentacle: each poll runs the
+free, read-only `kraken.py list-startable` and only invokes the model when the
+queue has a startable task. Ctrl-C to stop; it never outlives this terminal.
 
 Flags (each also has an env-var fallback; an explicit flag wins):
   --worker-name <name>   worker identity in every claim/comment   [KRAKEN_WORKER]
   --project <name>       only take project:<name> tasks           [KRAKEN_PROJECT]
-  --agent <name>         agent CLI: copilot (default) or claude     [KRAKEN_AGENT]
   --poll <seconds>       poll cadence (default 60)          [KRAKEN_POLL_SECONDS]
   --once                 drain once and exit (no polling loop)
   -h, --help             show this help
@@ -76,7 +59,6 @@ EOF
 TASKS="${KRAKEN_TASKS:-}"
 WORKER="${KRAKEN_WORKER:-}"
 PROJECT="${KRAKEN_PROJECT:-}"
-AGENT="${KRAKEN_AGENT:-copilot}"
 POLL="${KRAKEN_POLL_SECONDS:-60}"
 ONCE=0
 
@@ -85,7 +67,6 @@ while [ $# -gt 0 ]; do
     -h|--help)         usage; exit 0 ;;
     --worker-name)     WORKER="${2:-}"; shift 2 ;;
     --project)         PROJECT="${2:-}"; shift 2 ;;
-    --agent)           AGENT="${2:-}"; shift 2 ;;
     --poll)            POLL="${2:-}"; shift 2 ;;
     --once)            ONCE=1; shift ;;
     -*)                echo "kraken-loop: unknown flag: $1" >&2; usage >&2; exit 2 ;;
@@ -106,11 +87,6 @@ if [ -n "$missing" ]; then
   exit 2
 fi
 
-case "$AGENT" in
-  copilot|claude) ;;
-  *) echo "kraken-loop: unknown --agent '$AGENT' (expected copilot or claude)." >&2; usage >&2; exit 2 ;;
-esac
-
 case "$TASKS" in
   OWNER/*|*'<'*|*'>'*)
     echo "kraken-loop: '$TASKS' looks like the template placeholder — pass your real owner/repo." >&2
@@ -120,35 +96,20 @@ esac
 [ -f "$KRAKEN_PY" ] || { echo "kraken-loop: cannot find $KRAKEN_PY — run from a kraken checkout." >&2; exit 1; }
 cd "$REPO_DIR" || { echo "kraken-loop: cannot cd into $REPO_DIR" >&2; exit 1; }
 
-# --- per-agent invocation --------------------------------------------------
-# Both agents fall into the SAME loop; only how each is invoked differs:
-#   copilot — natural-language prompt that leans on the auto-loaded AGENTS.md,
-#             run fully autonomous (--allow-all-tools --no-ask-user).
-#   claude  — invokes the /kraken:unleash skill directly with --once, run fully
-#             autonomous (--dangerously-skip-permissions, Claude's headless
-#             equivalent of Copilot's allow-all/no-ask).
-COPILOT_PROMPT="Act as kraken worker $WORKER, draining project:$PROJECT from $TASKS.
+PROMPT="Act as kraken worker $WORKER, draining project:$PROJECT from $TASKS.
 Follow AGENTS.md, SKILL.md and PROTOCOL.md. Do ONE drain pass: claim at most one
 startable task, execute it end to end, deliver it as a draft PR, then stop."
-CLAUDE_PROMPT="/kraken:unleash $TASKS --worker-name $WORKER --project $PROJECT --once"
-
-run_agent() {
-  case "$AGENT" in
-    # Add -s/--silent (copilot) for terse logs. Keep --no-ask-user / headless
-    # mode: an external loop can't answer an interactive escalation anyway.
-    copilot) copilot -p "$COPILOT_PROMPT" --allow-all-tools --no-ask-user ;;
-    claude)  claude  -p "$CLAUDE_PROMPT" --dangerously-skip-permissions ;;
-  esac
-}
 
 drain_pass() {
   local ts startable
   ts="$(date -u +%H:%M:%SZ)"
   if startable="$(python3 "$KRAKEN_PY" list-startable "$TASKS" "$PROJECT" 2>/dev/null)" \
      && [ -n "$startable" ]; then
-    echo "kraken-loop: $ts startable task(s) — running a drain pass ($AGENT):"
+    echo "kraken-loop: $ts startable task(s) — running a drain pass:"
     printf '%s\n' "$startable" | sed 's/^/  /'
-    run_agent
+    # Add -s/--silent for terse logs. Drop --no-ask-user only if you want it to
+    # be able to escalate to YOU interactively (it can't in a headless loop).
+    copilot -p "$PROMPT" --allow-all-tools --no-ask-user
     return 0
   fi
   echo "kraken-loop: $ts queue idle — skipping model."
@@ -156,12 +117,12 @@ drain_pass() {
 }
 
 if [ "$ONCE" -eq 1 ]; then
-  echo "kraken-loop: single drain pass over $TASKS project:$PROJECT as $WORKER ($AGENT)."
+  echo "kraken-loop: single drain pass over $TASKS project:$PROJECT as $WORKER."
   drain_pass || true
   exit 0
 fi
 
-echo "kraken-loop: watching $TASKS project:$PROJECT as $WORKER via $AGENT (poll ${POLL}s). Ctrl-C to stop."
+echo "kraken-loop: watching $TASKS project:$PROJECT as $WORKER (poll ${POLL}s). Ctrl-C to stop."
 while true; do
   drain_pass || true
   sleep "$POLL"
