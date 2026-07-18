@@ -34,11 +34,16 @@ for t in "$ROOT"/tests/t/*.sh; do
   fi
 done
 
-# kraken.py unit tests — arbitration, machine-line parsing, comment pagination
-# past 100, all with a mocked transport (no gh, no stub).
+# Unit tests (every tests/unit/test_*.py) — kraken.py arbitration, machine-line
+# parsing, comment pagination past 100, and the workflow commands, all with a
+# mocked transport (no gh, no stub).
 if [ -d "$ROOT/tests/unit" ]; then
-  name="unit/test_kraken.py"
-  if out="$(cd "$ROOT" && python3 -m unittest discover -s tests/unit -p 'test_*.py' 2>&1)"; then
+  name="unit (tests/unit/test_*.py)"
+  # discover exits 0 even when it collects zero tests, which would silently pass
+  # this step if the pattern ever stops matching — guard against that false green
+  # by asserting unittest reported at least one test ("Ran N tests").
+  if out="$(cd "$ROOT" && python3 -m unittest discover -s tests/unit -p 'test_*.py' 2>&1)" \
+     && ! printf '%s\n' "$out" | grep -Eq '^Ran 0 tests'; then
     printf 'ok    %s\n' "$name"
     pass=$((pass + 1))
   else
