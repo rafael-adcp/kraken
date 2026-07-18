@@ -38,11 +38,14 @@ the first project is ready to queue against.
   only invokes it, renders its report, and prints the settings reminder. Same
   rule that produced `claim-next` and `status`.
 - **Assets ship in the plugin, never fetched from the network.**
-  `task-template.yml`, `reclaim-stale.yml`, `cleanup-closed.yml`,
+  `task-template.yml`, `kraken.py`, `reclaim-stale.yml`, `cleanup-closed.yml`,
   `requeue-on-reply.yml`, and `validate-task.yml` live in this plugin's
   `skills/unleash/` folder — `kraken.py init` reads them from there and commits
-  them via the GitHub contents API. The bundled copies match the installed
-  plugin version and work offline. Never `curl` from `raw.githubusercontent.com`.
+  them via the GitHub contents API. `kraken.py` itself is vendored as a sixth
+  asset (`.github/kraken.py`) so the coordination workflows exec one parser
+  instead of re-implementing the protocol parse in jq/grep/awk. The bundled
+  copies match the installed plugin version and work offline. Never `curl` from
+  `raw.githubusercontent.com`.
 - **Idempotent and non-destructive by construction.** `kraken.py init` creates
   the repo only if absent, creates each asset only if absent (a byte-identical
   file is skipped, a **differing** file is flagged as customized and never
@@ -52,9 +55,10 @@ the first project is ready to queue against.
 ## Protocol
 
 1. **Run the bootstrap.** `kraken.py init` does the whole deterministic gesture —
-   verify-or-create the repo **private**, install the five bundled assets
-   (`task.yml` template + the `reclaim-stale`, `cleanup-closed`,
-   `requeue-on-reply`, `validate-task` workflows) via the contents API, and
+   verify-or-create the repo **private**, install the six bundled assets
+   (`task.yml` template + the vendored `kraken.py` transition program + the
+   `reclaim-stale`, `cleanup-closed`, `requeue-on-reply`, `validate-task`
+   workflows) via the contents API, and
    upsert the canonical state-machine labels (`kraken-task`, `in-progress`,
    `needs-decision`, `awaiting-merge`) with their canonical colors and
    descriptions:
@@ -90,10 +94,10 @@ the first project is ready to queue against.
 
 - Invoking this skill is my authorization to, on the coordination repo only:
   (a) **create the repo private** if it does not exist;
-  (b) **commit the five bundled template files** (`task.yml`, `reclaim-stale.yml`,
-  `cleanup-closed.yml`, `requeue-on-reply.yml`, `validate-task.yml`) via the
-  contents API, creating them only — never overwriting a file that already
-  differs;
+  (b) **commit the six bundled template files** (`task.yml`, `kraken.py`,
+  `reclaim-stale.yml`, `cleanup-closed.yml`, `requeue-on-reply.yml`,
+  `validate-task.yml`) via the contents API, creating them only — never
+  overwriting a file that already differs;
   (c) **upsert the canonical labels** (and the `project:<name>` label when
   `--project` is passed).
 - It is NOT authorization to read or write issues, modify `settings.json`, delete

@@ -1,5 +1,5 @@
-# Auto-requeue for kraken. Copy to .github/workflows/requeue-on-reply.yml in the
-# coordination repo (see SKILL.md).
+# Auto-requeue for kraken. Installed by `init` into the coordination repo as
+# .github/workflows/requeue-on-reply.yml (see SKILL.md).
 #
 # The operator's requeue gesture collapses from "reply AND remove the label" to
 # just "reply". Forgetting the label used to strip a task forever: answer a
@@ -7,38 +7,30 @@
 # the queue. This workflow watches new comments and, when a genuine OPERATOR
 # comment lands on a held task, removes the holding label so a worker requeues it.
 #
-# The human-vs-tentacle discriminator is PROTOCOL.md §4's attribution disclaimer:
-# every worker-posted comment MUST open with the `> 🐙 **Kraken worker ...`
-# blockquote, so a comment WITHOUT it is (by the protocol's own contract) a human.
-# This workflow ships to the coordination repo (issues only, no kraken.py), so it
-# must carry its own copy of the disclaimer pattern below rather than import it.
-# That copy is not hand-kept in sync: kraken.py's DISCLAIMER constant is the
-# single source of truth, and scripts/lint-skills.sh verifies THIS pattern against
-# it by EXECUTING both (`kraken.py contract disclaimer` emits, this pattern must
-# accept it and reject a bare human comment) — a silent format drift fails the lint
-# instead of silently breaking this filter.
+# The logic is NOT reimplemented in YAML: it runs `kraken.py requeue-check`, the
+# same stdlib-only transition program the worker side uses, vendored into the
+# coordination repo by `init` (issue #37). The human-vs-tentacle discriminator
+# (PROTOCOL.md §4's attribution disclaimer), the two held-state rules, and the
+# structured requeue-directive check all live in kraken.py — derived from its own
+# DISCLAIMER / marker constants, not a second hand-kept copy — and are covered by
+# its unit tests, so this workflow shrinks to a checkout plus one exec.
 #
 # Two held states, handled asymmetrically (see the issue's Notes):
 #   - needs-decision: a human comment is almost always the answer, so ANY bare
-#     operator comment requeues. Worst case ("let me think") self-corrects: the
-#     worker re-escalates.
-#   - awaiting-merge: the task is already DELIVERED. Requeuing on a bare comment
-#     ("I'll merge tomorrow") would bounce a ready branch back to a worker. So it
-#     is left held UNLESS the comment carries an explicit, STRUCTURED requeue
-#     directive: a protocol/3 `<!-- kraken {"type":"requeue"} -->` marker, or a
-#     standalone `requeue`/`requeue:` line (nothing after it). A `requeue:`
-#     buried in a prose sentence no longer bounces delivered work by accident.
+#     operator comment requeues.
+#   - awaiting-merge: the task is already DELIVERED, so it is left held UNLESS the
+#     comment carries an explicit, STRUCTURED requeue directive — a protocol/3
+#     `<!-- kraken {"type":"requeue"} -->` marker, or a standalone
+#     `requeue`/`requeue:` line.
 #
-# No-ops, all proven by tests/t/18-requeue-on-reply.sh:
-#   - worker comments (disclaimer present),
-#   - comments on issues carrying no held label,
-#   - bot/self comments (the reaper's stale-claim: comment, or this workflow's
-#     own confirmation comment) — user.type == Bot.
+# No-ops (all proven by tests/t/18-requeue-on-reply.sh): worker comments
+# (disclaimer present), comments on issues carrying no held label, and bot/self
+# comments (the reaper's stale-claim comment, this workflow's own confirmation,
+# the validator) — user.type == Bot.
 #
-# Debounce is structural, not timed: removing the holding label is idempotent, so
-# a burst of N operator comments requeues once — the first drops the label and the
-# rest find nothing held. A per-issue concurrency group serializes the burst so
-# two racing runs don't both post a confirmation.
+# Debounce is structural: removing the holding label is idempotent, so a burst of
+# operator comments requeues once. A per-issue concurrency group serializes the
+# burst so two racing runs don't both post a confirmation.
 name: Requeue on operator reply
 on:
   issue_comment:
@@ -51,81 +43,25 @@ concurrency:
 jobs:
   requeue:
     # Coordination-repo task issues only; never PR comments; skip bots at the
-    # gate too (the run: block re-checks, so the stub test can prove the no-op).
+    # gate too (kraken.py re-checks, so the stub test can prove the no-op).
     if: >
       github.event.issue.pull_request == null &&
       github.event.comment.user.type != 'Bot' &&
       contains(github.event.issue.labels.*.name, 'kraken-task')
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       issues: write
     env:
       GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
       NUM: ${{ github.event.issue.number }}
-      # Pass the untrusted comment body through env, never inlined into the
-      # script — an inlined ${{ github.event.comment.body }} is a shell-injection
-      # vector (a comment could contain $(...) or backticks).
+      # The untrusted comment body and its author type reach kraken.py through
+      # the environment, never argv — the same shell-injection discipline the
+      # inlined script kept (a comment could contain $(...) or backticks).
       COMMENT_BODY: ${{ github.event.comment.body }}
       COMMENT_AUTHOR_TYPE: ${{ github.event.comment.user.type }}
     steps:
+      - name: Check out the vendored kraken.py
+        uses: actions/checkout@v4
       - name: Requeue the task if a genuine operator comment arrived
-        run: |
-          set -euo pipefail
-
-          # Self/bot comments (the reaper's stale-claim:, this workflow's own
-          # confirmation) never requeue — they carry no disclaimer but are not
-          # human. A human worker authenticating as the operator is caught by the
-          # disclaimer check below, not here (its token reads as a User).
-          if [ "${COMMENT_AUTHOR_TYPE:-}" = "Bot" ]; then
-            echo "requeue: bot/self comment on #$NUM — no-op"
-            exit 0
-          fi
-
-          # Worker comments MUST *open* with PROTOCOL.md §4's attribution
-          # blockquote, so only the FIRST line counts: head -n 1 before the grep
-          # stops an operator who quotes the disclaimer mid-reply (grep's ^ would
-          # otherwise match the start of ANY line) from being misread as a worker.
-          # LC_ALL=C matches the disclaimer's astral-plane 🐙 (U+1F419) bytewise —
-          # GNU grep 3.1 misses it under a UTF-8 locale (see tests/lib.sh) — and
-          # the pattern is name-agnostic (matches up to the worker-name backtick).
-          if printf '%s' "$COMMENT_BODY" | head -n 1 | LC_ALL=C grep -q '^> 🐙 \*\*Kraken worker `'; then
-            echo "requeue: worker comment (disclaimer present) on #$NUM — no-op"
-            exit 0
-          fi
-
-          labels="$(gh issue view "$NUM" -R "$REPO" --json labels --jq '.labels[].name')"
-
-          # needs-decision: any bare operator comment is the answer — requeue.
-          if printf '%s\n' "$labels" | grep -qx 'needs-decision'; then
-            gh issue edit "$NUM" -R "$REPO" --remove-label needs-decision
-            gh issue comment "$NUM" -R "$REPO" \
-              --body "requeue: operator reply detected — needs-decision removed, the task rejoins the queue with its full thread as context."
-            echo "requeue: needs-decision removed on #$NUM"
-            exit 0
-          fi
-
-          # awaiting-merge: DELIVERED work — never requeue on a bare comment. Only
-          # an EXPLICIT, STRUCTURED requeue directive bounces it back for rework,
-          # so a prose sentence that merely starts a line with "requeue:" (e.g.
-          # "requeue: is something I considered, but hold off") no longer bounces
-          # a ready branch by accident. The two accepted forms:
-          #   - a protocol/3 kraken requeue marker: <!-- kraken {"type":"requeue"} -->
-          #   - a standalone directive line whose only content is `requeue` /
-          #     `requeue:` (nothing after it) — a deliberate one-word gesture.
-          if printf '%s\n' "$labels" | grep -qx 'awaiting-merge'; then
-            if printf '%s' "$COMMENT_BODY" \
-                 | grep -qE '<!--[[:space:]]*kraken[[:space:]]+\{"type":"requeue"' \
-               || printf '%s' "$COMMENT_BODY" \
-                 | grep -qiE '^[[:space:]]*requeue:?[[:space:]]*$'; then
-              gh issue edit "$NUM" -R "$REPO" --remove-label awaiting-merge
-              gh issue comment "$NUM" -R "$REPO" \
-                --body "requeue: explicit requeue on a delivered task — awaiting-merge removed, the worker continues on the existing branch."
-              echo "requeue: awaiting-merge removed on #$NUM (explicit requeue directive)"
-              exit 0
-            fi
-            echo "requeue: awaiting-merge on #$NUM left held (no explicit requeue directive) — no-op"
-            exit 0
-          fi
-
-          echo "requeue: #$NUM carries no held label — no-op"
+        run: python3 .github/kraken.py requeue-check "$GITHUB_REPOSITORY" "$NUM"

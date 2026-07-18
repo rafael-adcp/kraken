@@ -1,35 +1,20 @@
 #!/usr/bin/env bash
-# Auto-requeue conformance: proves requeue-on-reply.yml's shipped run: block by
-# extracting and running it verbatim against the gh-stub (mirrors tests/t/17).
+# Auto-requeue conformance. requeue-on-reply.yml is now a thin exec of
+# `kraken.py requeue-check` (issue #37): the triggering comment's body and author
+# type arrive through the environment (COMMENT_BODY / COMMENT_AUTHOR_TYPE), the
+# held-issue number as an argument. This drives the shipped subcommand directly
+# against the gh-stub, preserving the scenarios the old extract-and-run test pinned.
 . "$ROOT/tests/lib.sh"
-
-WF="$ROOT/skills/unleash/requeue-on-reply.yml"
-
-extract_run() {
-  awk '
-    /^[[:space:]]*run: \|[[:space:]]*$/ {
-      match($0, /^[[:space:]]*/); key = RLENGTH; grab = 1; next
-    }
-    grab {
-      if ($0 ~ /[^[:space:]]/) {
-        match($0, /^[[:space:]]*/)
-        if (RLENGTH <= key) { grab = 0; next }
-      }
-      print
-    }
-  ' "$1" | sed 's/^          //' | tr -d '\r'
-}
-
-RUN="$STATE/requeue.sh"
-extract_run "$WF" > "$RUN"
-[ -s "$RUN" ] || fail "could not extract the run block from $WF"
 
 export REPO="OWNER/tasks"
 # Derive the worker disclaimer from kraken.py (the single source of truth) so this
 # test never re-declares the format the requeue filter keys on. See tests/lib.sh.
 DISCLAIMER="$(disclaimer_line w1)"
 
-run_case() { export NUM="$1" COMMENT_BODY="$2" COMMENT_AUTHOR_TYPE="$3"; bash "$RUN"; }
+run_case() {
+  COMMENT_BODY="$2" COMMENT_AUTHOR_TYPE="$3" \
+    python3 "$SCRIPTS/kraken.py" requeue-check "$REPO" "$1"
+}
 
 mk_issue 1 "decision answered by a bare reply" kraken-task "project:app" needs-decision
 run_case 1 "option B, go" "User"
@@ -91,6 +76,8 @@ assert_rc $? 0 "#6c run"
 has_label 61 awaiting-merge || fail "#6c a prose 'requeue:' sentence wrongly bounced delivered work"
 assert_eq "$(comment_count 61)" "0" "#6c got a comment it should not have"
 
+# #7 — debounce: a second bare comment on the now-requeued #1 finds no held label
+# and neither requeues nor comments again.
 run_case 1 "and one more thing" "User"
 assert_rc $? 0 "#7 run"
 assert_eq "$(comment_count 1)" "1" "#7 a second comment requeued/commented again (no debounce)"

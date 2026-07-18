@@ -78,8 +78,9 @@ PLUGIN_MANIFEST = os.path.join(
 PLUGIN_VERSION_UNKNOWN = "unknown"
 
 # This module's own folder — where the bundled assets `init` installs
-# (task-template.yml and the four coordination workflows) ship, next to this
-# file, exactly as the unleash skill resolves its bundled kraken.py.
+# (task-template.yml, this vendored kraken.py, and the four coordination
+# workflows) ship, next to this file, exactly as the unleash skill resolves its
+# bundled kraken.py.
 SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -447,6 +448,45 @@ def swap_labels(repo, issue, remove=None, add=None):
         args += ["--add-label", add]
     rc, _ = run_gh(args)
     return rc == 0
+
+
+def issue_label_names(repo, issue):
+    """The label names currently on an issue, live. Returns a list, or None on
+    transport failure — the coordination workflows read labels off the live
+    issue (a labeled/edited event may have just changed them)."""
+    obj = gh_json(["-R", repo, "issue", "view", str(issue), "--json", "labels"])
+    if obj is None:
+        return None
+    return [lbl.get("name", "") for lbl in obj.get("labels", [])]
+
+
+def issue_body(repo, issue):
+    """The issue's body text, live. Returns a string ("" when the body is empty
+    or null), or None on transport failure."""
+    obj = gh_json(["-R", repo, "issue", "view", str(issue), "--json", "body"])
+    if obj is None:
+        return None
+    return obj.get("body") or ""
+
+
+def open_issue_numbers(repo, label):
+    """Every OPEN issue number carrying `label`, as a list of ints (empty when
+    none), or None on transport failure. The reaper's few in-progress issues."""
+    rc, out = run_gh([
+        "-R", repo, "issue", "list", "--label", label, "--state", "open",
+        "--json", "number", "--jq", ".[].number",
+    ])
+    if rc != 0:
+        return None
+    nums = []
+    for line in out.split("\n"):
+        line = line.strip()
+        if line:
+            try:
+                nums.append(int(line))
+            except ValueError:
+                pass
+    return nums
 
 
 # --- subcommand: list-startable ---------------------------------------------
@@ -1147,6 +1187,8 @@ def cmd_status(args):
 INIT_ASSETS = (
     ("task-template.yml", ".github/ISSUE_TEMPLATE/task.yml",
      "chore: add kraken task template"),
+    ("kraken.py", ".github/kraken.py",
+     "chore: add kraken transition program"),
     ("reclaim-stale.yml", ".github/workflows/reclaim-stale.yml",
      "chore: add kraken reaper workflow"),
     ("cleanup-closed.yml", ".github/workflows/cleanup-closed.yml",
@@ -1305,6 +1347,321 @@ def render_init(report):
 
 
 
+# --- coordination-repo workflow subcommands ----------------------------------
+# The three logic-bearing coordination workflows (reclaim-stale, requeue-on-reply,
+# validate-task) used to re-implement the protocol parse in a weaker language
+# each — jq-regex, grep-ERE, awk. Vendored into the coordination repo (init
+# installs this file as a sixth asset), kraken.py runs their logic directly, so
+# there is ONE parser, in ONE language, sharing the same marker decoder,
+# disclaimer, and label vocabulary the worker side already uses — and gaining the
+# same unit tests. Each workflow shrinks to a checkout + a single exec of the
+# matching subcommand below.
+
+# The reaper's default staleness threshold, in hours. An in-progress issue whose
+# worker's last liveness marker (claim/heartbeat) is older than this — or that
+# carries no liveness marker at all — is reclaimed to needs-decision. The
+# workflow passes it through the MAX_HOURS env var (kept for continuity).
+REAP_DEFAULT_MAX_HOURS = 6
+
+
+def stale_claim_body(reason):
+    """The reaper's reclaim comment: human prose plus the protocol/3 stale-claim
+    marker (a reset event — the most recent one ends the claim window so a fresh
+    worker can re-claim). It carries NO attribution disclaimer: the reaper is not
+    a worker but the coordination repo's own automation, authored server-side by
+    the Actions bot (user.type == Bot), which is exactly how requeue-on-reply's
+    Bot gate tells it apart from an operator comment."""
+    marker = make_marker({"type": "stale-claim", "reason": reason})
+    prose = (
+        f"The worker has gone silent ({reason}) and likely died. To requeue, "
+        "remove the needs-decision label; or investigate first."
+    )
+    return f"{prose}\n\n{marker}"
+
+
+def cmd_reap(args):
+    """Reclaim stale claims (reclaim-stale.yml). For every OPEN in-progress
+    issue, anchor staleness to the worker's newest liveness marker
+    (claim/heartbeat) — NOT the issue's updatedAt, so an operator poking a dead
+    worker's issue never resets the clock — and when that anchor is older than
+    MAX_HOURS (or absent entirely: infinitely stale), swap in-progress for
+    needs-decision and post the stale-claim comment for the operator to triage.
+    Exit 0 on success, 20 on any gh/transport failure."""
+    repo = args.repo
+    max_hours = args.max_hours
+    if max_hours is None:
+        try:
+            max_hours = int(os.environ.get("MAX_HOURS", REAP_DEFAULT_MAX_HOURS))
+        except ValueError:
+            max_hours = REAP_DEFAULT_MAX_HOURS
+    now = time.time()
+
+    numbers = open_issue_numbers(repo, "in-progress")
+    if numbers is None:
+        print("reap: gh-failure stage=list", file=sys.stderr)
+        return EXIT_TRANSPORT
+
+    reclaimed = 0
+    for num in numbers:
+        # The whole comment history, paginated past 100 — the newest liveness
+        # marker can sit past the first page on a long-lived task, and a capped
+        # read would make a live, heartbeating worker look silent (see
+        # comment_records / comment_bodies).
+        records = comment_records(repo, num)
+        if records is None:
+            print(f"reap: gh-failure stage=comments issue={num}", file=sys.stderr)
+            return EXIT_TRANSPORT
+
+        anchor = heartbeat_anchor(records)
+        if anchor is None:
+            reason = "no worker heartbeat on record"  # infinitely stale
+        else:
+            anchor_epoch = parse_iso(anchor)
+            if anchor_epoch is None:
+                reason = "no worker heartbeat on record"
+            else:
+                age_hours = int((now - anchor_epoch) // 3600)
+                if age_hours < max_hours:
+                    continue
+                reason = f"no worker heartbeat for {age_hours}h"
+
+        if not swap_labels(repo, num, remove="in-progress", add="needs-decision"):
+            print(f"reap: gh-failure stage=labels issue={num}", file=sys.stderr)
+            return EXIT_TRANSPORT
+        if not post_comment(repo, num, stale_claim_body(reason)):
+            print(f"reap: gh-failure stage=comment issue={num}", file=sys.stderr)
+            return EXIT_TRANSPORT
+        print(f"reap: reclaimed issue={num} ({reason})")
+        reclaimed += 1
+
+    print(f"reap: done in-progress={len(numbers)} reclaimed={reclaimed}")
+    return EXIT_OK
+
+
+def is_worker_comment(body):
+    """Whether a comment was posted by a worker, by PROTOCOL.md §4's contract:
+    every worker comment MUST *open* with the attribution disclaimer blockquote,
+    so a comment whose FIRST line does not is (by the protocol's own definition)
+    a human's. The match is derived from the DISCLAIMER constant — the prefix up
+    to the worker-name backtick, so it is name-agnostic and never a second
+    hand-kept copy of the format. Only the first line counts: an operator who
+    quotes the disclaimer mid-reply is still a human."""
+    prefix = DISCLAIMER.split("{worker}")[0]  # "> 🐙 **Kraken worker `"
+    first_line = body.split("\n", 1)[0].rstrip("\r")
+    return first_line.startswith(prefix)
+
+
+def has_requeue_directive(body):
+    """Whether a comment carries an EXPLICIT, STRUCTURED requeue directive — the
+    only thing that bounces a DELIVERED (awaiting-merge) task back for rework, so
+    a prose sentence merely starting a line with "requeue:" no longer bounces a
+    ready branch by accident. Two accepted forms: a protocol/3
+    `<!-- kraken {"type":"requeue"} -->` marker, or a standalone directive line
+    whose only content is `requeue`/`requeue:` (case-insensitive)."""
+    lines = body.split("\n")
+    for raw in lines:
+        marker = parse_marker(raw)
+        if marker and marker.get("type") == "requeue":
+            return True
+    for raw in lines:
+        if re.match(r"^\s*requeue:?\s*$", raw, re.IGNORECASE):
+            return True
+    return False
+
+
+def cmd_requeue_check(args):
+    """Requeue a held task when a genuine OPERATOR comment arrives
+    (requeue-on-reply.yml). The triggering comment's body and author type come
+    through the environment (COMMENT_BODY / COMMENT_AUTHOR_TYPE), never argv —
+    the same untrusted-input discipline the workflow kept, so a comment carrying
+    $(...) or backticks is only ever data. No-ops (never requeue): bot/self
+    comments, worker comments (disclaimer present), and comments on an issue
+    carrying no held label. needs-decision requeues on ANY bare operator comment;
+    awaiting-merge (delivered) only on an explicit requeue directive. Exit 0
+    always on a clean run, 20 on gh/transport failure."""
+    repo, issue = args.repo, args.issue
+    body = os.environ.get("COMMENT_BODY", "")
+    author_type = os.environ.get("COMMENT_AUTHOR_TYPE", "")
+
+    # Self/bot comments (the reaper's stale-claim:, this workflow's own
+    # confirmation, the validator) never requeue — they carry no disclaimer but
+    # are not human.
+    if author_type == "Bot":
+        print(f"requeue: bot/self comment on #{issue} — no-op")
+        return EXIT_OK
+
+    if is_worker_comment(body):
+        print(f"requeue: worker comment (disclaimer present) on #{issue} — no-op")
+        return EXIT_OK
+
+    labels = issue_label_names(repo, issue)
+    if labels is None:
+        print(f"requeue: gh-failure stage=labels issue={issue}", file=sys.stderr)
+        return EXIT_TRANSPORT
+
+    if "needs-decision" in labels:
+        if not swap_labels(repo, issue, remove="needs-decision"):
+            print(f"requeue: gh-failure stage=label issue={issue}", file=sys.stderr)
+            return EXIT_TRANSPORT
+        if not post_comment(repo, issue,
+                            "requeue: operator reply detected — needs-decision "
+                            "removed, the task rejoins the queue with its full "
+                            "thread as context."):
+            print(f"requeue: gh-failure stage=comment issue={issue}", file=sys.stderr)
+            return EXIT_TRANSPORT
+        print(f"requeue: needs-decision removed on #{issue}")
+        return EXIT_OK
+
+    if "awaiting-merge" in labels:
+        if has_requeue_directive(body):
+            if not swap_labels(repo, issue, remove="awaiting-merge"):
+                print(f"requeue: gh-failure stage=label issue={issue}", file=sys.stderr)
+                return EXIT_TRANSPORT
+            if not post_comment(repo, issue,
+                                "requeue: explicit requeue on a delivered task — "
+                                "awaiting-merge removed, the worker continues on "
+                                "the existing branch."):
+                print(f"requeue: gh-failure stage=comment issue={issue}", file=sys.stderr)
+                return EXIT_TRANSPORT
+            print(f"requeue: awaiting-merge removed on #{issue} (explicit requeue directive)")
+            return EXIT_OK
+        print(f"requeue: awaiting-merge on #{issue} left held (no explicit requeue directive) — no-op")
+        return EXIT_OK
+
+    print(f"requeue: #{issue} carries no held label — no-op")
+    return EXIT_OK
+
+
+# The issue-form headings the bundled task-template produces, and the field
+# GitHub renders for a blank issue-form field. Section detection keys on these.
+VALIDATION_MARKER = {"type": "validation"}
+NO_RESPONSE_PLACEHOLDER = "_No response_"
+
+# The actionable items the validator lists, one per missing requirement. Single
+# copy so the message stays consistent between the workflow and its tests.
+VALIDATE_PROJECT_MISSING = (
+    "- Add a `project:<name>` label. Workers are scoped to one project and never "
+    "see a task without it, so an unlabeled task sits invisible in the queue forever."
+)
+VALIDATE_GOAL_MISSING = (
+    "- Fill in the **Goal** section (the `### Goal` heading). Describe the desired "
+    "end state as an outcome — it is what the worker plans toward."
+)
+VALIDATE_ACCEPTANCE_MISSING = (
+    "- Fill in the **Acceptance** section (the `### Acceptance` heading). Give "
+    "executable, observable proof the Goal was met — a worker must run it for real "
+    "before delivering."
+)
+
+
+def section_body(body, heading):
+    """The trimmed content under `### HEADING` up to the next `### ` heading (or
+    EOF). A hand-written issue lacking the heading yields nothing; an issue-form
+    field left blank renders as the literal `_No response_`. Mirrors the awk the
+    validate-task workflow used to carry."""
+    grab = False
+    out = []
+    target = "### " + heading
+    for raw in body.split("\n"):
+        line = raw.rstrip("\r")
+        if line == target:
+            grab = True
+            continue
+        if grab and line.startswith("### "):
+            grab = False
+        if grab:
+            out.append(line)
+    return "\n".join(out)
+
+
+def is_empty_section(content):
+    """True when a section's content is blank or only the issue-form
+    `_No response_` placeholder — each line trimmed, blank lines dropped."""
+    nonblank = [ln.strip() for ln in content.split("\n") if ln.strip() != ""]
+    joined = "\n".join(nonblank)
+    return joined == "" or joined == NO_RESPONSE_PLACEHOLDER
+
+
+def validation_body(missing):
+    """The one actionable comment the validator posts, tagged with the protocol/3
+    validation marker so the debounce can find its own prior comment. It informs
+    only — never blocks, closes, or relabels the task."""
+    return "\n\n".join([
+        "> 🐙 **Kraken task validator** — this task isn't ready for a worker to pick up yet.",
+        "Please fix the following so it can be claimed (this gate only informs; "
+        "it never holds, closes, or relabels your task):\n" + "\n".join(missing),
+        "Once fixed, this check clears itself — no action needed here.",
+        make_marker(VALIDATION_MARKER),
+    ])
+
+
+def latest_validation_comment(records):
+    """The body of the newest prior validation comment (carrying the validation
+    marker) in the thread, or None when none exists — the debounce anchor."""
+    latest = None
+    for rec in records:  # server order: keep the newest match
+        body = rec.get("body") or ""
+        if any((parse_marker(l) or {}).get("type") == "validation"
+               for l in body.split("\n")):
+            latest = body
+    return latest
+
+
+def cmd_validate(args):
+    """Flag a queue entry missing its project label, Goal, or Acceptance
+    (validate-task.yml). Reads the issue's live labels and body, and on any
+    missing requirement posts ONE actionable comment naming exactly what to fix;
+    a compliant task gets none (no noise on the happy path, and the same exit
+    once the operator fixes what was flagged). Debounced: a re-run whose missing
+    set is unchanged posts no duplicate. Informs only — never holds, closes, or
+    relabels. Exit 0 on a clean run, 20 on gh/transport failure."""
+    repo, issue = args.repo, args.issue
+
+    labels = issue_label_names(repo, issue)
+    if labels is None:
+        print(f"validate: gh-failure stage=labels issue={issue}", file=sys.stderr)
+        return EXIT_TRANSPORT
+    if "kraken-task" not in labels:
+        print(f"validate: #{issue} is not a kraken-task issue — no-op")
+        return EXIT_OK
+
+    body = issue_body(repo, issue)
+    if body is None:
+        print(f"validate: gh-failure stage=body issue={issue}", file=sys.stderr)
+        return EXIT_TRANSPORT
+
+    missing = []
+    if not any(lbl.startswith("project:") for lbl in labels):
+        missing.append(VALIDATE_PROJECT_MISSING)
+    if is_empty_section(section_body(body, "Goal")):
+        missing.append(VALIDATE_GOAL_MISSING)
+    if is_empty_section(section_body(body, "Acceptance")):
+        missing.append(VALIDATE_ACCEPTANCE_MISSING)
+
+    if not missing:
+        print(f"validate: #{issue} is compliant — no-op")
+        return EXIT_OK
+
+    body_to_post = validation_body(missing)
+
+    records = comment_records(repo, issue)
+    if records is None:
+        print(f"validate: gh-failure stage=comments issue={issue}", file=sys.stderr)
+        return EXIT_TRANSPORT
+    prior = latest_validation_comment(records)
+    # rstrip: a re-read body may pick up a trailing newline the transport adds;
+    # our own posted body never carries one, so normalizing both is exact.
+    if prior is not None and prior.rstrip("\n") == body_to_post.rstrip("\n"):
+        print(f"validate: #{issue} already carries an identical validation comment — no-op")
+        return EXIT_OK
+
+    if not post_comment(repo, issue, body_to_post):
+        print(f"validate: gh-failure stage=comment issue={issue}", file=sys.stderr)
+        return EXIT_TRANSPORT
+    print(f"validate: #{issue} flagged (missing: project/Goal/Acceptance as listed)")
+    return EXIT_OK
+
+
 # is the read side of single-sourcing: the disclaimer format and the machine
 # marker / claim-window vocabulary live in the constants above, and every other
 # consumer derives from or is verified against them by executing this command
@@ -1394,6 +1751,33 @@ def build_parser():
     p.add_argument("repo")
     p.add_argument("project")
     p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser(
+        "reap",
+        help="reclaim-stale.yml: move silent in-progress issues to needs-decision",
+    )
+    p.add_argument("repo")
+    p.add_argument("--max-hours", type=int, default=None,
+                   help="staleness threshold in hours (default: MAX_HOURS env, else 6)")
+    p.set_defaults(func=cmd_reap)
+
+    p = sub.add_parser(
+        "requeue-check",
+        help="requeue-on-reply.yml: requeue a held task on a genuine operator "
+             "reply (reads COMMENT_BODY / COMMENT_AUTHOR_TYPE from the env)",
+    )
+    p.add_argument("repo")
+    p.add_argument("issue")
+    p.set_defaults(func=cmd_requeue_check)
+
+    p = sub.add_parser(
+        "validate",
+        help="validate-task.yml: flag a task missing its project label, Goal, "
+             "or Acceptance (debounced; informs only)",
+    )
+    p.add_argument("repo")
+    p.add_argument("issue")
+    p.set_defaults(func=cmd_validate)
 
     p = sub.add_parser(
         "status",
