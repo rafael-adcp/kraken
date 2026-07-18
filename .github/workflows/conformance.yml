@@ -20,7 +20,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run the test suite (conformance + unit)
-        # Streams each tests/{conformance,unit}/test_*.py invocation and its
-        # `Ran N tests` summary, so the PR log literally shows every Python test
-        # file (e.g. `python3 tests/unit/test_kraken.py`) running.
-        run: python3 tests/run.py
+        # Native stdlib runner: two `unittest discover` passes (unit + conformance),
+        # each printing its own `Ran N tests` summary. -v lists every test method so
+        # the PR log shows each case running. The conformance suite self-skips when
+        # jq is absent (harness.setUp); CI installs jq by default on ubuntu-latest.
+        run: |
+          python3 -m unittest discover -s tests/unit -p 'test_*.py' -v
+          python3 -m unittest discover -s tests/conformance -p 'test_*.py' -v

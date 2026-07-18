@@ -10,7 +10,9 @@ asserts on the resulting stub state (labels, comments, log).
 The suite's defining property is preserved from the bash original: the scripts'
 own `--jq` expressions are still evaluated by the *real* `jq` inside the stub, so
 the filters under test are the shipped ones. jq/python3 are therefore required;
-`tests/run.py` skips the whole suite cleanly when either is absent.
+`setUp` skips the whole suite cleanly (via `skipTest`) when jq is absent, so
+`python3 -m unittest discover -s tests/conformance` stays green on minimal
+machines.
 
 A test subclasses `KrakenConformanceTest`. `setUp` creates the scratch state and
 env; the `mk_*` methods seed the stub the way `lib.sh`'s helpers did; `kraken()`
@@ -70,6 +72,11 @@ class RunResult:
 
 class KrakenConformanceTest(unittest.TestCase):
     def setUp(self):
+        # jq is required by the conformance stub (the scripts' own --jq filters are
+        # evaluated by the real jq). When it is absent the whole suite skips cleanly
+        # so `python3 -m unittest` stays green on minimal machines; CI always has jq.
+        if shutil.which("jq") is None:
+            self.skipTest("jq not found — conformance stub requires it")
         self.state = tempfile.mkdtemp(prefix="kraken-conf-")
         self.addCleanup(shutil.rmtree, self.state, ignore_errors=True)
         # Isolate the claim state dir into this test's scratch so kraken.py never

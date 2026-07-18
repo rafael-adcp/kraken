@@ -13,7 +13,8 @@ help: ## Show this help
 check: test lint ## Run every token-free check (what CI runs on each PR)
 
 test: ## Test suite — conformance + unit, mechanical, token-free (needs jq)
-	python3 tests/run.py
+	python3 -m unittest discover -s tests/unit -p 'test_*.py'
+	python3 -m unittest discover -s tests/conformance -p 'test_*.py'
 
 lint: ## Deterministic skill lint — token-free
 	bash scripts/lint-skills.sh
