@@ -278,6 +278,16 @@ Want a bounded run instead — a scheduled container, a one-off drain? Pass
 --once`) still works — it just costs one full LLM turn per fire even when the
 queue is empty.
 
+For the GitHub Copilot CLI worker (no Monitor tool), the shipped
+[`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) is the ready-made ambush loop:
+run it from a kraken checkout and it polls the queue outside the model, invoking
+`copilot` only when a task is actually startable — the same zero-token idle
+behavior as the Monitor watcher, without copying anything out of a session folder.
+
+```
+scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app
+```
+
 ## The operator's cheat sheet
 
 Every gesture you ever need, in one table — the tentacles handle
