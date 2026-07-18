@@ -65,6 +65,17 @@ task, execute it end to end, deliver it as a draft PR, then stop." \
 ```
 
 Wrap it in a shell loop (`while true; do …; sleep 60; done`) for continuous ambush — the
-operator owns the cadence and the stop. `python3 skills/unleash/kraken.py list-startable
-OWNER/tasks <project>` is a free, read-only check you MAY run first to skip the model
-entirely when nothing is startable.
+operator owns the cadence and the stop. Rather than hand-rolling that loop, use the shipped
+[`scripts/kraken-loop.sh`](scripts/kraken-loop.sh): it is the versioned home of exactly this
+fallback — a self-locating, argument-driven ambush loop you run straight from a kraken
+checkout (no copying it out of a session folder):
+
+```bash
+scripts/kraken-loop.sh OWNER/tasks --worker-name <worker-name> --project <name>
+```
+
+Each poll runs the free, read-only `list-startable` check first and only invokes `copilot`
+when a task is actually startable, so an idle queue never spends a token. Pass `--once` for a
+single bounded drain, or `--poll <seconds>` to change the 60s cadence. The bare
+`python3 skills/unleash/kraken.py list-startable OWNER/tasks <project>` check the loop uses is
+also runnable by hand to skip the model entirely when nothing is startable.
