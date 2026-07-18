@@ -105,7 +105,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| L309 | The coordination repo **SHOULD** run the cleanup workflow; on close every label except `kraken-task` and `project:<name>` is stripped | ✅ pinned | `tests/t/21` extracts and runs `cleanup-closed.yml`'s shipped `run:` block verbatim. |
+| L309 | The coordination repo **SHOULD** run the cleanup workflow; on close every label except `kraken-task` and `project:<name>` is stripped | ✅ pinned | `cleanup-closed.yml` is a thin exec of `kraken.py cleanup` (issues #37/#39); `tests/t/21` drives that subcommand against the gh-stub, and `tests/unit/test_workflow_commands.py` (`IdentityLabelTests`, `CleanupCommandTests`) pins the keep/strip rule and the no-op/transport paths. |
 
 ## §11 Authorization boundaries
 

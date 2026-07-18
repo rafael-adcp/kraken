@@ -1,5 +1,5 @@
-# Cleanup for kraken. Copy to .github/workflows/cleanup-closed.yml in the
-# coordination repo (see SKILL.md).
+# Cleanup for kraken. Installed by `init` into the coordination repo as
+# .github/workflows/cleanup-closed.yml (see SKILL.md).
 #
 # Closing a task (the PR's `Closes` line, or a manual close) leaves whatever
 # state-machine label it carried at the time — awaiting-merge, needs-decision,
@@ -7,6 +7,13 @@
 # closed kraken-task issue except kraken-task itself and its project:<name>
 # label, so a closed issue reads clean and label-based queue filters never
 # pick up dead state.
+#
+# The logic is NOT reimplemented in YAML: it runs `kraken.py cleanup`, the same
+# stdlib-only transition program the worker side uses, vendored into the
+# coordination repo by `init` (issue #37). The identity-label rule (keep
+# kraken-task and project:<name>, strip the rest) lives in kraken.py and is
+# covered by its unit tests, so this workflow shrinks to a checkout plus one
+# exec — one parser, one language, no YAML↔Python divergence.
 name: Cleanup closed task labels
 on:
   issues:
@@ -17,19 +24,13 @@ jobs:
     if: contains(github.event.issue.labels.*.name, 'kraken-task')
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       issues: write
     env:
       GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
       NUM: ${{ github.event.issue.number }}
     steps:
+      - name: Check out the vendored kraken.py
+        uses: actions/checkout@v4
       - name: Strip labels other than kraken-task and project:<name>
-        run: |
-          set -euo pipefail
-          gh issue view "$NUM" -R "$REPO" --json labels --jq '.labels[].name' |
-          while IFS= read -r label; do
-            case "$label" in
-              kraken-task|project:*) ;;
-              *) gh issue edit "$NUM" -R "$REPO" --remove-label "$label" ;;
-            esac
-          done
+        run: python3 .github/kraken.py cleanup "$GITHUB_REPOSITORY" "$NUM"

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Unit tests for the vendored-workflow subcommands (issue #37): reap,
-requeue-check, and validate. These are the coordination-repo workflows'
-logic, moved out of jq/grep/awk and into kraken.py so one parser (with one set
-of unit tests) drives all three.
+"""Unit tests for the vendored-workflow subcommands (issues #37, #39): reap,
+requeue-check, validate, and cleanup. These are the coordination-repo workflows'
+logic, moved out of jq/grep/awk/bash and into kraken.py so one parser (with one
+set of unit tests) drives all four.
 
 Two layers: the pure parsing/decision helpers (no transport at all), and the
 cmd_* entry points with their gh transport mocked — exactly the pattern
@@ -440,6 +440,99 @@ class ValidateCommandTests(unittest.TestCase):
         args = SimpleNamespace(repo="OWNER/tasks", issue="1")
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_validate(args)
+        self.assertEqual(rc, kraken.EXIT_TRANSPORT)
+
+
+# --- cleanup-closed: the identity-label rule --------------------------------
+
+class IdentityLabelTests(unittest.TestCase):
+    """cleanup-closed's keep/strip rule (PROTOCOL.md §10): the only labels a
+    closed task keeps are kraken-task and its project:<name> routing label;
+    every state-machine or unrelated label is stripped."""
+
+    def test_kraken_task_is_kept(self):
+        self.assertTrue(kraken.is_identity_label("kraken-task"))
+
+    def test_project_label_is_kept(self):
+        self.assertTrue(kraken.is_identity_label("project:app"))
+        self.assertTrue(kraken.is_identity_label("project:some-other"))
+
+    def test_state_labels_are_stripped(self):
+        for lbl in ("in-progress", "needs-decision", "awaiting-merge"):
+            self.assertFalse(kraken.is_identity_label(lbl))
+
+    def test_unrelated_labels_are_stripped(self):
+        self.assertFalse(kraken.is_identity_label("priority:high"))
+        self.assertFalse(kraken.is_identity_label("bug"))
+
+
+class CleanupCommandTests(unittest.TestCase):
+    """cmd_cleanup with its gh transport mocked: on a closed kraken-task issue it
+    removes every non-identity label (one --remove-label at a time), keeps
+    kraken-task and project:<name>, no-ops on a non-task issue, and maps a
+    transport failure to exit 20."""
+
+    def setUp(self):
+        self._orig = {
+            "issue_label_names": kraken.issue_label_names,
+            "swap_labels": kraken.swap_labels,
+        }
+        self.removed = []
+        kraken.swap_labels = lambda repo, issue, remove=None, add=None: (
+            self.removed.append((issue, remove, add)) or True)
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(kraken, k, v)
+
+    def _run(self, issue, labels):
+        kraken.issue_label_names = lambda repo, i: labels
+        args = SimpleNamespace(repo="OWNER/tasks", issue=str(issue))
+        with redirect_stdout(StringIO()):
+            rc = kraken.cmd_cleanup(args)
+        return rc
+
+    def test_strips_state_label_keeps_identity(self):
+        rc = self._run(1, ["kraken-task", "project:app", "in-progress"])
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(self.removed, [("1", "in-progress", None)])
+
+    def test_strips_all_non_identity_labels(self):
+        rc = self._run(2, ["kraken-task", "project:web", "awaiting-merge",
+                           "needs-decision", "priority:high"])
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(
+            self.removed,
+            [("2", "awaiting-merge", None),
+             ("2", "needs-decision", None),
+             ("2", "priority:high", None)],
+        )
+
+    def test_already_clean_is_a_noop(self):
+        rc = self._run(3, ["kraken-task", "project:app"])
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(self.removed, [])
+
+    def test_non_kraken_task_is_a_noop(self):
+        # The workflow's if: gate is re-checked here: a non-task issue strips
+        # nothing even when it carries a state label.
+        rc = self._run(4, ["needs-decision", "priority:high"])
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(self.removed, [])
+
+    def test_transport_failure_on_labels_is_twenty(self):
+        kraken.issue_label_names = lambda repo, i: None
+        args = SimpleNamespace(repo="OWNER/tasks", issue="1")
+        with redirect_stdout(StringIO()):
+            rc = kraken.cmd_cleanup(args)
+        self.assertEqual(rc, kraken.EXIT_TRANSPORT)
+
+    def test_transport_failure_on_remove_is_twenty(self):
+        kraken.swap_labels = lambda repo, issue, remove=None, add=None: False
+        args = SimpleNamespace(repo="OWNER/tasks", issue="1")
+        kraken.issue_label_names = lambda repo, i: ["kraken-task", "in-progress"]
+        with redirect_stdout(StringIO()):
+            rc = kraken.cmd_cleanup(args)
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
 
 
