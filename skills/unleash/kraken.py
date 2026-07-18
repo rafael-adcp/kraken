@@ -376,6 +376,47 @@ def clear_claim_state(worker):
         pass
 
 
+def open_claim(worker):
+    """Return the issue number (as a string) of an open claim this worker still
+    holds, read from its claim-<worker>.json state file, or None when no open
+    claim exists. The file's *presence* is the signal that a claim is
+    unresolved: every terminal transition (deliver / escalate / release) removes
+    it, so a resolved claim leaves nothing behind. A missing, unreadable, or
+    malformed file is treated as no open claim — the guard it feeds must never
+    fail a claim over an unparseable scratch file (the reaper backs us up)."""
+    try:
+        with open(claim_state_path(worker), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    issue = data.get("issue")
+    return None if issue is None else str(issue)
+
+
+def refuse_second_claim(worker, issue=None):
+    """PROTOCOL.md §5: a worker MUST work one task at a time and MUST NOT claim a
+    second task while it holds a claim. If a claim-<worker>.json state file marks
+    an open claim, refuse — writing nothing — and return EXIT_NOT_CLEAR; return
+    None when the worker is clear to claim.
+
+    A recorded claim on the *same* `issue` is a permitted re-claim, not a second
+    task: it is exactly the §5 network-failure caveat ("or while a claim of its
+    own is in an unknown state after a network failure — re-check first"), so a
+    retry of the ambiguous claim is allowed. `issue=None` (claim-next, always
+    taking a *new* task) refuses on any open claim."""
+    held = open_claim(worker)
+    if held is None or (issue is not None and held == str(issue)):
+        return None
+    print(
+        f"claim: refused worker={worker} holds={held} — one task at a time "
+        f"(PROTOCOL.md §5); resolve the open claim first "
+        f"(deliver / escalate / release)"
+    )
+    return EXIT_NOT_CLEAR
+
+
 def wake_retry_flag_path():
     return os.path.join(state_dir(), "wake-retry")
 
@@ -591,6 +632,9 @@ def _claim_once(repo, issue, worker):
 
 
 def cmd_claim(args):
+    refused = refuse_second_claim(args.worker, args.issue)
+    if refused is not None:
+        return refused
     return _claim_once(args.repo, args.issue, args.worker)
 
 
@@ -605,6 +649,10 @@ def cmd_claim_next(args):
     honest EXIT_NONE. Never turns a lost tiebreaker into a retry on the same
     issue (PROTOCOL.md §5) — it iterates forward, never back."""
     repo, project, worker = args.repo, args.project, args.worker
+
+    refused = refuse_second_claim(worker)
+    if refused is not None:
+        return refused
 
     rows = classify_queue(repo, project, include_body=True)
     if rows is None:
