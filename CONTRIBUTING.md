@@ -27,18 +27,19 @@ checks. These two are token-free (no model calls, no network) and run in CI on
 every PR:
 
 ```bash
-make test    # conformance + unit suites (python3 tests/run.py) — conformance needs jq
+make test    # conformance + unit suites (native `python3 -m unittest`) — conformance needs jq
 make lint    # deterministic skill lint (bash scripts/lint-skills.sh)
 make check   # both of the above
 ```
 
-- **`make test`** runs the Python test runner (`tests/run.py`), which executes
-  the `unittest` conformance suite (`tests/conformance/`) — each case drives the
-  bundled transition program against a stateful `gh` stub, proving the queue
-  protocol mechanically (the claim race, claim-window arbitration, honest
-  release, …) — plus the `kraken.py` unit tests (`tests/unit/`). The conformance
-  suite **requires `jq`**; without it those cases skip cleanly, so it's safe on
-  a minimal machine, but install `jq` to actually exercise them.
+- **`make test`** runs the native stdlib runner — two `python3 -m unittest
+  discover` passes over `tests/unit/` and `tests/conformance/`. The conformance
+  suite drives the bundled transition program against a stateful `gh` stub,
+  proving the queue protocol mechanically (the claim race, claim-window
+  arbitration, honest release, …); the `tests/unit/` pass covers the `kraken.py`
+  units. The conformance suite **requires `jq`**; without it those cases skip
+  cleanly (`harness.setUp`), so it's safe on a minimal machine, but install `jq`
+  to actually exercise them.
 - **`make lint`** is the deterministic guard against the silent breakage a prose
   skill is exposed to: label drift across files, orphan "step N" references,
   task-template field drift, broken relative links/images, and unparseable
