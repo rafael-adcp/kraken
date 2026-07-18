@@ -79,3 +79,8 @@ when a task is actually startable, so an idle queue never spends a token. Pass `
 single bounded drain, or `--poll <seconds>` to change the 60s cadence. The bare
 `python3 skills/unleash/kraken.py list-startable OWNER/tasks <project>` check the loop uses is
 also runnable by hand to skip the model entirely when nothing is startable.
+
+The same script is **harness-agnostic**: `--agent claude` drives Claude Code headless through
+the identical loop (it invokes `/kraken:unleash … --once` with `--dangerously-skip-permissions`
+instead of `copilot`), so a Claude worker that isn't using its in-session `kraken.py watch`
+Monitor watcher falls into exactly this flow too. `--agent` defaults to `copilot`.

@@ -278,14 +278,19 @@ Want a bounded run instead — a scheduled container, a one-off drain? Pass
 --once`) still works — it just costs one full LLM turn per fire even when the
 queue is empty.
 
-For the GitHub Copilot CLI worker (no Monitor tool), the shipped
-[`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) is the ready-made ambush loop:
-run it from a kraken checkout and it polls the queue outside the model, invoking
-`copilot` only when a task is actually startable — the same zero-token idle
-behavior as the Monitor watcher, without copying anything out of a session folder.
+The shipped [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) is the ready-made
+ambush loop for a worker without an in-session watcher — required for the GitHub
+Copilot CLI (no Monitor tool) and available to any harness. Run it from a kraken
+checkout and it polls the queue outside the model, invoking the agent only when a
+task is actually startable — the same zero-token idle behavior as the Monitor
+watcher, without copying anything out of a session folder. It is **harness-agnostic**:
+`--agent copilot` (default) drives the Copilot CLI, `--agent claude` drives Claude
+Code headless through the identical loop — so both harnesses can fall into one
+shared flow.
 
 ```
 scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app
+scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --agent claude
 ```
 
 ## The operator's cheat sheet
