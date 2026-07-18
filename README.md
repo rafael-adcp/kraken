@@ -6,10 +6,11 @@
 > **You set the targets; the tentacles devour them. Unleash the Kraken.**
 >
 > One head, many tentacles — a task queue built on **GitHub Issues** where
-> named Claude Code workers claim tasks, execute them, and record the evidence.
+> named agent workers (Claude Code, GitHub Copilot CLI, or any tool that follows
+> the [protocol](PROTOCOL.md)) claim tasks, execute them, and record the evidence.
 > Write the list once; the tentacles do the rest.
 >
-> GitHub does the tracking. Claude Code does the coding. **Kraken is just the
+> GitHub does the tracking. Your coding agent does the coding. **Kraken is just the
 > [protocol](PROTOCOL.md) between them** — it ships nothing you have to operate.
 
 ## Why?
@@ -37,7 +38,12 @@ Wondering how this differs from Copilot's coding agent, Claude's cloud agents,
 or `claude-code-action` in CI? The honest side-by-side — including when to
 prefer them — is [Why not just use X?](#why-not-just-use-x).
 
-## Install (Claude Code plugin)
+## Install
+
+Both agents install from the **same marketplace** — Copilot CLI reads the Claude
+Code plugin format, so the same commands work.
+
+### Claude Code (plugin)
 
 Zero to a draining queue in four commands:
 
@@ -47,6 +53,16 @@ Zero to a draining queue in four commands:
 /kraken:init OWNER/tasks --project my_app          # stand up the queue (once)
                                                    # ...file task issues, then:
 /kraken:unleash OWNER/tasks --worker-name env-1 --project my_app
+```
+
+### GitHub Copilot CLI
+
+Same plugin, same commands — Copilot CLI reads the Claude Code plugin format and
+loads its three skills:
+
+```
+/plugin marketplace add rafael-adcp/kraken
+/plugin install kraken@kraken
 ```
 
 > Each command in context — environments, permissions, parallelism — is
@@ -73,7 +89,7 @@ Five nouns do all the work in Kraken. Keep them straight and the rest follows:
 | **Coordination repo** | The kraken's head — a private repo whose **Issues are the queue**; also holds the labels (the state machine), the reaper workflow, and the dependency graph | A place for code — it holds none | **GitHub** (required) |
 | **Work repo** | Where the code lives; workers push branches + open draft PRs here | The queue — it holds no tasks | **Anywhere** (GitHub, GitLab, private) |
 | **`project:<name>` label** | A task's **canonical identity** — `--project` filters on it, and it says which prepared environment the task belongs to | Optional — a task without it is invisible to every worker | Coordination repo |
-| **Worker (tentacle)** | A **named** Claude Code session draining the queue **one task at a time**, inside one prepared environment | A pool — capacity is just how many you launch | Your machine / container / clone |
+| **Worker (tentacle)** | A **named** agent session (Claude Code, Copilot CLI, ...) draining the queue **one task at a time**, inside one prepared environment | A pool — capacity is just how many you launch | Your machine / container / clone |
 | **Task** | An open Issue labeled `kraken-task` (goal, acceptance, notes) that moves `in-progress` → `awaiting-merge` / `needs-decision` | Closed until the work truly lands — the merge closes it | Coordination repo |
 
 ## How it works (10,000 ft)
@@ -89,7 +105,7 @@ Five nouns do all the work in Kraken. Keep them straight and the rest follows:
                        │ claim, heartbeat, release
                        ▼
     ┌────────────────────────────────────┐
-    │  TENTACLES (Claude Code workers)   │
+    │  TENTACLES (agent workers)         │
     │  ONE task at a time · per env      │
     └──────────────────┬─────────────────┘
                        │ push branch + draft PR
@@ -132,7 +148,8 @@ the claim algorithm — is normatively specified in
 [`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/3`); it is agent-agnostic, so any
 tool that follows it can be a tentacle on the same queue. How a Claude Code worker
 executes it — subagents, the watcher, the bundled transition program — lives in
-[`skills/unleash/SKILL.md`](skills/unleash/SKILL.md).
+[`skills/unleash/SKILL.md`](skills/unleash/SKILL.md); the GitHub Copilot CLI
+worker reuses that same skill with the harness deltas in [`AGENTS.md`](AGENTS.md).
 
 ## The full walkthrough
 
@@ -179,8 +196,9 @@ executes it — subagents, the watcher, the bundled transition program — lives
 3. **Prepare the worker environments** — one per worker: a machine, container,
    or just a separate clone where that worker will live, with the project's
    toolchain installed, `gh` authenticated, and git configured. Workers run
-   unattended, so the environment's Claude Code settings must pre-allow the
+   unattended, so the environment's agent settings must pre-allow the
    delivery commands — a permission prompt with nobody around stalls the task.
+   (Copilot's equivalent is launching with `--allow-all-tools --no-ask-user`.)
 
    <details>
    <summary>Example allowlist for the working directory's <code>.claude/settings.json</code></summary>
