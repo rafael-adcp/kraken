@@ -99,7 +99,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| L299–301 | A worker abandoning a claim **MUST** release honestly: post the `released` marker (window closes), **then** remove `in-progress` — comment first | ✅ pinned | `tests/t/06`; `tests/t/11` (ordering under gh failure); `tests/t/16` (SessionEnd auto-release runs `kraken.py release`). |
+| L299–301 | A worker abandoning a claim **MUST** release honestly: post the `released` marker (window closes), **then** remove `in-progress` — comment first | ✅ pinned | `tests/t/06`; `tests/t/11` (ordering under gh failure); `tests/t/16` (SessionEnd auto-release runs `kraken.py release`); `tests/t/27` (StopFailure usage-limit auto-release runs `kraken.py release`). |
 
 ## §10 Close and cleanup
 

@@ -373,6 +373,21 @@ def clear_claim_state(worker):
         pass
 
 
+def wake_retry_flag_path():
+    return os.path.join(state_dir(), "wake-retry")
+
+
+def wake_retry_mtime():
+    """mtime of the wake-retry flag the StopFailure hook stamps when a usage
+    limit kills a turn on this machine (hooks/stop-failure-release.sh), or None
+    when no flag exists. The watcher compares it against its own last emission
+    to decide whether a wake it spent was consumed by a dead turn."""
+    try:
+        return os.path.getmtime(wake_retry_flag_path())
+    except OSError:
+        return None
+
+
 # --- comment composition -----------------------------------------------------
 
 def post_comment(repo, issue, body):
@@ -725,11 +740,29 @@ def snapshot_state(repo, project):
     )
 
 
+def wake_retry_due(flag_mtime, last_emit, retry_seconds, now):
+    """Whether the watcher owes a lost-wake retry: the StopFailure hook stamped
+    the wake-retry flag AFTER this watcher's last emission — meaning the turn
+    that wake started died on a usage limit, so the wake was consumed for
+    nothing — and the retry spacing has elapsed. A flag older than the last
+    emission is stale (that wake's turn survived) and never re-triggers; no
+    flag means no failed turn on record. This is NOT the removed blind
+    re-emission timer: without a proven-dead wake, the change-gated emit stays
+    the only path."""
+    if flag_mtime is None:
+        return False
+    return flag_mtime > last_emit and now - last_emit >= retry_seconds
+
+
 def cmd_watch(args):
     repo, project = args.repo, args.project
     poll_seconds = int(os.environ.get("KRAKEN_WATCH_POLL_SECONDS", "60"))
+    retry_seconds = int(os.environ.get("KRAKEN_WATCH_RETRY_SECONDS", "300"))
 
     prev = None
+    # Start at "now": retries are owed only for wakes THIS watcher emitted, so
+    # a stale flag from an earlier session never triggers one.
+    last_emit = time.time()
     while True:
         snapshot = snapshot_state(repo, project)
         if snapshot is not None:
@@ -737,9 +770,14 @@ def cmd_watch(args):
                 line for line in snapshot.split("\n") if line.endswith(":startable")
             ]
             count = len(startable)
-            # The whole emit gate: a startable task exists AND the queue changed
-            # since the last poll. No re-emission timer, nothing else.
-            if count > 0 and snapshot != prev:
+            # The emit gate: a startable task exists AND either the queue
+            # changed since the last poll, or a lost-wake retry is due
+            # (wake_retry_due) — the one case where an unchanged queue still
+            # hides an undelivered wake. No blind re-emission timer.
+            due = wake_retry_due(
+                wake_retry_mtime(), last_emit, retry_seconds, time.time()
+            )
+            if count > 0 and (snapshot != prev or due):
                 numbers = " ".join(
                     "#" + line.split(":", 1)[0] for line in startable
                 )
@@ -748,6 +786,7 @@ def cmd_watch(args):
                     f"in project:{project} ({numbers})",
                     flush=True,
                 )
+                last_emit = time.time()
             prev = snapshot
         time.sleep(poll_seconds)
 

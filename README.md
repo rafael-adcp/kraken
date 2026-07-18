@@ -394,27 +394,28 @@ workflow drags any `in-progress` issue that has been silent for 6h to
 <details>
 <summary><b>A worker hit the Claude usage limit mid-task — what happens?</b></summary>
 
-Nothing corrupt, but today it costs you time. A usage limit looks to the queue like
-sudden silence: the model stops mid-drain, so the claim just sits `in-progress` with no
-new heartbeat — and an `in-progress` task is **held**, invisible to every worker (it is
-excluded from the startable set), so nobody, not even the same worker relaunched, can
-pick it up. The **reaper is the backstop**: after 6h of silence it moves the issue to
-`needs-decision` with a `stale-claim:` comment. That is honest but blunt — `stale-claim:`
-reads *"the worker likely died"*, which for a rate limit is a half-truth (the worker is
-paused, not dead), and 6h is a long wait for a window that may reset in one.
+It self-heals. A usage limit kills the **turn**, not the session: the model stops
+mid-drain and the session sits open waiting for input, so the `SessionEnd`
+auto-release never fires. What does fire is Claude Code's **`StopFailure`** hook
+(a turn ended by an API error), and Kraken registers it with matcher
+`rate_limit`: the bundled hook **releases the held claim on the spot** —
+`released:` with `reason: usage limit` on the issue timeline — so the task is
+back on the queue in seconds instead of squatting `in-progress`, free for any
+worker on an account that still has quota. (`gh` still works at limit time;
+only the model API is blocked, which is why the release can land.)
 
-So the operator's move is to break the hold sooner. Once the reaper has moved the task to
-`needs-decision`, **remove that label** to requeue it — any worker with capacity then
-claims it and continues on the existing branch, the whole thread in hand. To skip the 6h
-wait, requeue by hand: on the stuck issue, **remove `in-progress`** and add nothing — with
-only `kraken-task` left it is startable again (holding it in `needs-decision` would just
-trade one held state for another). Then relaunch a worker — in another environment or on an
-account that still has quota — and it claims the now-startable task.
+Retry is automatic too. The same hook stamps a local **wake-retry flag**, and
+the armed watcher re-emits its wake whenever the flag proves the previous wake's
+turn died (spaced by `KRAKEN_WATCH_RETRY_SECONDS`, default 5 min): while the
+limit lasts each retry fails for free, and the first one after the window resets
+wakes the worker, which re-claims the task and continues on the existing branch
+with the whole thread in hand. No operator gesture needed.
 
-Note the `SessionEnd` auto-release (see *Does anything survive closing the terminal?*) does
-**not** help here: a usage limit does not end the session — the turn aborts but the session
-stays open waiting for input, so `SessionEnd` never fires. The reaper remains the backstop
-for a rate-limit pause, exactly as above.
+The reaper stays the backstop for the residue — the hook itself failing, or a
+hard kill: 6h of silence still moves the task to `needs-decision` with a
+`stale-claim:` comment, and removing that label requeues it, as ever. The manual
+shortcut also still works: remove `in-progress` from a stuck issue and it is
+startable again immediately.
 
 </details>
 
@@ -437,9 +438,10 @@ self-heals: a bundled `SessionEnd` hook fires when you close the terminal or
 `/exit`, and if the worker was still holding a claim it runs `kraken.py release`
 for you — `released: <worker>` / `reason: session ended`, then drops `in-progress`,
 so the task is back on the queue in seconds instead of waiting ~6h for the
-reaper. That covers a graceful end only; a hard kill / crash / power loss (and a
-usage-limit pause — see below) never fires `SessionEnd`, so the **reaper stays
-the backstop** for hard death. Headless drivers (system cron, GitHub Actions)
+reaper. That covers a graceful end only; a usage-limit pause never fires
+`SessionEnd` either, but its own `StopFailure` hook releases the claim there
+(see the limit FAQ above). A hard kill / crash / power loss fires neither hook,
+so the **reaper stays the backstop** for hard death. Headless drivers (system cron, GitHub Actions)
 are the natural next step for surviving the terminal entirely — see the
 alternatives table in
 [#32](https://github.com/rafael-adcp/kraken/issues/32).
