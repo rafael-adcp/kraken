@@ -1,34 +1,23 @@
 # Queue-entry quality gate for kraken. Installed by `init` into the coordination
 # repo as .github/workflows/validate-task.yml (see SKILL.md).
 #
-# The queue's most common operator mistake — filing a task that no worker will
-# ever see, or that will waste a worker turn on arrival — stops being silent.
-# PROTOCOL.md §2, the README, and SKILL.md all warn that "a task without a
-# project label is invisible to every worker" and that Goal/Acceptance are MUST
-# fields; this workflow turns that documentation into mechanism. On a new (or
-# edited/relabeled) kraken-task issue it checks three things and, when any is
-# missing, posts ONE actionable comment saying exactly what to fix:
+# Makes the most common operator mistake — filing a task no worker will see, or
+# that wastes a worker turn on arrival — non-silent. On a new (or edited/relabeled)
+# kraken-task issue it checks three MUSTs and, when any is missing, posts ONE
+# actionable comment saying exactly what to fix:
 #   - carries a project:<name> label? (else invisible to every worker)
-#   - has a non-empty Goal section?    (### Goal, the issue-form heading)
+#   - has a non-empty Goal section?       (### Goal)
 #   - has a non-empty Acceptance section? (### Acceptance)
 #
-# The logic is NOT reimplemented in YAML: it runs `kraken.py validate`, the same
-# stdlib-only transition program the worker side uses, vendored into the
-# coordination repo by `init` (issue #37). Section detection, the `_No response_`
-# empty-field rule, the validation marker, and the debounce all live in kraken.py
-# and are covered by its unit tests, so this workflow shrinks to a checkout plus
-# one exec.
+# The logic is NOT reimplemented in YAML: it runs `kraken.py validate` (the same
+# program the worker side uses, vendored by `init`). Section detection, the empty-
+# field rule, the marker, and debounce all live there and are unit-tested.
 #
-# It INFORMS; the operator acts. It never blocks, closes, or relabels the task —
-# a compliant task gets no comment (no noise on the happy path), and a
-# non-kraken-task issue is a no-op (the job `if:` gate, re-checked by kraken.py).
-# The validator's own comment is authored by the Actions bot (user.type == Bot),
-# so requeue-on-reply's Bot gate ignores it and the two workflows never interact.
-#
-# A per-issue concurrency group serializes an edit burst so two racing runs don't
-# both post. All four behaviors — missing label, missing Acceptance, compliant
-# (no comment), and edit-after-fix (no duplicate / no re-flag) — are pinned by
-# tests/conformance/test_25_validate_task.py.
+# It INFORMS; the operator acts — never blocks, closes, or relabels. A compliant
+# task gets no comment; a non-kraken-task issue is a no-op. Its comment is the
+# Actions bot (user.type == Bot), so requeue-on-reply's Bot gate ignores it. A
+# per-issue concurrency group serializes an edit burst. All four behaviors are
+# pinned by tests/conformance/test_25_validate_task.py.
 name: Validate task on arrival
 on:
   issues:

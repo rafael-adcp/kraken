@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
 # Scenario: ambiguous goal.
 #
-# When a task's goal admits materially different implementations and getting it
-# wrong is expensive, the worker MUST escalate rather than guess (PROTOCOL.md §7,
-# SKILL.md step a): post the question — options AND a recommendation — with the
+# When a goal admits materially different implementations and getting it wrong is
+# expensive, the worker MUST escalate rather than guess (PROTOCOL.md §7, SKILL.md
+# step a): post the question — options AND a recommendation — with the
 # `needs-decision` marker, then swap in-progress -> needs-decision.
 #
-# Assertion surface = artifacts only:
-#   - task ends labeled needs-decision, not in-progress/awaiting-merge,
-#   - a `needs-decision` marker was posted,
-#   - the escalation comment carries options and a recommendation (structural
-#     check: it's more than a one-liner and reads like a decision request),
-#   - NO delivery happened: no work branch pushed, no PR opened, default
-#     branch untouched.
+# Assertion surface = artifacts only: task ends needs-decision (marker posted),
+# the escalation comment carries options and a recommendation (structural check),
+# and NO delivery happened (no branch/PR, default branch untouched).
 . "$(cd "$(dirname "$0")/.." && pwd)/lib-agent.sh"
 SCENARIO_NAME="ambiguous-goal"
 

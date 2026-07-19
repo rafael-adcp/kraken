@@ -1,21 +1,17 @@
 #!/usr/bin/env bash
 # Agent-behavior harness: drives headless Claude Code against the gh-stub to test
 # the SKILL's judgment (the contract MUSTs that live in the model's behavior),
-# not just the transition program. Each tests/agent/scenarios/*.sh seeds one
-# crafted queue + task body, runs a real `claude -p "/kraken:unleash ... --once"`,
-# and asserts on ARTIFACTS: the stub's final state (labels, machine lines) and a
-# real local work repo (branch pushed? trailers? default branch untouched?).
+# not just the transition program. Each scenarios/*.sh seeds one crafted queue +
+# task body, runs a real `claude -p "/kraken:unleash ... --once"`, and asserts on
+# ARTIFACTS (stub labels/machine lines + a real local work repo).
 #
-# This drives REAL model runs — it is NOT part of the mechanical per-push
-# conformance suite (tests/run-tests.sh). It runs from the pre-push hook
-# (.githooks/pre-push, Stage 2) when a push touches skills/ or tests/agent/,
-# against the logged-in CLI; run it by hand any time too. Requires: claude on
-# PATH, ANTHROPIC_API_KEY (or a logged-in CLI), jq, git. Absent any of these ->
-# SKIP with exit 0, never a false failure.
+# REAL model runs — NOT part of the mechanical conformance suite. It runs from
+# the pre-push hook when a push touches skills/ or tests/agent/, and by hand.
+# Requires: claude on PATH, ANTHROPIC_API_KEY (or logged-in CLI), jq, git —
+# absent any, SKIP with exit 0, never a false failure.
 #
-# Advisory scenarios (flaky by nature — the notes on #62 anticipate this) are
-# listed in ADVISORY below: they run and report, but a failure does not fail the
-# suite. Blocking scenarios must pass.
+# Advisory scenarios (flaky by nature) are listed in ADVISORY: they run and
+# report, but a failure does not fail the suite. Blocking scenarios must pass.
 set -u
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -25,12 +21,10 @@ AGENT_DIR="$ROOT/tests/agent"
 # --- preflight: skip cleanly when the harness cannot run for real -------------
 skip() { echo "agent-conformance: SKIP ($1)"; exit 0; }
 
-# Bail early on native Windows (Git Bash / MSYS / Cygwin). The harness relies on
-# the gh-stub shadowing the real `gh` through PATH so the nested `claude -p`
-# judges against the seeded queue, not GitHub. On Windows that shadowing is
-# unreliable — the agent's tool shell can resolve `gh` to the real, logged-in
-# CLI (an extensionless stub does not reliably beat `gh.exe`), so scenarios fail
-# for environment reasons, not skill ones. Run it under WSL or Linux instead.
+# Bail early on native Windows: the harness relies on the gh-stub shadowing the
+# real `gh` through PATH, which is unreliable there (an extensionless stub does
+# not reliably beat `gh.exe`), so scenarios fail for environment reasons. Run it
+# under WSL or Linux instead.
 case "$(uname -s 2>/dev/null)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     echo "agent-conformance: SKIP (native Windows — the gh-stub cannot reliably shadow the real gh here)"

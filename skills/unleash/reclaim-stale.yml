@@ -1,29 +1,24 @@
 # Reaper for kraken. Installed by `init` into the coordination repo as
 # .github/workflows/reclaim-stale.yml (see SKILL.md).
 #
-# A worker that dies mid-task leaves its issue labeled in-progress forever,
-# blocking the queue. This workflow runs server-side (so it works even when every
-# worker is dead): any in-progress issue whose worker has been silent for
-# MAX_HOURS is moved to needs-decision for the human to triage — relaunch or
-# investigate.
+# A worker that dies mid-task leaves its issue labeled in-progress forever. This
+# runs server-side (so it works even when every worker is dead): any in-progress
+# issue whose worker has been silent for MAX_HOURS is moved to needs-decision for
+# the human to triage.
 #
-# The logic is NOT reimplemented in YAML: it runs `kraken.py reap`, the same
-# stdlib-only transition program the worker side uses, vendored into the
-# coordination repo by `init` (issue #37). One parser, one language — the
-# reconciler rules live in kraken.py and are covered by its unit tests, so this
-# workflow shrinks to a checkout plus one exec. Under protocol/4 (issue #110)
-# reap is the reconciler between the claim refs (the lock) and the labels (the
-# projection): staleness is anchored to the claim ref's commit date — NOT the
-# issue's updatedAt, so an operator comment on a dead worker's issue shortens
-# time-to-triage instead of extending it — and besides reclaiming stale claims
-# it deletes orphan locks, heals missing in-progress labels, and requeues
+# The logic is NOT reimplemented in YAML: it runs `kraken.py reap` (the same
+# program the worker side uses, vendored by `init`, unit-tested). reap is the
+# reconciler between the claim refs (the lock) and the labels (the projection):
+# staleness is anchored to the claim ref's commit date, NOT the issue's updatedAt
+# (so an operator comment on a dead worker's issue shortens time-to-triage). It
+# also deletes orphan locks, heals missing in-progress labels, and requeues
 # in-progress labels with no ref behind them.
 #
 # contents: write is required — reap deletes claim refs (git refs ARE repo
 # contents to the token) as well as editing issues.
 #
-# Why not actions/stale: its threshold is whole DAYS (community-triage timescale);
-# a dead worker's claim must be reclaimed within hours, not days.
+# Why not actions/stale: its threshold is whole DAYS; a dead worker's claim must
+# be reclaimed within hours.
 name: Reclaim stale claims
 on:
   schedule:
