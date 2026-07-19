@@ -62,6 +62,19 @@ plugin upgrade to pull a coordination repo's vendored assets forward.
   re-syncs every `drifted` asset to the bundled copy; it is opt-in and deliberate,
   the fix the drain points at when its drift handshake finds a repo running stale
   vendored assets.
+- **Vendored assets are verbatim copies — not a customization point.** The
+  contract is that every vendored asset stays byte-identical to the plugin's
+  bundled copy; hand-editing one is unsupported. `drifted` therefore covers
+  both a stale asset and a hand-edited one — there is no way (and no attempt)
+  to tell them apart — and `--upgrade` overwrites either with the bundled
+  bytes, discarding hand edits. Behavior that needs changing belongs in the
+  plugin (and a release), never in the vendored copy.
+- **`kraken.py` is installed last, as the commit marker.** The drain's drift
+  handshake reads only the vendored `.github/kraken.py`, so init writes it
+  after every other asset and aborts on the first failed write — a partial run
+  can never leave that sentinel in sync while a workflow is still stale. An
+  in-sync sentinel therefore proves the whole set synced; re-running after a
+  partial failure resumes safely.
 
 ## Protocol
 
@@ -113,7 +126,8 @@ plugin upgrade to pull a coordination repo's vendored assets forward.
   `reclaim-stale.yml`, `cleanup-closed.yml`, `requeue-on-reply.yml`,
   `validate-task.yml`) via the contents API, creating them only — never
   overwriting a file that already differs — **except** that a `--upgrade` run
-  re-syncs a drifted asset to the bundled copy;
+  re-syncs a drifted asset to the bundled copy (hand edits included: drifted
+  content is overwritten regardless of how it got that way);
   (c) **upsert the canonical labels** (and the `project:<name>` label when
   `--project` is passed).
 - It is NOT authorization to read or write issues, modify `settings.json`, delete

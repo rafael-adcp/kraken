@@ -1367,12 +1367,14 @@ def verify_protocol(repo):
 
 
 # Each bundled asset init commits: (bundled filename, destination path in the
-# coordination repo, create commit message).
+# coordination repo, create commit message). ORDER MATTERS: kraken.py is the
+# drift-handshake sentinel (verify_protocol reads only it), so it MUST be
+# written LAST — init/upgrade aborts on the first failed write, so a partial run
+# can never leave the sentinel in sync while a workflow is still stale. Written
+# last, an in-sync sentinel proves the whole set synced.
 INIT_ASSETS = (
     ("task-template.yml", ".github/ISSUE_TEMPLATE/task.yml",
      "chore: add kraken task template"),
-    ("kraken.py", ".github/kraken.py",
-     "chore: add kraken transition program"),
     ("reclaim-stale.yml", ".github/workflows/reclaim-stale.yml",
      "chore: add kraken reaper workflow"),
     ("cleanup-closed.yml", ".github/workflows/cleanup-closed.yml",
@@ -1381,6 +1383,8 @@ INIT_ASSETS = (
      "chore: add kraken requeue-on-reply workflow"),
     ("validate-task.yml", ".github/workflows/validate-task.yml",
      "chore: add kraken validate-task workflow"),
+    ("kraken.py", ".github/kraken.py",
+     "chore: add kraken transition program"),
 )
 
 # The canonical state-machine labels — (name, color, description). The labels UI

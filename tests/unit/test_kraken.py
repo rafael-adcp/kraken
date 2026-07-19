@@ -919,6 +919,15 @@ class AssetClassifierTests(unittest.TestCase):
     def test_classify_asset_drifted(self):
         self.assertEqual(kraken.classify_asset(b"hand edit", b"bundled"), "drifted")
 
+    def test_handshake_sentinel_is_installed_last(self):
+        # The drift handshake reads ONLY the vendored kraken.py, and init aborts
+        # on the first failed write — so the sentinel must come last, or a
+        # partial init/upgrade could leave it in sync over still-stale workflows
+        # and the handshake would wave a drifted repo through.
+        self.assertEqual(kraken.INIT_ASSETS[-1][0], "kraken.py",
+                         "kraken.py must be the LAST init asset: it is the drift "
+                         "sentinel and only proves the set synced if written last")
+
 
 class ProtocolHandshakeTests(unittest.TestCase):
     """The drift handshake's pure logic, with the one contents read mocked: the

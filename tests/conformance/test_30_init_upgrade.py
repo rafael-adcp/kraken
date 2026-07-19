@@ -91,6 +91,33 @@ class InitUpgradeTests(KrakenConformanceTest):
         self.assertIn("assets_upgraded=2", r.out)
         self.assertIn("assets_drifted=0", r.out)
 
+    def test_partial_upgrade_failure_keeps_the_alarm_on(self):
+        # kraken.py is the drift-handshake sentinel and init writes it LAST,
+        # aborting on the first failed write — so an upgrade that dies on a
+        # workflow PUT must leave the sentinel drifted, and the next drain must
+        # still refuse (exit 12) instead of waving stale workflows through.
+        self._seed_drift()
+        self.truncate_log()
+        r = self.kraken("init", "OWNER/tasks", "--upgrade",
+                        fail=r"contents/\.github/workflows/reclaim-stale\.yml -X PUT")
+        self.assertEqual(r.rc, 20, "a failed asset write must exit 20 (transport)")
+        self.assertIn("stage=asset path=.github/workflows/reclaim-stale.yml", r.err,
+                      "the failed asset was not named")
+
+        # The sentinel was never reached: still the drifted bytes, no PUT to it.
+        self.assertFalse(
+            filecmp.cmp(self._contents(DST["kraken.py"]), BUNDLED["kraken.py"], shallow=False),
+            "a partial upgrade advanced the kraken.py sentinel past a stale workflow")
+        self.assertEqual(self._put_lines_for(DST["kraken.py"]), [],
+                         "a PUT was issued to kraken.py after an earlier asset failed")
+
+        # And the drain's handshake still refuses — the alarm stays on until a
+        # complete upgrade lands every asset.
+        r = self.kraken("claim-next", "OWNER/tasks", "app", "w1")
+        self.assertEqual(r.rc, 12,
+                         "after a partial upgrade the drain must still refuse (exit 12)")
+        self.assertIn("init --upgrade", r.out, "refusal did not point at init --upgrade")
+
     def test_plain_init_reports_drift_without_writing(self):
         self._seed_drift()
         self.truncate_log()
