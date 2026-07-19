@@ -13,7 +13,10 @@
 # coordination repo by `init` (issue #37). The identity-label rule (keep
 # kraken-task and project:<name>, strip the rest) lives in kraken.py and is
 # covered by its unit tests, so this workflow shrinks to a checkout plus one
-# exec — one parser, one language, no YAML↔Python divergence.
+# exec — one parser, one language, no YAML↔Python divergence. Under protocol/4
+# (issue #110) cleanup also deletes a leftover claim ref, so a closed task
+# never leaves its lock behind — hence contents: write (git refs ARE repo
+# contents to the token).
 name: Cleanup closed task labels
 on:
   issues:
@@ -24,7 +27,7 @@ jobs:
     if: contains(github.event.issue.labels.*.name, 'kraken-task')
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       issues: write
     env:
       GH_TOKEN: ${{ github.token }}

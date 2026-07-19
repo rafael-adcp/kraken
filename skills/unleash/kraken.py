@@ -10,9 +10,17 @@ SessionEnd hook) keeps working unchanged.
 
 Why Python: the shell versions carried a running commentary of CRLF, `printf`,
 and quoting hazards they had to defend against by hand. Moving to Python kills
-that whole class of bug, makes the claim-window arbitration unit-testable in
-isolation, and lets pagination (both the queue listing and the >100-comment
-claim window) be handled once, correctly.
+that whole class of bug and lets pagination (the queue listing, the comment
+history the coordination workflows read) be handled once, correctly.
+
+Claiming (kraken-protocol/4) is a true compare-and-swap: creating the claim
+ref `refs/kraken/claims/<issue>` succeeds for exactly one caller — GitHub
+answers HTTP 422 to everyone else — so the ref IS the arbiter, and its commit's
+server-stamped date IS the liveness clock. The retired protocol/3 comment
+arbitration (the claim window, its reset markers, first-claim-wins over a
+paginated re-read) existed only to compensate for writes that cannot fail on
+conflict; with the CAS it is gone, and labels/comments are projection and
+narrative, never the lock (see the claim-ref section below).
 
 Transport (phase 1): `gh` stays the transport. Every GitHub call shells out to
 `gh api` / `gh issue`, exactly like the scripts did, so the conformance stub
@@ -20,12 +28,14 @@ Transport (phase 1): `gh` stays the transport. Every GitHub call shells out to
 for free. A direct-REST phase 2 is possible later but out of scope here.
 list-startable's queue fetch is the one exception to "shell out per call": it
 batches labels, native blocked-by, and body into a single paginated
-`gh api graphql` walk (classify_queue/fetch_open_tasks below), so an idle
-watch poll costs O(pages), not one REST call per non-held task.
+`gh api graphql` walk (classify_queue/fetch_open_tasks below), plus one
+matching-refs read for the claim refs, so an idle watch poll costs O(pages),
+not one REST call per non-held task.
 
 Exit-code contract (PROTOCOL.md §12), preserved verbatim from the scripts:
     0   success
-    10  lost the claim tiebreaker — back off, pick the next candidate
+    10  lost the claim CAS — another worker holds the claim ref; back off
+        (writing nothing) and pick the next candidate
     11  no longer clear — a held label appeared since listing; skip the task
     20  gh / network transport failure — state unknown, re-check before retry
     3   claim-next only: no candidate was startable — the queue is empty, or
@@ -56,15 +66,18 @@ EXIT_NONE = 3
 EXIT_USAGE = 2
 
 # The three "held" labels: a task carrying any of them is claimed, escalated, or
-# delivered — never startable, never re-claimable without a window reset.
+# delivered — never startable. `in-progress` is the *projection* of the claim
+# ref (the lock itself); the other two are operator-facing states set by
+# uncontended transitions.
 HELD_LABELS = ("in-progress", "needs-decision", "awaiting-merge")
 
 # --- protocol version --------------------------------------------------------
-# The wire contract this program speaks (PROTOCOL.md). protocol/3 carries every
-# machine payload in a structured hidden marker (see MARKER_* below) and reads
-# ONLY markers: the retired protocol/1 visible line grammar is no longer parsed,
-# so free text in a comment can never occupy a machine-line position.
-PROTOCOL_VERSION = 3
+# The wire contract this program speaks (PROTOCOL.md). protocol/4 arbitrates
+# the claim on a git-ref CAS (refs/kraken/claims/<issue>) and anchors liveness
+# to the claim ref's commit date; hidden markers (see MARKER_* below) remain
+# the machine payload for comments — audit trail and operator directives — but
+# never arbitrate a claim.
+PROTOCOL_VERSION = 4
 
 # --- plugin version ----------------------------------------------------------
 # The installed plugin's version, as stamped in the bundled marketplace manifest
@@ -99,37 +112,31 @@ def plugin_version(manifest=PLUGIN_MANIFEST):
         return PLUGIN_VERSION_UNKNOWN
     return version if isinstance(version, str) and version else PLUGIN_VERSION_UNKNOWN
 
-# --- structured hidden markers (kraken-protocol/3) ---------------------------
+# --- structured hidden markers -----------------------------------------------
 # A state-changing comment carries its machine payload in ONE hidden HTML-comment
 # marker — invisible in the rendered GitHub UI, so the visible prose is pure
 # human courtesy — of the form:
 #     <!-- kraken {"type":"claim","worker":"env-1"} -->
 # The payload is compact one-line JSON with a required string "type". Encoding it
-# with json.dumps (not string interpolation) is the whole point of protocol/3: it
-# retires the CRLF/quoting/prefix-scan hazard class the visible line grammar
-# inherited from the shell era. ensure_ascii keeps the marker pure ASCII (no
-# astral-plane bytes) so the reaper's grep and the requeue filter never hit a
-# locale-dependent match the way the 🐙 disclaimer does.
+# with json.dumps (not string interpolation) retires the CRLF/quoting/prefix-scan
+# hazard class the visible line grammar inherited from the shell era.
+# ensure_ascii keeps the marker pure ASCII (no astral-plane bytes) so the
+# requeue filter never hits a locale-dependent match the way the 🐙 disclaimer
+# does. Under protocol/4 markers are audit trail and operator directives — a
+# claim ref's commit message reuses the same grammar — but they never arbitrate
+# a claim: the CAS on the claim ref does (see the claim-ref section below).
 MARKER_PREFIX = "<!-- kraken "
 MARKER_SUFFIX = " -->"
 MARKER_RE = re.compile(r"<!--\s*kraken\s+(\{.*?\})\s*-->")
 
-# The claim-window reset transition types: the most recent of these ends the
-# current claim window, so a dead worker's claim (stale-claim), an honest
-# hand-back (released), an escalation (needs-decision), or a delivered task
-# bounced back by review (delivered) can all be re-claimed. Each MUST appear in
-# PROTOCOL.md's marker table — the lint enforces that.
-RESET_TYPES = ("released", "stale-claim", "needs-decision", "delivered")
-
-# The two liveness types: a comment carrying either proves the worker is alive,
-# anchoring the reaper's staleness clock (PROTOCOL.md §6). Nothing else does.
-LIVENESS_TYPES = ("claim", "heartbeat")
-
-# Every marker "type" this program builds or arbitrates on — the protocol/3
-# vocabulary. (`requeue` is operator-only; the workflow reads it, this program
-# never emits it, so it is not here.) The lint checks each appears in
-# PROTOCOL.md's marker table by executing `kraken.py contract marker-types`.
-MARKER_TYPES = LIVENESS_TYPES + RESET_TYPES
+# Every marker "type" this program emits — the protocol/4 vocabulary. `claim`
+# and `heartbeat` ride the claim ref's commit message (heartbeat additionally
+# carries the progress text in "msg"); the rest head state-changing comments.
+# (`requeue` is operator-only; the workflow reads it, this program never emits
+# it, so it is not here.) The lint checks each appears in PROTOCOL.md's marker
+# table by executing `kraken.py contract marker-types`.
+MARKER_TYPES = ("claim", "heartbeat", "needs-decision", "delivered",
+                "released", "stale-claim")
 
 
 def make_marker(payload):
@@ -140,9 +147,10 @@ def make_marker(payload):
 
 
 def parse_marker(line):
-    """Decode the kraken marker payload on a line, or None if the line carries no
-    well-formed marker. A marker with a non-dict body or no string "type" is
-    treated as absent — a malformed marker never silently arbitrates."""
+    """Decode the kraken marker payload on a line (a comment line or a claim
+    ref's commit message), or None if the line carries no well-formed marker. A
+    marker with a non-dict body or no string "type" is treated as absent — a
+    malformed marker is never guessed at."""
     m = MARKER_RE.search(line)
     if not m:
         return None
@@ -154,14 +162,6 @@ def parse_marker(line):
         return obj
     return None
 
-
-def machine_event(line):
-    """Normalize one comment line to a {"type", ...} machine event by decoding its
-    protocol/3 hidden marker, or None for a line carrying no well-formed marker.
-    ONLY the marker is read: the retired protocol/1 visible line grammar is not
-    parsed, so free text can never masquerade as a machine line. This single
-    normalizer is what every consumer reads through."""
-    return parse_marker(line.rstrip("\r"))
 
 # The attribution disclaimer — the ONE authoritative definition of its format.
 # Every worker authenticates as the operator, so a worker comment reads exactly
@@ -203,7 +203,7 @@ def task_trailer(repo, issue, worker):
 
 
 def compose_comment(worker, prose, payload):
-    """Assemble a protocol/3 state-changing comment: the attribution disclaimer,
+    """Assemble a state-changing comment: the attribution disclaimer,
     the human-facing prose (courtesy only — never machine-parsed), then the one
     hidden marker carrying the machine payload. Blank lines separate the three so
     GitHub does not fold the body into the disclaimer's blockquote."""
@@ -217,20 +217,30 @@ def compose_comment(worker, prose, payload):
 
 # --- transport ---------------------------------------------------------------
 
-def run_gh(args):
-    """Run `gh <args>`; return (returncode, stdout). Never raises on non-zero —
-    the callers map a non-zero return to the exit-20 transport-failure path
-    themselves, exactly where the scripts did `|| exit 20`."""
+def run_gh_io(args, input_text=None):
+    """Run `gh <args>`; return (returncode, stdout, stderr). Never raises on
+    non-zero — the callers map a non-zero return to the exit-20 transport-failure
+    path themselves, exactly where the scripts did `|| exit 20`. `input_text`
+    feeds stdin (the `--input -` JSON body of the git-data writes); stderr is
+    captured because it is where `gh api` names the HTTP status — the one signal
+    that separates a lost claim CAS (HTTP 422) from a transport fault."""
     try:
         proc = subprocess.run(
             ["gh", *args],
             capture_output=True,
             text=True,
             encoding="utf-8",
+            input=input_text,
         )
     except FileNotFoundError:
-        return 127, ""
-    return proc.returncode, proc.stdout
+        return 127, "", ""
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def run_gh(args):
+    """`run_gh_io` for the many callers that need only (returncode, stdout)."""
+    rc, out, _err = run_gh_io(args)
+    return rc, out
 
 
 def gh_json(args):
@@ -251,37 +261,13 @@ def graphql(query):
     return gh_json(["api", "graphql", "-f", f"query={query}"])
 
 
-def comment_bodies(repo, issue):
-    """Every comment body on the issue, in server order — paginated past 100.
-
-    `gh issue view --json comments` silently caps at 100 comments (it does not
-    page the nested GraphQL connection), so a long-lived task's claim window
-    could scroll out of view and re-arbitration would read a truncated history.
-    The REST comments endpoint with `--paginate` walks every page, so the claim
-    window is always evaluated against the complete comment history.
-
-    Returns a list of body strings, or None on transport failure."""
-    rc, out = run_gh([
-        "api",
-        f"repos/{repo}/issues/{issue}/comments",
-        "--paginate",
-        "--jq", ".[].body",
-    ])
-    if rc != 0:
-        return None
-    # `--jq .[].body` prints one body per line (multi-line bodies span several
-    # lines); markers sit on their own line, so a flat line scan downstream is
-    # exactly what arbitration needs.
-    return out.split("\n")
-
-
 def comment_records(repo, issue):
     """Every comment as a {"body", "createdAt"} record, in server order —
-    paginated past 100 through the SAME REST comments endpoint comment_bodies
-    walks. `status` needs the timestamps (heartbeat-age anchoring) that the
-    body-only `comment_bodies` drops; reading them off the identical paginated
-    path means the age anchor is never computed from a truncated 100-comment
-    history (the very bug comment_bodies exists to avoid for the claim window).
+    paginated past 100 via the REST comments endpoint (`gh issue view --json
+    comments` silently caps at 100: it does not page the nested GraphQL
+    connection, so a long thread would read truncated). `status` and the
+    validator's debounce read through here so no consumer ever sees a
+    truncated history.
 
     Returns a list of dicts, or None on transport failure. `gh --jq` emits one
     compact JSON object per comment (interior newlines escaped), so a per-line
@@ -316,28 +302,188 @@ def comment_records(repo, issue):
     return records
 
 
-# --- machine marker arbitration ----------------------------------------------
+# --- claim refs: the protocol/4 CAS ------------------------------------------
+#
+# The claim is a git ref, refs/kraken/claims/<issue>, in the coordination repo.
+# Creating a ref is the one common GitHub write that FAILS on conflict — the
+# server accepts exactly one creator and answers HTTP 422 to everyone else — so
+# the ref is the arbiter and the loser writes nothing. The ref targets an
+# orphan commit (empty tree, no parents) whose message is the standard kraken
+# marker carrying the worker's identity, and whose server-stamped committedDate
+# is the liveness clock the reaper reads (a heartbeat force-updates the ref to
+# a fresh commit). Refs are invisible in the GitHub UI: the in-progress label
+# stays the operator's dashboard, written AFTER the CAS as a projection.
 
-def arbitrate_winner(lines):
-    """The claim-window tiebreaker, isolated for testing.
+CLAIM_REF_PREFIX = "refs/kraken/claims/"
+# git's well-known empty-tree object — present in every repository, so an
+# orphan commit can be created without reading anything first. If a host ever
+# rejects it, create_claim_commit falls back to the default branch's tree.
+EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
-    Scan each comment line in server order, decoding each protocol/3 hidden
-    marker through machine_event: any reset event clears the running winner
-    (older claims no longer count), and the FIRST claim of the current window
-    wins. Free-text prose carries no marker, so it is inert here. Returns the
-    winning worker name, or "" if the window holds no live claim."""
-    winner = ""
-    for raw in lines:
-        event = machine_event(raw)
-        if event is None:
+
+def claim_ref(issue):
+    return CLAIM_REF_PREFIX + str(issue)
+
+
+def _is_http_422(err):
+    """Whether a failed `gh api` call was an HTTP 422 — the CAS-lost signal on
+    ref creation ("Reference already exists"), and the already-gone signal on
+    ref deletion. gh prints the status on stderr as `... (HTTP 422)`."""
+    return "(HTTP 422)" in (err or "")
+
+
+def _head_tree_sha(repo):
+    """The default branch's tree SHA — the fallback tree for hosts that reject
+    the well-known empty-tree object. None on transport failure."""
+    obj = gh_json(["api", f"repos/{repo}/commits/HEAD"])
+    if obj is None:
+        return None
+    tree = (obj.get("commit") or {}).get("tree") or {}
+    sha = tree.get("sha")
+    return sha if isinstance(sha, str) and sha else None
+
+
+def create_claim_commit(repo, payload):
+    """Create the orphan commit a claim ref points at: empty tree, no parents,
+    message = the standard kraken marker for `payload` (one grammar everywhere —
+    parse_marker reads commit messages and comment lines alike). The server
+    stamps the committer date, so the liveness clock is server-side, exactly
+    like comment createdAt was. Returns the commit SHA, or None on transport
+    failure."""
+    for tree in (EMPTY_TREE_SHA, None):
+        if tree is None:
+            tree = _head_tree_sha(repo)
+            if tree is None:
+                return None
+        body = json.dumps(
+            {"message": make_marker(payload), "tree": tree, "parents": []}
+        )
+        rc, out, err = run_gh_io(
+            ["api", f"repos/{repo}/git/commits", "--method", "POST",
+             "--input", "-"],
+            input_text=body,
+        )
+        if rc == 0:
+            try:
+                sha = json.loads(out).get("sha")
+            except (ValueError, json.JSONDecodeError):
+                return None
+            return sha if isinstance(sha, str) and sha else None
+        if not _is_http_422(err):
+            return None
+        # 422 on the empty tree: this host wants a reachable tree — fall back.
+    return None
+
+
+def claim_ref_create(repo, issue, sha):
+    """The CAS itself. Returns "won" (ref created — this worker owns the task),
+    "lost" (HTTP 422: another worker's ref already exists), or "fail"
+    (transport — state unknown)."""
+    body = json.dumps({"ref": claim_ref(issue), "sha": sha})
+    rc, _out, err = run_gh_io(
+        ["api", f"repos/{repo}/git/refs", "--method", "POST", "--input", "-"],
+        input_text=body,
+    )
+    if rc == 0:
+        return "won"
+    if _is_http_422(err):
+        return "lost"
+    return "fail"
+
+
+def claim_ref_update(repo, issue, sha):
+    """Force-move the claim ref to a fresh commit — the heartbeat. True on
+    success."""
+    body = json.dumps({"sha": sha, "force": True})
+    rc, _out, _err = run_gh_io(
+        ["api", f"repos/{repo}/git/{claim_ref(issue)}", "--method", "PATCH",
+         "--input", "-"],
+        input_text=body,
+    )
+    return rc == 0
+
+
+def claim_ref_delete(repo, issue):
+    """Delete the claim ref — the lock release on every terminal transition.
+    An already-missing ref (HTTP 422) counts as success: the lock is gone
+    either way, and the delete stays idempotent under retries."""
+    rc, _out, err = run_gh_io(
+        ["api", f"repos/{repo}/git/{claim_ref(issue)}", "--method", "DELETE"],
+    )
+    return rc == 0 or _is_http_422(err)
+
+
+def claim_ref_list(repo):
+    """Every live claim ref as {issue_number: commit_sha}, in one paginated
+    matching-refs read. Returns a dict (empty when none), or None on transport
+    failure."""
+    rc, out = run_gh([
+        "api", f"repos/{repo}/git/matching-refs/kraken/claims/", "--paginate",
+        "--jq", r'.[] | "\(.ref)\t\(.object.sha)"',
+    ])
+    if rc != 0:
+        return None
+    refs = {}
+    for line in out.split("\n"):
+        line = line.strip()
+        if not line or "\t" not in line:
             continue
-        etype = event.get("type")
-        if etype in RESET_TYPES:
-            winner = ""
-        elif etype == "claim":
-            if not winner:
-                winner = event.get("worker", "")
-    return winner
+        ref, sha = line.split("\t", 1)
+        tail = ref.rsplit("/", 1)[-1]
+        try:
+            refs[int(tail)] = sha
+        except ValueError:
+            continue
+    return refs
+
+
+def resolve_commit_meta(repo, shas):
+    """Resolve each claim commit's {committedDate, message} in one batched
+    GraphQL call (one aliased `object(oid:)` field per distinct SHA), never one
+    call per ref — the resolve_depends_on pattern. Returns
+    {sha: {"committedDate": ..., "message": ...}}, or None on transport
+    failure."""
+    if not shas:
+        return {}
+    owner, name = repo.split("/", 1)
+    ordered = sorted(set(shas))
+    fields = " ".join(
+        f'c{i}: object(oid: "{sha}") {{ ... on Commit {{ committedDate message }} }}'
+        for i, sha in enumerate(ordered)
+    )
+    resp = graphql(f'{{ repository(owner: "{owner}", name: "{name}") {{ {fields} }} }}')
+    if resp is None:
+        return None
+    repo_obj = resp["data"]["repository"]
+    meta = {}
+    for i, sha in enumerate(ordered):
+        obj = repo_obj.get(f"c{i}") or {}
+        meta[sha] = {
+            "committedDate": obj.get("committedDate") or "",
+            "message": obj.get("message") or "",
+        }
+    return meta
+
+
+def claim_ref_owner(repo, issue):
+    """The worker named in the claim commit the ref for `issue` currently points
+    at, or None when the ref is absent or unreadable. This is how a lost CAS
+    (HTTP 422) is told apart: a 422 is a genuine loss only when the ref belongs
+    to a DIFFERENT worker; a worker re-claiming its OWN in-flight claim after a
+    network failure already owns the task (PROTOCOL.md §5's re-check caveat).
+    None (transport/absent) is treated by the caller as 'not mine', so an
+    ambiguous read never turns a real loss into a false win."""
+    refs = claim_ref_list(repo)
+    if refs is None:
+        return None
+    sha = refs.get(int(issue)) if str(issue).lstrip("-").isdigit() else None
+    if not sha:
+        return None
+    meta = resolve_commit_meta(repo, [sha])
+    if meta is None:
+        return None
+    payload = parse_marker((meta.get(sha) or {}).get("message") or "") or {}
+    return payload.get("worker") or None
 
 
 # --- claim state file --------------------------------------------------------
@@ -554,9 +700,17 @@ def classify_queue(repo, project, include_body=False):
     Returns a list of (number, title, createdAt, "startable"|"held") sorted
     oldest-first, or None on transport failure. With include_body=True each row
     gains a fifth element, the issue body, so claim-next can brief a subagent
-    from the win without a second fetch (the GraphQL walk already has it)."""
+    from the win without a second fetch (the GraphQL walk already has it).
+
+    Held means: a held label (the projection) OR a live claim ref (the lock).
+    Reading both keeps the filter honest across the crash window between a won
+    CAS and its label projection — a ref-held task is never offered as
+    startable just because the label has not landed yet."""
     nodes = fetch_open_tasks(repo)
     if nodes is None:
+        return None
+    claim_refs = claim_ref_list(repo)
+    if claim_refs is None:
         return None
     project_label = f"project:{project}"
     nodes = [
@@ -574,7 +728,7 @@ def classify_queue(repo, project, include_body=False):
         created = node.get("createdAt", "")
         body = node.get("body") or ""
         label_names = [l.get("name", "") for l in node.get("labels", {}).get("nodes", [])]
-        if any(h in label_names for h in HELD_LABELS):
+        if any(h in label_names for h in HELD_LABELS) or number in claim_refs:
             rows.append([number, title, created, "held", body])
             continue
 
@@ -626,11 +780,11 @@ def cmd_list_startable(args):
 # --- subcommand: claim -------------------------------------------------------
 
 def _claim_once(repo, issue, worker):
-    """The one contended claim sequence — guard, label, comment, arbitrate —
-    executed identically every time (PROTOCOL.md §5). Returns an exit code and
-    prints the same `claim:` diagnostic line for each outcome. Shared by the
-    `claim` subcommand and by `claim-next`'s per-candidate loop so the two can
-    never drift: a loss backs off writing nothing, exactly here, once."""
+    """The one contended claim sequence — guard, CAS, projection — executed
+    identically every time (PROTOCOL.md §5). Returns an exit code and prints a
+    `claim:` diagnostic line for each outcome. Shared by the `claim` subcommand
+    and by `claim-next`'s per-candidate loop so the two can never drift: a loss
+    backs off writing nothing, exactly here, once."""
 
     # 1. Guard — re-fetch labels; a held task is skipped with zero writes.
     labels_obj = gh_json(["-R", repo, "issue", "view", str(issue), "--json", "labels"])
@@ -643,32 +797,46 @@ def _claim_once(repo, issue, worker):
             print(f"claim: held issue={issue} label={held}")
             return EXIT_NOT_CLEAR
 
-    # 2. Label, then 3. the claim comment (disclaimer, courtesy prose, marker).
+    # 2. CAS — orphan claim commit, then create the claim ref. The server
+    #    accepts exactly one creator, so there is nothing to arbitrate.
+    sha = create_claim_commit(repo, {"type": "claim", "worker": worker})
+    if sha is None:
+        print(f"claim: gh-failure issue={issue} stage=commit")
+        return EXIT_TRANSPORT
+    outcome = claim_ref_create(repo, issue, sha)
+    if outcome == "fail":
+        print(f"claim: gh-failure issue={issue} stage=ref")
+        return EXIT_TRANSPORT
+    if outcome == "lost":
+        # A 422 is a genuine loss only when the ref belongs to ANOTHER worker.
+        # A worker re-claiming its OWN in-flight claim after a network failure
+        # (PROTOCOL.md §5's re-check caveat) already owns the task — recognize
+        # its own ref and fall through to re-project, rather than reporting a
+        # false loss. An unreadable/absent owner is treated as not-ours.
+        if claim_ref_owner(repo, issue) != worker:
+            print(f"claim: lost-cas issue={issue} — another worker holds the claim ref")
+            return EXIT_LOST
+
+    # 3. Projection — the claim is already won and the ref holds it. Record the
+    #    state file FIRST so the lifecycle hooks can release the claim even if
+    #    the projection writes below fail; then the in-progress label (the
+    #    operator's dashboard) and the claim comment (narrative). A failure
+    #    here leaves the claim HELD — exit 20 says re-check, and the reaper
+    #    heals a missing label on its next pass.
+    write_claim_state(repo, issue, worker)
     if not swap_labels(repo, issue, add="in-progress"):
-        print(f"claim: gh-failure issue={issue} stage=label")
+        print(f"claim: gh-failure issue={issue} stage=label (claim held)")
         return EXIT_TRANSPORT
     body = compose_comment(
         worker, "Claimed this task — starting work now.",
         {"type": "claim", "worker": worker},
     )
     if not post_comment(repo, issue, body):
-        print(f"claim: gh-failure issue={issue} stage=comment")
+        print(f"claim: gh-failure issue={issue} stage=comment (claim held)")
         return EXIT_TRANSPORT
 
-    # 4. Arbitrate — re-read the (fully paginated) comment history; the first
-    #    claim of the current claim window wins.
-    bodies = comment_bodies(repo, issue)
-    if bodies is None:
-        print(f"claim: gh-failure issue={issue} stage=arbitrate")
-        return EXIT_TRANSPORT
-
-    winner = arbitrate_winner(bodies)
-    if winner == worker:
-        write_claim_state(repo, issue, worker)
-        print(f"claim: claimed issue={issue} worker={worker}")
-        return EXIT_OK
-    print(f"claim: lost-tiebreaker issue={issue} winner={winner or 'unknown'}")
-    return EXIT_LOST
+    print(f"claim: claimed issue={issue} worker={worker}")
+    return EXIT_OK
 
 
 def cmd_claim(args):
@@ -682,12 +850,12 @@ def cmd_claim(args):
 
 def cmd_claim_next(args):
     """Collapse the deterministic claim loop into one invocation: list startable
-    candidates oldest-first, then guard/label/comment/arbitrate each in turn,
-    stopping at the first win. Per-candidate losses (10/11) move on to the next
-    one, exactly as the drain loop did by hand; a transport fault (20) stops
-    immediately with the state-unknown semantics; an exhausted queue is an
-    honest EXIT_NONE. Never turns a lost tiebreaker into a retry on the same
-    issue (PROTOCOL.md §5) — it iterates forward, never back."""
+    candidates oldest-first, then guard + CAS each in turn, stopping at the
+    first win. Per-candidate losses (10/11) move on to the next one, exactly as
+    the drain loop did by hand; a transport fault (20) stops immediately with
+    the state-unknown semantics; an exhausted queue is an honest EXIT_NONE.
+    Never turns a lost CAS into a retry on the same issue (PROTOCOL.md §5) — it
+    iterates forward, never back."""
     repo, project, worker = args.repo, args.project, args.worker
 
     refused = refuse_second_claim(worker)
@@ -726,12 +894,21 @@ def cmd_claim_next(args):
 # --- subcommand: heartbeat ---------------------------------------------------
 
 def cmd_heartbeat(args):
+    """Liveness: force-move the claim ref to a fresh commit whose server-stamped
+    date restarts the reaper's clock and whose marker message carries the
+    progress text. No timeline comment — a long task no longer floods the
+    thread; `status` surfaces the age and the message from the ref."""
     repo, issue, worker, message = args.repo, args.issue, args.worker, args.message
-    body = compose_comment(worker, message, {"type": "heartbeat", "worker": worker})
-    if not post_comment(repo, issue, body):
-        print(f"heartbeat: gh-failure issue={issue}")
+    sha = create_claim_commit(
+        repo, {"type": "heartbeat", "worker": worker, "msg": message}
+    )
+    if sha is None:
+        print(f"heartbeat: gh-failure issue={issue} stage=commit")
         return EXIT_TRANSPORT
-    print(f"heartbeat: posted issue={issue} worker={worker}")
+    if not claim_ref_update(repo, issue, sha):
+        print(f"heartbeat: gh-failure issue={issue} stage=ref")
+        return EXIT_TRANSPORT
+    print(f"heartbeat: advanced issue={issue} worker={worker}")
     return EXIT_OK
 
 
@@ -760,6 +937,12 @@ def cmd_escalate(args):
     if not swap_labels(repo, issue, remove="in-progress", add="needs-decision"):
         print(f"escalate: gh-failure issue={issue} stage=labels")
         return EXIT_TRANSPORT
+    # Comment and labels first, the lock last: a half-executed escalation
+    # leaves the task held rather than free with no question on record. A
+    # leftover ref (delete failed) is an orphan lock the reaper deletes.
+    if not claim_ref_delete(repo, issue):
+        print(f"escalate: gh-failure issue={issue} stage=ref")
+        return EXIT_TRANSPORT
 
     clear_claim_state(worker)
     print(f"escalate: escalated issue={issue} worker={worker}")
@@ -787,6 +970,10 @@ def cmd_deliver(args):
     if not swap_labels(repo, issue, remove="in-progress", add="awaiting-merge"):
         print(f"deliver: gh-failure issue={issue} stage=labels")
         return EXIT_TRANSPORT
+    # Result and labels first, the lock last (escalate's ordering rule).
+    if not claim_ref_delete(repo, issue):
+        print(f"deliver: gh-failure issue={issue} stage=ref")
+        return EXIT_TRANSPORT
 
     clear_claim_state(worker)
     suffix = f" pr={pr_url}" if pr_url else ""
@@ -809,6 +996,12 @@ def cmd_release(args):
         return EXIT_TRANSPORT
     if not swap_labels(repo, issue, remove="in-progress"):
         print(f"release: gh-failure issue={issue} stage=label")
+        return EXIT_TRANSPORT
+    # The ref IS the claim: deleting it is what actually frees the task for
+    # the next worker (comment and label are narrative/projection). Last, so
+    # the task never looks free while half-released.
+    if not claim_ref_delete(repo, issue):
+        print(f"release: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
 
     clear_claim_state(worker)
@@ -893,10 +1086,11 @@ def cmd_watch(args):
 #
 # Reuse, don't duplicate: the queue itself comes from the same paginated
 # fetch_open_tasks GraphQL walk list-startable uses (held tasks keep their
-# kraken-task label, so the walk returns them). Per-issue comment reads happen
-# only for tasks that are actually in flight or awaiting merge — an idle queue
-# stays O(pages) — and go through the paginated comment_records path so the
-# heartbeat anchor never reads a truncated >100-comment history.
+# kraken-task label, so the walk returns them). In-flight worker/age/progress
+# come from the claim refs (one matching-refs read + one batched commit-meta
+# call — the same clock the reaper reads); per-issue comment reads happen only
+# for awaiting-merge tasks (the PR link), through the paginated comment_records
+# path so a long thread is never read truncated.
 
 _PR_URL_RE = re.compile(r"https?://\S+?/pull/\d+")
 
@@ -926,41 +1120,19 @@ def parse_iso(ts):
     return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
 
 
-def _is_machine_line(line):
-    """Whether a line carries a worker-liveness machine payload — a protocol/3
-    claim/heartbeat marker. Reset markers (delivered/released/…) are not
-    liveness: they already drop in-progress, so they never anchor a still-held
-    claim (PROTOCOL.md §6)."""
-    event = machine_event(line)
-    return event is not None and event.get("type") in LIVENESS_TYPES
-
-
-def heartbeat_anchor(records):
-    """The createdAt of the newest comment carrying a worker liveness marker
-    (a claim/heartbeat marker), or None when the worker never spoke.
-
-    This is the reaper's staleness anchor (reclaim-stale.yml), computed the same
-    way: only those two markers prove liveness, and an operator comment —
-    carrying neither — never resets the clock, so a human poking a dead worker's
-    issue cannot make it look alive. None means no anchor exists at all (a
-    malformed or silent claim), which the reaper treats as infinitely stale."""
-    newest = None
-    for rec in records:
-        body = rec.get("body") or ""
-        if any(_is_machine_line(l) for l in body.split("\n")):
-            created = rec.get("createdAt") or ""
-            if created and (newest is None or created > newest):
-                newest = created
-    return newest
-
-
-def flat_comment_lines(records):
-    """Every comment body flattened to a per-line list, in server order — the
-    shape arbitrate_winner reads."""
-    lines = []
-    for rec in records:
-        lines.extend((rec.get("body") or "").split("\n"))
-    return lines
+def claim_meta_of(sha, commit_meta):
+    """Decode one claim ref's commit into (worker, msg, anchor_iso) — the
+    marker payload plus the server-stamped committedDate. This is the ONE
+    liveness read `status` and the reaper share: the ref's commit date is the
+    staleness clock, so nothing on the issue timeline (an operator poking a
+    dead worker's thread, a bot comment) can ever make a claim look alive.
+    Unreadable pieces come back as None, never guessed."""
+    commit = commit_meta.get(sha) or {}
+    payload = parse_marker(commit.get("message") or "") or {}
+    worker = payload.get("worker") or None
+    msg = payload.get("msg") or None
+    anchor = commit.get("committedDate") or None
+    return worker, msg, anchor
 
 
 def parse_pr_url(records):
@@ -1025,12 +1197,13 @@ def format_age(seconds):
     return f"{hours // 24}d"
 
 
-def compute_status(repo, project, nodes, now, *, comment_reader, pr_merged,
-                   project_lister):
+def compute_status(repo, project, nodes, now, *, claim_refs, commit_meta,
+                   comment_reader, pr_merged, project_lister):
     """Pure-ish status computation, transport injected so it is unit-testable:
-    given the queue nodes (from fetch_open_tasks) and reader callbacks, build the
-    review/decision/in-flight/projects report. Returns the report dict, or None
-    on any injected-transport failure (propagated as exit 20)."""
+    given the queue nodes (from fetch_open_tasks), the claim refs + their commit
+    meta, and reader callbacks, build the review/decision/in-flight/projects
+    report. Returns the report dict, or None on any injected-transport failure
+    (propagated as exit 20)."""
     if project:
         pl = project
         nodes = [n for n in nodes if pl in project_names_of(n)]
@@ -1059,20 +1232,22 @@ def compute_status(repo, project, nodes, now, *, comment_reader, pr_merged,
                            "pr_url": pr_url, "orphan": orphan})
         elif "needs-decision" in labels:
             decision.append({"number": number, "title": title})
-        elif "in-progress" in labels:
-            records = comment_reader(repo, number)
-            if records is None:
-                return None
-            worker = arbitrate_winner(flat_comment_lines(records)) or None
-            anchor = heartbeat_anchor(records)
+        elif "in-progress" in labels or number in claim_refs:
+            # In flight: the label projection OR the lock itself — a claim
+            # whose label projection has not landed yet is still running work.
+            worker, msg, anchor = None, None, None
             age = None
-            if anchor:
-                anchor_epoch = parse_iso(anchor)
-                if anchor_epoch is not None:
-                    age = max(0, int(now - anchor_epoch))
+            sha = claim_refs.get(number)
+            if sha:
+                worker, msg, anchor = claim_meta_of(sha, commit_meta)
+                if anchor:
+                    anchor_epoch = parse_iso(anchor)
+                    if anchor_epoch is not None:
+                        age = max(0, int(now - anchor_epoch))
             in_flight.append({"number": number, "title": title, "worker": worker,
                               "heartbeat_anchor": anchor,
-                              "heartbeat_age_seconds": age})
+                              "heartbeat_age_seconds": age,
+                              "heartbeat_msg": msg})
 
     if project:
         projects = [project]
@@ -1129,8 +1304,10 @@ def render_status(report):
     for item in in_flight:
         worker = item["worker"] or "unknown"
         age = format_age(item["heartbeat_age_seconds"])
+        msg = item.get("heartbeat_msg")
+        note = f" — {msg}" if msg else ""
         lines.append(f"     #{item['number']}  {item['title']}  · worker {worker} "
-                     f"· last heartbeat {age} ago")
+                     f"· last heartbeat {age} ago{note}")
     lines.append("")
 
     orphans = report["orphans"]
@@ -1159,9 +1336,19 @@ def cmd_status(args):
     if nodes is None:
         print("status: gh-failure stage=list", file=sys.stderr)
         return EXIT_TRANSPORT
+    claim_refs = claim_ref_list(repo)
+    if claim_refs is None:
+        print("status: gh-failure stage=refs", file=sys.stderr)
+        return EXIT_TRANSPORT
+    commit_meta = resolve_commit_meta(repo, list(claim_refs.values()))
+    if commit_meta is None:
+        print("status: gh-failure stage=commits", file=sys.stderr)
+        return EXIT_TRANSPORT
 
     report = compute_status(
         repo, project, nodes, time.time(),
+        claim_refs=claim_refs,
+        commit_meta=commit_meta,
         comment_reader=comment_records,
         pr_merged=pr_is_merged,
         project_lister=list_projects,
@@ -1357,18 +1544,17 @@ def render_init(report):
 # same unit tests. Each workflow shrinks to a checkout + a single exec of the
 # matching subcommand below.
 
-# The reaper's default staleness threshold, in hours. An in-progress issue whose
-# worker's last liveness marker (claim/heartbeat) is older than this — or that
-# carries no liveness marker at all — is reclaimed to needs-decision. The
-# workflow passes it through the MAX_HOURS env var (kept for continuity).
+# The reaper's default staleness threshold, in hours. A claim ref whose commit
+# date is older than this — or whose commit cannot be read at all — belongs to
+# a dead worker and is reclaimed to needs-decision. The workflow passes it
+# through the MAX_HOURS env var (kept for continuity).
 REAP_DEFAULT_MAX_HOURS = 6
 
 
 def stale_claim_body(reason):
-    """The reaper's reclaim comment: human prose plus the protocol/3 stale-claim
-    marker (a reset event — the most recent one ends the claim window so a fresh
-    worker can re-claim). It carries NO attribution disclaimer: the reaper is not
-    a worker but the coordination repo's own automation, authored server-side by
+    """The reaper's reclaim comment: human prose plus the stale-claim marker
+    (audit trail). It carries NO attribution disclaimer: the reaper is not a
+    worker but the coordination repo's own automation, authored server-side by
     the Actions bot (user.type == Bot), which is exactly how requeue-on-reply's
     Bot gate tells it apart from an operator comment."""
     marker = make_marker({"type": "stale-claim", "reason": reason})
@@ -1379,14 +1565,70 @@ def stale_claim_body(reason):
     return f"{prose}\n\n{marker}"
 
 
+def orphan_projection_body():
+    """The reconciler's requeue note for an in-progress label with no claim ref
+    behind it — a crashed release, or a claim made before protocol/4. Same
+    Actions-bot authorship as stale_claim_body, same no-disclaimer rule."""
+    marker = make_marker({
+        "type": "stale-claim",
+        "reason": "in-progress label with no claim ref",
+    })
+    prose = (
+        "This task carried the in-progress label with no live claim ref behind "
+        "it (a crashed release, or a claim from before protocol/4). The label "
+        "was removed and the task rejoins the queue."
+    )
+    return f"{prose}\n\n{marker}"
+
+
+def resolve_issue_meta(repo, numbers):
+    """Each issue's open/closed state and label names in one batched GraphQL
+    call (one aliased `iN: issue(number: N)` field per number) — the
+    reconciler's per-ref read, never one call per issue. Returns
+    {number: (is_open, [label names])}, or None on transport failure."""
+    if not numbers:
+        return {}
+    owner, name = repo.split("/", 1)
+    fields = " ".join(
+        f"i{n}: issue(number: {n}) {{ state labels(first: 20) {{ nodes {{ name }} }} }}"
+        for n in numbers
+    )
+    resp = graphql(f'{{ repository(owner: "{owner}", name: "{name}") {{ {fields} }} }}')
+    if resp is None:
+        return None
+    repo_obj = resp["data"]["repository"]
+    meta = {}
+    for n in numbers:
+        obj = repo_obj.get(f"i{n}") or {}
+        is_open = str(obj.get("state", "")).upper() == "OPEN"
+        labels = [l.get("name", "")
+                  for l in (obj.get("labels") or {}).get("nodes", [])]
+        meta[n] = (is_open, labels)
+    return meta
+
+
 def cmd_reap(args):
-    """Reclaim stale claims (reclaim-stale.yml). For every OPEN in-progress
-    issue, anchor staleness to the worker's newest liveness marker
-    (claim/heartbeat) — NOT the issue's updatedAt, so an operator poking a dead
-    worker's issue never resets the clock — and when that anchor is older than
-    MAX_HOURS (or absent entirely: infinitely stale), swap in-progress for
-    needs-decision and post the stale-claim comment for the operator to triage.
-    Exit 0 on success, 20 on any gh/transport failure."""
+    """The reconciler (reclaim-stale.yml). The claim ref is the lock and its
+    commit date the liveness clock, so reap reads every claim ref plus the
+    in-progress projection and makes the two agree (PROTOCOL.md §6):
+
+      1. a ref on a closed or needs-decision/awaiting-merge issue is an orphan
+         lock (a terminal transition crashed before its ref delete) — delete
+         the ref, touch nothing else;
+      2. a ref older than MAX_HOURS — or whose commit cannot be read: nothing
+         proves the worker alive — is a dead worker's claim: post the
+         stale-claim comment, move the task to needs-decision, delete the ref
+         (lock last, so a crashed reap leaves the task held and rule 1 finishes
+         the job next pass);
+      3. a fresh ref on an issue missing its in-progress label is a claim whose
+         projection crashed — heal by adding the label;
+      4. an OPEN in-progress issue with NO ref is an orphan projection (a
+         crashed release, or a claim from before protocol/4) — remove the label
+         so the task requeues, with a bot note saying why.
+
+    Nothing on the issue timeline anchors liveness — an operator poking a dead
+    worker's thread never resets the clock. Exit 0 on success, 20 on any
+    gh/transport failure."""
     repo = args.repo
     max_hours = args.max_hours
     if max_hours is None:
@@ -1396,45 +1638,92 @@ def cmd_reap(args):
             max_hours = REAP_DEFAULT_MAX_HOURS
     now = time.time()
 
-    numbers = open_issue_numbers(repo, "in-progress")
-    if numbers is None:
+    refs = claim_ref_list(repo)
+    if refs is None:
+        print("reap: gh-failure stage=refs", file=sys.stderr)
+        return EXIT_TRANSPORT
+    commit_meta = resolve_commit_meta(repo, list(refs.values()))
+    if commit_meta is None:
+        print("reap: gh-failure stage=commits", file=sys.stderr)
+        return EXIT_TRANSPORT
+    issue_meta = resolve_issue_meta(repo, sorted(refs))
+    if issue_meta is None:
+        print("reap: gh-failure stage=issues", file=sys.stderr)
+        return EXIT_TRANSPORT
+    progress_nums = open_issue_numbers(repo, "in-progress")
+    if progress_nums is None:
         print("reap: gh-failure stage=list", file=sys.stderr)
         return EXIT_TRANSPORT
 
-    reclaimed = 0
-    for num in numbers:
-        # The whole comment history, paginated past 100 — the newest liveness
-        # marker can sit past the first page on a long-lived task, and a capped
-        # read would make a live, heartbeating worker look silent (see
-        # comment_records / comment_bodies).
-        records = comment_records(repo, num)
-        if records is None:
-            print(f"reap: gh-failure stage=comments issue={num}", file=sys.stderr)
-            return EXIT_TRANSPORT
+    reclaimed = orphan_locks = healed = requeued = 0
+    for num in sorted(refs):
+        is_open, labels = issue_meta.get(num, (False, []))
 
-        anchor = heartbeat_anchor(records)
-        if anchor is None:
-            reason = "no worker heartbeat on record"  # infinitely stale
+        # 1. Orphan lock: the task already left the claim by a terminal
+        #    transition (or closed); only the ref delete was lost.
+        if not is_open or "needs-decision" in labels or "awaiting-merge" in labels:
+            if not claim_ref_delete(repo, num):
+                print(f"reap: gh-failure stage=ref issue={num}", file=sys.stderr)
+                return EXIT_TRANSPORT
+            print(f"reap: orphan-lock issue={num} — claim ref deleted")
+            orphan_locks += 1
+            continue
+
+        anchor_epoch = parse_iso(
+            (commit_meta.get(refs[num]) or {}).get("committedDate") or ""
+        )
+        if anchor_epoch is None:
+            stale = True  # nothing proves the worker alive — infinitely stale
+            reason = "no readable heartbeat on the claim ref"
         else:
-            anchor_epoch = parse_iso(anchor)
-            if anchor_epoch is None:
-                reason = "no worker heartbeat on record"
-            else:
-                age_hours = int((now - anchor_epoch) // 3600)
-                if age_hours < max_hours:
-                    continue
-                reason = f"no worker heartbeat for {age_hours}h"
+            age_hours = int((now - anchor_epoch) // 3600)
+            stale = age_hours >= max_hours
+            reason = f"no worker heartbeat for {age_hours}h"
 
-        if not swap_labels(repo, num, remove="in-progress", add="needs-decision"):
-            print(f"reap: gh-failure stage=labels issue={num}", file=sys.stderr)
+        if stale:
+            # 2. Dead worker: reclaim for triage, then release the lock.
+            if not swap_labels(
+                repo, num,
+                remove="in-progress" if "in-progress" in labels else None,
+                add="needs-decision",
+            ):
+                print(f"reap: gh-failure stage=labels issue={num}", file=sys.stderr)
+                return EXIT_TRANSPORT
+            if not post_comment(repo, num, stale_claim_body(reason)):
+                print(f"reap: gh-failure stage=comment issue={num}", file=sys.stderr)
+                return EXIT_TRANSPORT
+            if not claim_ref_delete(repo, num):
+                print(f"reap: gh-failure stage=ref issue={num}", file=sys.stderr)
+                return EXIT_TRANSPORT
+            print(f"reap: reclaimed issue={num} ({reason})")
+            reclaimed += 1
+            continue
+
+        # 3. Live claim: heal a label projection that never landed.
+        if "in-progress" not in labels:
+            if not swap_labels(repo, num, add="in-progress"):
+                print(f"reap: gh-failure stage=heal issue={num}", file=sys.stderr)
+                return EXIT_TRANSPORT
+            print(f"reap: healed issue={num} — in-progress label restored")
+            healed += 1
+
+    # 4. Orphan projection: in-progress with no lock behind it — requeue.
+    for num in progress_nums:
+        if num in refs:
+            continue
+        if not swap_labels(repo, num, remove="in-progress"):
+            print(f"reap: gh-failure stage=requeue issue={num}", file=sys.stderr)
             return EXIT_TRANSPORT
-        if not post_comment(repo, num, stale_claim_body(reason)):
+        if not post_comment(repo, num, orphan_projection_body()):
             print(f"reap: gh-failure stage=comment issue={num}", file=sys.stderr)
             return EXIT_TRANSPORT
-        print(f"reap: reclaimed issue={num} ({reason})")
-        reclaimed += 1
+        print(f"reap: requeued issue={num} (in-progress label with no claim ref)")
+        requeued += 1
 
-    print(f"reap: done in-progress={len(numbers)} reclaimed={reclaimed}")
+    print(
+        f"reap: done refs={len(refs)} reclaimed={reclaimed} "
+        f"orphan_locks={orphan_locks} healed={healed} requeued={requeued}"
+    )
     return EXIT_OK
 
 
@@ -1701,19 +1990,24 @@ def cmd_cleanup(args):
             return EXIT_TRANSPORT
         stripped += 1
 
+    # A closed task must not leave its lock behind: a crashed worker's claim
+    # ref could linger past the close (claim_ref_delete tolerates one that is
+    # already gone, so this stays idempotent).
+    if not claim_ref_delete(repo, issue):
+        print(f"cleanup: gh-failure stage=ref issue={issue}", file=sys.stderr)
+        return EXIT_TRANSPORT
+
     print(f"cleanup: #{issue} done stripped={stripped}")
     return EXIT_OK
 
 
 # is the read side of single-sourcing: the disclaimer format and the machine
-# marker / claim-window vocabulary live in the constants above, and every other
-# consumer derives from or is verified against them by executing this command
-# rather than re-declaring the literals.
+# marker vocabulary live in the constants above, and every other consumer
+# derives from or is verified against them by executing this command rather
+# than re-declaring the literals.
 CONTRACT_FIELDS = {
     "disclaimer": lambda args: [disclaimer(args.worker)],
     "task-trailer": lambda args: [task_trailer(args.repo, args.issue, args.worker)],
-    "reset-types": lambda args: list(RESET_TYPES),
-    "liveness-types": lambda args: list(LIVENESS_TYPES),
     "marker-types": lambda args: list(MARKER_TYPES),
 }
 
@@ -1761,7 +2055,8 @@ def build_parser():
                    help="emit the won claim as a JSON object {issue,title,body}")
     p.set_defaults(func=cmd_claim_next)
 
-    p = sub.add_parser("heartbeat", help="liveness comment")
+    p = sub.add_parser("heartbeat",
+                       help="liveness: advance the claim ref to a fresh commit")
     p.add_argument("repo")
     p.add_argument("issue")
     p.add_argument("worker")
@@ -1797,7 +2092,8 @@ def build_parser():
 
     p = sub.add_parser(
         "reap",
-        help="reclaim-stale.yml: move silent in-progress issues to needs-decision",
+        help="reclaim-stale.yml: reconcile claim refs with labels — reclaim "
+             "stale claims, delete orphan locks, heal/requeue projections",
     )
     p.add_argument("repo")
     p.add_argument("--max-hours", type=int, default=None,
@@ -1856,7 +2152,7 @@ def build_parser():
 
     p = sub.add_parser(
         "contract",
-        help="print an authoritative contract literal (disclaimer / machine-line "
+        help="print an authoritative contract literal (disclaimer / marker "
              "vocabulary) for consumers to derive from — no network",
     )
     p.add_argument("field", choices=sorted(CONTRACT_FIELDS),

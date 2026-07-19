@@ -32,8 +32,8 @@ kraken_json_field() { # $1 = file, $2 = field
 
 # release_all_claims REASON — run `kraken.py release <claim> "REASON"` for every
 # open claim on this machine. The released marker lands before in-progress
-# drops — the ordering that closes the claim window (PROTOCOL.md §9). With no
-# state dir or no claim files it is a strict no-op: no writes at all.
+# drops, and the claim ref last — the ordering that frees the lock honestly
+# (PROTOCOL.md §9). With no state dir or no claim files it is a strict no-op.
 release_all_claims() {
   local reason="$1" f repo issue worker
   [ -d "$KRAKEN_STATE" ] || return 0

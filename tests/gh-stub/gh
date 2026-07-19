@@ -24,31 +24,44 @@ State layout (under $GH_STUB_STATE):
                          absent = no native blockers, i.e. the real API's [])
   issues/<n>/comments/NNNN.md   bodies, NNNN = server order
   issues/<n>/comments/NNNN.at   optional ISO timestamp for that comment
-                         (absent = derived from the issue's createdAt); the
-                         reaper reads comment createdAt to anchor staleness
+                         (absent = derived from the issue's createdAt)
+  refs/<n>               claim ref refs/kraken/claims/<n>; content = target sha
+  objects/<sha>.json     git commit object: {"message", "committedDate"}
+                         (a backdated committedDate ages a claim for the reaper)
   log                    every invocation, one per line
 
 Knobs:
   GH_STUB_FAIL=<ERE>    any invocation whose args match exits 1 (network sim)
   GH_STUB_BARRIER=<n>   `issue view --json labels` blocks until n callers
-                        arrive — holds every racer inside the claim window so
+                        arrive — holds every racer inside the claim guard so
                         the race test is deterministic, not timing-dependent
 
 `gh api repos/OWNER/REPO/issues/N/dependencies/blocked_by` models GitHub's
 native blocked-by relationships: emits a JSON array of {number, state}, state
 read from each blocker's own issues/<n>/state file.
 
-`gh api graphql -f query=...` models the two shapes kraken.py's batched listing
-sends (real GraphQL enum state comes back UPPERCASE, unlike the REST endpoints,
-so both shapes emit OPEN/CLOSED):
+`gh api repos/OWNER/REPO/git/...` models the protocol/4 claim-ref surface:
+commit creation (`git/commits`, POST --input -), the ref CAS (`git/refs`,
+POST — HTTP 422 on an existing ref, serialized under the stub lock exactly
+like GitHub's server side), heartbeat force-update (PATCH) and release
+(DELETE) on `git/refs/kraken/claims/<n>` (422 when missing), and the
+matching-refs listing.
+
+`gh api graphql -f query=...` models the three shapes kraken.py's batched
+reads send (real GraphQL enum state comes back UPPERCASE, unlike the REST
+endpoints, so the issue shapes emit OPEN/CLOSED):
   issues(states: OPEN, labels: [...], first: N[, after: "cursor"])
     -> a page of {number,title,createdAt,body,labels,blockedBy} nodes, real
        cursor pagination (pageInfo.hasNextPage/endCursor).
-  aliased `iN: issue(number: N) { state }` fields (the depends-on fallback's
-    batched target-state lookup) -> one {data:{repository:{iN:{state}}}} per
-    alias, in a single round trip.
+  aliased `iN: issue(number: N) { ... }` fields (depends-on targets and the
+    reconciler's issue-meta read) -> {state, labels{nodes}} per alias, in a
+    single round trip.
+  aliased `cN: object(oid: "sha") { ... on Commit { committedDate message } }`
+    fields (claim-commit meta) -> the stored git object per alias, null when
+    the object is unknown.
 """
 import base64
+import hashlib
 import json
 import os
 import re
@@ -137,7 +150,7 @@ def parse_args(args):
         "pr_sub": "", "title": "", "head": "", "base": "", "draft": 0,
         "gql_query": "", "label_sub": "", "repo_sub": "", "method": "",
         "put_content": "", "put_message": "", "color": "", "desc": "",
-        "label_filters": [],
+        "label_filters": [], "input": "",
     }
     i = 0
     n = len(args)
@@ -176,6 +189,8 @@ def parse_args(args):
             p["draft"] = 1; i += 1
         elif a in ("-X", "--method"):
             p["method"] = nxt; i += 2
+        elif a == "--input":
+            p["input"] = nxt; i += 2
         elif a == "--color":
             p["color"] = nxt; i += 2
         elif a == "--description":
@@ -331,18 +346,37 @@ def graphql_list_issues(q):
 
 
 def graphql_issue_states(q):
+    """Aliased issue lookups. Always include state and labels: depends-on
+    callers read only .state, the reconciler's issue-meta read wants both —
+    one shape serves both without a second dispatch."""
     fields = {}
     for m in re.finditer(r"([a-zA-Z_][a-zA-Z0-9_]*): issue\(number: ([0-9]+)\)", q):
         alias, num = m.group(1), m.group(2)
-        sf = os.path.join(STATE, "issues", num, "state")
+        d = os.path.join(STATE, "issues", num)
+        sf = os.path.join(d, "state")
         st = cmdsub(read_text(sf)).upper() if os.path.isfile(sf) else "CLOSED"
-        fields[alias] = {"state": st}
+        lf = os.path.join(d, "labels")
+        names = label_names(read_text(lf)) if os.path.isfile(lf) else []
+        fields[alias] = {"state": st, "labels": {"nodes": [{"name": x} for x in names]}}
+    return {"data": {"repository": fields}}
+
+
+def graphql_commit_meta(q):
+    """Aliased `object(oid:)` lookups — the claim-commit meta read. Unknown
+    objects come back null, like the real API."""
+    fields = {}
+    for m in re.finditer(r'([a-zA-Z_][a-zA-Z0-9_]*): object\(oid: "([0-9a-f]+)"\)', q):
+        alias, sha = m.group(1), m.group(2)
+        f = os.path.join(STATE, "objects", sha + ".json")
+        fields[alias] = json.loads(read_text(f)) if os.path.isfile(f) else None
     return {"data": {"repository": fields}}
 
 
 def graphql_dispatch(q):
     if "issues(states: OPEN" in q:
         return graphql_list_issues(q)
+    if "object(oid:" in q:
+        return graphql_commit_meta(q)
     return graphql_issue_states(q)
 
 
@@ -459,9 +493,123 @@ def do_comment():
         unlock()
 
 
+# --- protocol/4 git-data surface (claim refs) --------------------------------
+
+def input_body():
+    """The --input JSON body of a git-data write (kraken.py always passes
+    `--input -`, so stdin is the body)."""
+    raw = sys.stdin.read() if P["input"] == "-" else read_text(P["input"])
+    try:
+        return json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        die("gh-stub: unparseable --input body")
+
+
+def ref_path_of(endpoint):
+    """STATE/refs/<n> for a git/refs/kraken/claims/<n> endpoint."""
+    m = re.search(r"/git/refs/kraken/claims/([0-9]+)$", endpoint)
+    if not m:
+        die("gh-stub: unsupported ref endpoint '%s'" % endpoint)
+    return os.path.join(STATE, "refs", m.group(1))
+
+
+def http_422(msg):
+    """Mimic gh's error surface for an HTTP 422: message + status on stderr,
+    exit 1 — exactly the signal kraken.py's _is_http_422 keys on."""
+    die("gh: %s (HTTP 422)" % msg)
+
+
+def do_git_commits():
+    body = input_body()
+    message = body.get("message", "")
+    sha = hashlib.sha1(
+        ("%s\n%d\n%d" % (message, time.time_ns(), os.getpid())).encode("utf-8")
+    ).hexdigest()
+    obj = {
+        "message": message,
+        "committedDate": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    lock()
+    try:
+        odir = os.path.join(STATE, "objects")
+        os.makedirs(odir, exist_ok=True)
+        with open(os.path.join(odir, sha + ".json"), "w", encoding="utf-8") as f:
+            f.write(json.dumps(obj))
+    finally:
+        unlock()
+    sys.stdout.write(json.dumps({"sha": sha}) + "\n")
+
+
+def do_git_refs_create():
+    body = input_body()
+    ref = body.get("ref", "")
+    m = re.search(r"^refs/kraken/claims/([0-9]+)$", ref)
+    if not m:
+        die("gh-stub: unsupported ref name '%s'" % ref)
+    path = os.path.join(STATE, "refs", m.group(1))
+    # The CAS: creation is atomic under the lock — the stub's mkdir lock IS
+    # GitHub's server-side serialization, so exactly one racer sees "absent".
+    # http_422 raises SystemExit, which flows through finally to the unlock.
+    lock()
+    try:
+        if os.path.isfile(path):
+            http_422("Reference already exists")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body.get("sha", "") + "\n")
+    finally:
+        unlock()
+    sys.stdout.write(json.dumps({"ref": ref}) + "\n")
+
+
+def do_git_refs_update(endpoint):
+    body = input_body()
+    path = ref_path_of(endpoint)
+    lock()
+    try:
+        if not os.path.isfile(path):
+            http_422("Reference does not exist")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body.get("sha", "") + "\n")
+    finally:
+        unlock()
+    sys.stdout.write(json.dumps({"ref": endpoint.split("/git/", 1)[1]}) + "\n")
+
+
+def do_git_refs_delete(endpoint):
+    path = ref_path_of(endpoint)
+    lock()
+    try:
+        if not os.path.isfile(path):
+            http_422("Reference does not exist")
+        os.remove(path)
+    finally:
+        unlock()
+
+
+def do_matching_refs():
+    rdir = os.path.join(STATE, "refs")
+    out = []
+    if os.path.isdir(rdir):
+        for e in sorted(os.listdir(rdir), key=lambda x: int(x) if x.isdigit() else 0):
+            sha = cmdsub(read_text(os.path.join(rdir, e)))
+            out.append({"ref": "refs/kraken/claims/%s" % e, "object": {"sha": sha}})
+    emit(out)
+
+
 def do_api():
     endpoint = P["endpoint"]
-    if re.search(r"/issues/[0-9]+/comments", endpoint):
+    if endpoint.endswith("/git/commits") and P["method"] == "POST":
+        do_git_commits()
+    elif endpoint.endswith("/git/refs") and P["method"] == "POST":
+        do_git_refs_create()
+    elif "/git/refs/kraken/claims/" in endpoint and P["method"] == "PATCH":
+        do_git_refs_update(endpoint)
+    elif "/git/refs/kraken/claims/" in endpoint and P["method"] == "DELETE":
+        do_git_refs_delete(endpoint)
+    elif "/git/matching-refs/kraken/claims/" in endpoint:
+        do_matching_refs()
+    elif re.search(r"/issues/[0-9]+/comments", endpoint):
         m = re.search(r"/issues/([0-9]+)/comments", endpoint)
         d = issue_dir(m.group(1))
         emit(comments_json(d))

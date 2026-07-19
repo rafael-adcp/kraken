@@ -46,8 +46,10 @@ orchestration left to do by hand.
    It prints a ready-to-render human console. For a machine-readable snapshot
    (scripts, cron, a future `stats` over the timeline) add `--json` — see the schema
    below. The subcommand is **read-only**: it runs `gh` reads only (the batched
-   GraphQL queue walk, the paginated comment history for heartbeat/PR-link, `gh pr
-   view` for the orphan check, `gh label list` for the recon) and never writes.
+   GraphQL queue walk, the claim refs plus their commit meta for in-flight
+   worker/heartbeat-age, the paginated comment history for the awaiting-merge PR
+   link, `gh pr view` for the orphan check, `gh label list` for the recon) and
+   never writes.
 
 2. **Render its output.** The default output already matches the summary shape below —
    surface it as-is. Its exit code is `0` on success or `20` on a `gh`/network
@@ -73,10 +75,11 @@ orchestration left to do by hand.
         /kraken:unleash OWNER/tasks --worker-name <worker-name> --project <name-2>
    ```
 
-   The heartbeat age is anchored to the worker's last liveness marker (a
-   `claim`/`heartbeat` marker), NOT the issue's `updatedAt` — an operator comment on
-   a dead worker's issue must not make it look alive (the reaper moves silent
-   `in-progress` issues to `needs-decision` after 6h off that same anchor). The orphan
+   The heartbeat age is anchored to the worker's **claim ref commit date** (the
+   `claim`/`heartbeat` commit on `refs/kraken/claims/<issue>`), NOT the issue's
+   `updatedAt` — an operator comment on a dead worker's issue must not make it look
+   alive (the reconciler moves silent claims to `needs-decision` after 6h off that
+   same anchor). The orphan
    line **flags, it never acts** — no label change, no close; the decision is mine. The
    Launch section appears only without `--project`; a queue with zero `project:` labels
    says so (create one with `gh -R OWNER/tasks label create "project:<name>"` or
@@ -95,19 +98,22 @@ A stable object for downstream tooling:
   "decision_queue": [ { "number", "title" } ],
   "in_flight":      [ { "number", "title", "worker": "<name>"|null,
                         "heartbeat_anchor": "<iso>"|null,
-                        "heartbeat_age_seconds": <int>|null } ],
+                        "heartbeat_age_seconds": <int>|null,
+                        "heartbeat_msg": "<progress>"|null } ],
   "orphans":  [ <number>, ... ],        // review numbers whose PR looks merged
   "projects": [ "<name>", ... ]         // every project: label (recon targets)
 }
 ```
 
-`heartbeat_age_seconds` / `heartbeat_anchor` are `null` when the worker left no machine
-line (an infinitely-stale claim); `pr_url` is `null` when no PR was recorded.
+`heartbeat_age_seconds` / `heartbeat_anchor` / `heartbeat_msg` are `null` when there is
+no readable claim ref (an orphan projection, or a claim commit that could not be read);
+`pr_url` is `null` when no PR was recorded.
 
 ## Authorization boundaries
 
-- Read-only. `kraken.py status` runs `gh` reads (`api graphql`, the paginated
-  `issues/*/comments`, `pr view`, `label list`) and prints a summary.
+- Read-only. `kraken.py status` runs `gh` reads (`api graphql`, `git/matching-refs`
+  for the claim refs, the paginated `issues/*/comments`, `pr view`, `label list`)
+  and prints a summary.
 - It does NOT write, comment, change labels, close issues, or merge anything — not even
   the orphan it flags. Every action is mine; the output tells me what needs me.
 - It does NOT invoke `/kraken:unleash` on my behalf — the launch lines are copy-paste;

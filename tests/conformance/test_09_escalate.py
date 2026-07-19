@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """kraken.py escalate: question posted with the needs-decision marker, labels
-swapped in one call — and after the human requeues, ANY worker wins the fresh
-window."""
+swapped, the claim ref (lock) deleted — and after the human requeues, ANY
+worker can claim the now-unlocked task."""
 import os
 import unittest
 
@@ -11,7 +11,7 @@ from harness import KrakenConformanceTest
 class EscalateTests(KrakenConformanceTest):
     def test_escalate(self):
         self.mk_issue(7, "blocked task", "kraken-task", "project:app", "in-progress")
-        self.mk_comment(7, '<!-- kraken {"type":"claim","worker":"w1"} -->')
+        self.mk_claim_ref(7, "w1")
 
         q = os.path.join(self.state, "question.md")
         self._write(q, "Should pagination be cursor- or offset-based?\n\n"
@@ -23,6 +23,7 @@ class EscalateTests(KrakenConformanceTest):
 
         self.assertFalse(self.has_label(7, "in-progress"), "in-progress still present after escalate")
         self.assertTrue(self.has_label(7, "needs-decision"), "needs-decision missing after escalate")
+        self.assertFalse(self.claim_ref_exists(7), "escalate left the lock behind")
         self.assert_marker(7, '{"type":"needs-decision","worker":"w1"}')
         body = self.last_comment(7).split("\n")
         self.assertIn("Should pagination be cursor- or offset-based?", body, "question body missing")
@@ -34,7 +35,7 @@ class EscalateTests(KrakenConformanceTest):
 
         r = self.kraken("claim", "OWNER/tasks", 7, "w2")
         self.assertEqual(r.rc, 0, "re-claim after decision")
-        self.assertEqual(r.out, "claim: claimed issue=7 worker=w2", "escalation reset the claim window")
+        self.assertEqual(r.out, "claim: claimed issue=7 worker=w2", "escalation freed the lock")
 
         # Bad invocation: missing question file is a 2, not a half-executed transition.
         r = self.kraken("escalate", "OWNER/tasks", 7, "w1", "/nonexistent/q.md")

@@ -1,75 +1,75 @@
 #!/usr/bin/env python3
-"""The reaper anchors staleness to the worker's last liveness marker (the newest
-claim/heartbeat marker), not the issue's updatedAt. An operator comment on a
-dead worker's issue must NOT keep the claim alive. Drives kraken.py reap against
-the gh-stub."""
+"""The reconciler (kraken.py reap) makes the claim refs (the lock) and the
+in-progress labels (the projection) agree. Staleness is anchored to the claim
+ref's commit date — nothing on the issue timeline resets it — and the four
+rules (reclaim stale, delete orphan lock, heal missing label, requeue orphan
+projection) each get a scenario. Drives the real kraken.py reap through the
+gh-stub."""
 import unittest
 
-from harness import KrakenConformanceTest, ago_iso
+from harness import KrakenConformanceTest
 
 
 class ReclaimStaleTests(KrakenConformanceTest):
-    def test_reap(self):
+    def test_reconciler_rules(self):
         env = {"REPO": "OWNER/tasks", "MAX_HOURS": "6"}
 
-        # #1 — DEAD: claimed 8h ago, operator commented 10m ago. Anchored to the
-        # last liveness marker it is 8h silent and MUST be reclaimed. The claim
-        # body carries the real shape (disclaimer + blank line + marker).
-        self.mk_issue(1, "dead worker, operator poked it", "kraken-task", "project:app", "in-progress")
-        self.mk_comment(1, '> disclaimer\n\n<!-- kraken {"type":"claim","worker":"dead-worker"} -->\n',
-                        ago_iso(8))
-        self.mk_comment(1, "any update here? — the operator", ago_iso(0))
+        # #1 DEAD — claim ref 8h old, in-progress. Rule 2: reclaim + delete ref.
+        self.mk_issue(1, "dead worker", "kraken-task", "project:app", "in-progress")
+        self.mk_claim_ref(1, "dead-worker", age_hours=8)
 
-        # #2 — ALIVE: a fresh heartbeat 30m ago is inside the window.
-        self.mk_issue(2, "live worker heartbeating", "kraken-task", "project:app", "in-progress")
-        self.mk_comment(2, '<!-- kraken {"type":"claim","worker":"live-worker"} -->', ago_iso(9))
-        self.mk_comment(2, '<!-- kraken {"type":"heartbeat","worker":"live-worker"} -->', ago_iso(0))
+        # #2 ALIVE — claim ref heartbeated 30m ago. Untouched.
+        self.mk_issue(2, "live worker", "kraken-task", "project:app", "in-progress")
+        self.mk_claim_ref(2, "live-worker", age_hours=0, mtype="heartbeat", msg="still going")
 
-        # #3 — MALFORMED: in-progress but no worker liveness marker at all.
-        self.mk_issue(3, "in-progress, worker never spoke", "kraken-task", "project:app", "in-progress")
-        self.mk_comment(3, "someone mislabeled this — the operator", ago_iso(0))
+        # #3 ORPHAN PROJECTION — in-progress label, NO ref. Rule 4: requeue.
+        self.mk_issue(3, "crashed release", "kraken-task", "project:app", "in-progress")
 
-        # #4 — ALIVE PAST THE 100-COMMENT BOUNDARY.
-        self.mk_issue(4, "live worker heartbeating past comment 100", "kraken-task", "project:app", "in-progress")
-        self.mk_comment(4, '<!-- kraken {"type":"claim","worker":"marathon-worker"} -->', ago_iso(9))
-        for i in range(1, 101):
-            self.mk_comment(4, "noise %d" % i, ago_iso(1))
-        self.mk_comment(4, '<!-- kraken {"type":"heartbeat","worker":"marathon-worker"} -->', ago_iso(0))
+        # #4 ORPHAN LOCK — a ref left behind on an escalated (needs-decision)
+        #    issue: a crashed escalate. Rule 1: delete the ref, touch nothing else.
+        self.mk_issue(4, "escalated but ref lingered", "kraken-task", "project:app", "needs-decision")
+        self.mk_claim_ref(4, "gone-worker", age_hours=1)
 
-        # #5 — STALE PAST THE 100-COMMENT BOUNDARY.
-        self.mk_issue(5, "dead worker, long noisy thread", "kraken-task", "project:app", "in-progress")
-        self.mk_comment(5, '<!-- kraken {"type":"claim","worker":"lost-worker"} -->', ago_iso(8))
-        for i in range(1, 106):
-            self.mk_comment(5, "someone keeps commenting %d — the operator" % i, ago_iso(0))
+        # #5 HEAL — a fresh ref whose in-progress projection never landed. Rule 3.
+        self.mk_issue(5, "label projection crashed", "kraken-task", "project:app")
+        self.mk_claim_ref(5, "healthy-worker", age_hours=0)
+
+        # #6 ORPHAN LOCK ON CLOSED — a ref outlived the close. Rule 1: delete it.
+        self.mk_issue(6, "closed with a lingering ref", "kraken-task", "project:app")
+        self.set_issue_state(6, "closed")
+        self.mk_claim_ref(6, "old-worker", age_hours=2)
 
         r = self.kraken("reap", "OWNER/tasks", env=env)
-        self.assertEqual(r.rc, 0, "reap run")
+        self.assertEqual(r.rc, 0, "reap run: %s" % r.err)
 
-        # #1 reclaimed.
+        # #1 reclaimed: needs-decision, ref gone, stale-claim marker posted.
         self.assertTrue(self.has_label(1, "needs-decision"), "#1 (dead) not moved to needs-decision")
-        self.assertFalse(self.has_label(1, "in-progress"), "#1 (dead) still in-progress after reaping")
+        self.assertFalse(self.has_label(1, "in-progress"), "#1 (dead) still in-progress")
+        self.assertFalse(self.claim_ref_exists(1), "#1 (dead) claim ref not deleted")
         self.assertIn('<!-- kraken {"type":"stale-claim"', self.last_comment(1), "#1 missing stale-claim marker")
 
-        # #2 untouched.
+        # #2 untouched: still in-progress, ref intact, no comment.
         self.assertTrue(self.has_label(2, "in-progress"), "#2 (live) was reclaimed despite a fresh heartbeat")
         self.assertFalse(self.has_label(2, "needs-decision"), "#2 (live) wrongly moved to needs-decision")
-        self.assertEqual(self.comment_count(2), 2, "#2 got a stale-claim comment it should not have")
+        self.assertTrue(self.claim_ref_exists(2), "#2 (live) claim ref wrongly deleted")
+        self.assertEqual(self.comment_count(2), 0, "#2 got a comment it should not have")
 
-        # #3 reclaimed.
-        self.assertTrue(self.has_label(3, "needs-decision"), "#3 (no machine line) not reclaimed")
-        self.assertFalse(self.has_label(3, "in-progress"), "#3 (no machine line) still in-progress")
-        self.assertIn('<!-- kraken {"type":"stale-claim"', self.last_comment(3), "#3 missing stale-claim marker")
+        # #3 requeued: in-progress removed, a bot note posted.
+        self.assertFalse(self.has_label(3, "in-progress"), "#3 (orphan projection) still in-progress")
+        self.assertIn('<!-- kraken {"type":"stale-claim"', self.last_comment(3), "#3 missing requeue note")
 
-        # #4 untouched.
-        self.assertTrue(self.has_label(4, "in-progress"), "#4 (live past boundary) reclaimed")
-        self.assertFalse(self.has_label(4, "needs-decision"), "#4 (live past boundary) wrongly moved")
-        self.assertNotIn('<!-- kraken {"type":"stale-claim"', self.last_comment(4),
-                         "#4 got a stale-claim comment it should not have")
+        # #4 orphan lock: ref deleted, needs-decision label untouched, no comment.
+        self.assertFalse(self.claim_ref_exists(4), "#4 (orphan lock) ref not deleted")
+        self.assertTrue(self.has_label(4, "needs-decision"), "#4 lost its needs-decision label")
+        self.assertEqual(self.comment_count(4), 0, "#4 (orphan lock) got a spurious comment")
 
-        # #5 reclaimed.
-        self.assertTrue(self.has_label(5, "needs-decision"), "#5 (dead past boundary) not reclaimed")
-        self.assertFalse(self.has_label(5, "in-progress"), "#5 (dead past boundary) still in-progress")
-        self.assertIn('<!-- kraken {"type":"stale-claim"', self.last_comment(5), "#5 missing stale-claim marker")
+        # #5 healed: in-progress restored, ref intact, no comment.
+        self.assertTrue(self.has_label(5, "in-progress"), "#5 (heal) label not restored")
+        self.assertTrue(self.claim_ref_exists(5), "#5 (heal) ref wrongly deleted")
+        self.assertEqual(self.comment_count(5), 0, "#5 (heal) got a spurious comment")
+
+        # #6 orphan lock on a closed issue: ref deleted.
+        self.assertFalse(self.claim_ref_exists(6), "#6 (closed) ref not deleted")
 
 
 if __name__ == "__main__":

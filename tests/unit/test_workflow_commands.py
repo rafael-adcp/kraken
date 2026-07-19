@@ -182,49 +182,52 @@ def _iso(epoch):
 
 
 class ReapCommandTests(unittest.TestCase):
-    """cmd_reap's decision loop with transport mocked: which in-progress issues
-    get reclaimed, anchored to the newest liveness marker."""
+    """cmd_reap's reconciler with transport mocked, focused on the staleness
+    clock and the workflow-specific paths (the boundary, env MAX_HOURS
+    fallback, transport failure). The rule dispatch itself is pinned in
+    test_kraken.ReconcilerClassificationTests; here staleness is anchored to the
+    claim ref's commit date."""
 
     NOW = 1_800_000_000.0
 
     def setUp(self):
         self._orig = {
+            "claim_ref_list": kraken.claim_ref_list,
+            "resolve_commit_meta": kraken.resolve_commit_meta,
+            "resolve_issue_meta": kraken.resolve_issue_meta,
             "open_issue_numbers": kraken.open_issue_numbers,
-            "comment_records": kraken.comment_records,
+            "claim_ref_delete": kraken.claim_ref_delete,
             "swap_labels": kraken.swap_labels,
             "post_comment": kraken.post_comment,
             "time": kraken.time.time,
         }
         self.swaps = []
         self.posts = []
+        self.deleted = []
         kraken.swap_labels = lambda repo, issue, remove=None, add=None: (
             self.swaps.append((issue, remove, add)) or True)
         kraken.post_comment = lambda repo, issue, body: (
             self.posts.append((issue, body)) or True)
+        kraken.claim_ref_delete = lambda repo, issue: (
+            self.deleted.append(issue) or True)
         kraken.time.time = lambda: self.NOW
 
     def tearDown(self):
-        kraken.open_issue_numbers = self._orig["open_issue_numbers"]
-        kraken.comment_records = self._orig["comment_records"]
-        kraken.swap_labels = self._orig["swap_labels"]
-        kraken.post_comment = self._orig["post_comment"]
-        kraken.time.time = self._orig["time"]
+        for k, v in self._orig.items():
+            if k == "time":
+                kraken.time.time = v
+            else:
+                setattr(kraken, k, v)
 
-    def _claim(self, worker, hours_ago):
-        return {"body": kraken.make_marker({"type": "claim", "worker": worker}),
-                "createdAt": _iso(self.NOW - hours_ago * 3600)}
+    def _meta(self, hours_ago):
+        return {"committedDate": _iso(self.NOW - hours_ago * 3600),
+                "message": kraken.make_marker({"type": "claim", "worker": "w"})}
 
-    def _hb(self, worker, hours_ago):
-        return {"body": kraken.make_marker({"type": "heartbeat", "worker": worker}),
-                "createdAt": _iso(self.NOW - hours_ago * 3600)}
-
-    def _op(self, hours_ago):
-        return {"body": "just an operator note",
-                "createdAt": _iso(self.NOW - hours_ago * 3600)}
-
-    def _run(self, issue_comments, max_hours=6):
-        kraken.open_issue_numbers = lambda repo, label: list(issue_comments)
-        kraken.comment_records = lambda repo, issue: issue_comments[issue]
+    def _run(self, refs, commit_meta, issue_meta, in_progress, max_hours=6):
+        kraken.claim_ref_list = lambda repo: refs
+        kraken.resolve_commit_meta = lambda repo, shas: commit_meta
+        kraken.resolve_issue_meta = lambda repo, nums: issue_meta
+        kraken.open_issue_numbers = lambda repo, label: list(in_progress)
         args = SimpleNamespace(repo="OWNER/tasks", max_hours=max_hours)
         buf = StringIO()
         with redirect_stdout(buf):
@@ -232,39 +235,41 @@ class ReapCommandTests(unittest.TestCase):
         return rc, buf.getvalue()
 
     def test_dead_worker_reclaimed(self):
-        rc, _ = self._run({1: [self._claim("dead", 8), self._op(0)]})
+        rc, _ = self._run({1: "s1"}, {"s1": self._meta(8)},
+                          {1: (True, ["in-progress"])}, [1])
         self.assertEqual(rc, kraken.EXIT_OK)
-        self.assertEqual(self.swaps, [(1, "in-progress", "needs-decision")])
+        self.assertIn((1, "in-progress", "needs-decision"), self.swaps)
         self.assertEqual(len(self.posts), 1)
         self.assertIn("stale-claim", self.posts[0][1])
-        self.assertIn("for 8h", self.posts[0][1])
+        self.assertIn(1, self.deleted)
 
     def test_live_worker_left_alone(self):
-        rc, _ = self._run({2: [self._claim("live", 9), self._hb("live", 0)]})
+        rc, _ = self._run({2: "s2"}, {"s2": self._meta(0)},
+                          {2: (True, ["in-progress"])}, [2])
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.swaps, [])
         self.assertEqual(self.posts, [])
+        self.assertEqual(self.deleted, [])
 
-    def test_no_liveness_marker_is_infinitely_stale(self):
-        rc, _ = self._run({3: [self._op(0)]})
-        self.assertEqual(self.swaps, [(3, "in-progress", "needs-decision")])
-        self.assertIn("on record", self.posts[0][1])
-
-    def test_operator_comment_never_resets_the_clock(self):
-        # A fresh operator comment on a dead worker's issue must not spare it.
-        rc, _ = self._run({4: [self._claim("dead", 8), self._op(0), self._op(0)]})
-        self.assertEqual(self.swaps, [(4, "in-progress", "needs-decision")])
+    def test_unreadable_commit_is_infinitely_stale(self):
+        # A ref whose commit meta can't be read: nothing proves the worker
+        # alive, so it is reclaimed.
+        rc, _ = self._run({3: "s3"}, {}, {3: (True, ["in-progress"])}, [3])
+        self.assertIn((3, "in-progress", "needs-decision"), self.swaps)
+        self.assertIn("on the claim ref", self.posts[0][1])
 
     def test_boundary_exactly_at_max_hours_is_reclaimed(self):
-        rc, _ = self._run({5: [self._claim("edge", 6)]}, max_hours=6)
-        self.assertEqual(self.swaps, [(5, "in-progress", "needs-decision")])
+        rc, _ = self._run({5: "s5"}, {"s5": self._meta(6)},
+                          {5: (True, ["in-progress"])}, [5], max_hours=6)
+        self.assertIn((5, "in-progress", "needs-decision"), self.swaps)
 
     def test_just_under_max_hours_is_spared(self):
-        rc, _ = self._run({6: [self._claim("edge", 5)]}, max_hours=6)
+        rc, _ = self._run({6: "s6"}, {"s6": self._meta(5)},
+                          {6: (True, ["in-progress"])}, [6], max_hours=6)
         self.assertEqual(self.swaps, [])
 
-    def test_transport_failure_on_list_is_twenty(self):
-        kraken.open_issue_numbers = lambda repo, label: None
+    def test_transport_failure_on_refs_is_twenty(self):
+        kraken.claim_ref_list = lambda repo: None
         args = SimpleNamespace(repo="OWNER/tasks", max_hours=6)
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_reap(args)
@@ -272,17 +277,14 @@ class ReapCommandTests(unittest.TestCase):
 
     def test_env_max_hours_fallback(self):
         # max_hours=None -> read MAX_HOURS from the env (the workflow's channel).
-        kraken.open_issue_numbers = lambda repo, label: [7]
-        kraken.comment_records = lambda repo, issue: [self._claim("w", 4)]
         os.environ["MAX_HOURS"] = "3"
         try:
-            args = SimpleNamespace(repo="OWNER/tasks", max_hours=None)
-            with redirect_stdout(StringIO()):
-                rc = kraken.cmd_reap(args)
+            rc, _ = self._run({7: "s7"}, {"s7": self._meta(4)},
+                              {7: (True, ["in-progress"])}, [7], max_hours=None)
         finally:
             del os.environ["MAX_HOURS"]
         self.assertEqual(rc, kraken.EXIT_OK)
-        self.assertEqual(self.swaps, [(7, "in-progress", "needs-decision")])
+        self.assertIn((7, "in-progress", "needs-decision"), self.swaps)
 
 
 # --- cmd_requeue_check: held-state rules, transport mocked -------------------
@@ -476,10 +478,16 @@ class CleanupCommandTests(unittest.TestCase):
         self._orig = {
             "issue_label_names": kraken.issue_label_names,
             "swap_labels": kraken.swap_labels,
+            "claim_ref_delete": kraken.claim_ref_delete,
         }
         self.removed = []
+        self.ref_deletes = []
         kraken.swap_labels = lambda repo, issue, remove=None, add=None: (
             self.removed.append((issue, remove, add)) or True)
+        # cleanup also deletes a leftover claim ref (protocol/4); mock it so the
+        # unit tests never reach the network, and record the call.
+        kraken.claim_ref_delete = lambda repo, issue: (
+            self.ref_deletes.append(issue) or True)
 
     def tearDown(self):
         for k, v in self._orig.items():
@@ -512,6 +520,13 @@ class CleanupCommandTests(unittest.TestCase):
         rc = self._run(3, ["kraken-task", "project:app"])
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.removed, [])
+
+    def test_deletes_a_leftover_claim_ref(self):
+        # Even a label-clean closed task must not leave its lock behind: cleanup
+        # always deletes the claim ref (idempotent — a missing ref is fine).
+        rc = self._run(3, ["kraken-task", "project:app"])
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(self.ref_deletes, ["3"])
 
     def test_non_kraken_task_is_a_noop(self):
         # The workflow's if: gate is re-checked here: a non-task issue strips

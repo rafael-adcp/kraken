@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""kraken.py claim-next: the deterministic list -> guard -> claim -> arbitrate
-loop collapsed into one invocation. Clean win, held-skip, honest empty (exit 3),
---json, and THE race (two concurrent claim-next workers claim DIFFERENT tasks)."""
+"""kraken.py claim-next: the deterministic list -> guard -> CAS loop collapsed
+into one invocation. Clean win, held-skip, honest empty (exit 3), --json, and
+THE race (two concurrent claim-next workers claim DIFFERENT tasks — the ref CAS
+guarantees no double-claim)."""
 import json
 import re
 import unittest

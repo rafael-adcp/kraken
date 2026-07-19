@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """kraken.py status: the read-only operator console, mechanized. Pins the
-review/decision/in-flight queues, the heartbeat-age anchored to the worker's
-last liveness marker, the merged-PR-but-open-issue orphan heuristic (flag, never
-act), the launch recon — plus the hard guarantee that the whole thing is
-read-only."""
+review/decision/in-flight queues, the heartbeat-age anchored to the claim ref's
+commit date, the merged-PR-but-open-issue orphan heuristic (flag, never act),
+the launch recon — plus the hard guarantee that the whole thing is read-only."""
 import json
 import os
 import re
@@ -33,13 +32,15 @@ class StatusTests(KrakenConformanceTest):
         # Decision queue.
         self.mk_issue(97, "needs a human call", "kraken-task", "project:app", "needs-decision")
 
-        # In flight: #99 DEAD (claimed 8h ago, operator poked now), #100 ALIVE.
+        # In flight: age comes from the claim ref's commit date. #99 DEAD (claim
+        # ref 8h old, operator poked the thread — must NOT reset the clock),
+        # #100 ALIVE (heartbeated 0h ago). The operator comment on #99 proves the
+        # anchor ignores the timeline.
         self.mk_issue(99, "dead worker, operator poked it", "kraken-task", "project:app", "in-progress")
-        self.mk_comment(99, '> d\n\n<!-- kraken {"type":"claim","worker":"dead-worker"} -->\n', ago_iso(8))
+        self.mk_claim_ref(99, "dead-worker", age_hours=8)
         self.mk_comment(99, "any progress? — the operator", ago_iso(0))
         self.mk_issue(100, "live worker", "kraken-task", "project:app", "in-progress")
-        self.mk_comment(100, '> d\n\n<!-- kraken {"type":"claim","worker":"live-worker"} -->', ago_iso(9))
-        self.mk_comment(100, '> d\n\n<!-- kraken {"type":"heartbeat","worker":"live-worker"} -->', ago_iso(0))
+        self.mk_claim_ref(100, "live-worker", age_hours=0, mtype="heartbeat", msg="writing tests")
 
         # A startable task in another project, and an empty registered project.
         self.mk_issue(12, "queued elsewhere", "kraken-task", "project:web")
