@@ -56,9 +56,11 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
 - Use `gh -R OWNER/REPO ...` for every queue operation. The coordination repo holds
   issues only, never work code.
 - **Attribution disclaimer.** Every worker authenticates as me, so a worker's
-  comment reads exactly like one I typed. `kraken.py` composes the
-  disclaimer itself; prepend it to any coordination-repo comment you write
-  **by hand** (assumptions, free-form notes):
+  comment reads exactly like one I typed. Every transition subcommand composes the
+  disclaimer itself, and so does **`kraken.py note`** — reach for it for any
+  free-form comment (assumptions, notes) instead of hand-writing one, and the
+  disclaimer is prepended for you. Only if you genuinely bypass the script must you
+  prepend it by hand:
 
   ```
   > 🐙 **Kraken worker `<worker-name>`** — automated comment from a kraken tentacle, not a human.
@@ -90,6 +92,7 @@ time:
 | `kraken.py list-startable OWNER/tasks <project>` | (read-only) startable candidates, oldest first |
 | `kraken.py claim OWNER/tasks <issue> <worker-name>` | queued → `in-progress`: guard, then the compare-and-swap on the claim ref; on a win, projects the label + claim comment |
 | `kraken.py heartbeat OWNER/tasks <issue> <worker-name> "<progress>"` | liveness — advances the claim ref to a fresh commit, keeping the reaper away. **Posts no comment** |
+| `kraken.py note OWNER/tasks <issue> <worker-name> <body-file>` | posts a free-form worker comment (assumptions, a note) with the disclaimer prepended and no marker; changes no label and no claim ref |
 | `kraken.py escalate OWNER/tasks <issue> <worker-name> <question-file>` | `in-progress` → `needs-decision`: question posted, labels swapped, claim ref released |
 | `kraken.py deliver OWNER/tasks <issue> <worker-name> <result-file> [pr-url]` | `in-progress` → `awaiting-merge`: result posted, labels swapped, claim ref released |
 | `kraken.py release OWNER/tasks <issue> <worker-name> [reason]` | `in-progress` → queued, honestly: `released` marker posted, label dropped, claim ref deleted (deleting the ref is what frees the task) |
@@ -159,7 +162,9 @@ time:
 
    Inside the subagent:
    a. **Assumptions.** Restate the goal and post your **Assumptions** (my global rule)
-      as a comment on the issue. If an assumption is unverifiable in the code AND
+      as a comment on the issue — write them to a file and hand it to
+      `python3 "<this skill's folder>/kraken.py" note OWNER/tasks <issue> <worker-name> <body-file>`
+      (disclaimer prepended, no label or claim-ref change). If an assumption is unverifiable in the code AND
       getting it wrong would be expensive — escalate: write the question (options +
       your recommendation) to a file and run
 

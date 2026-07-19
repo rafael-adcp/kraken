@@ -171,6 +171,19 @@ def compose_comment(worker, prose, payload):
     return "\n\n".join(parts)
 
 
+def compose_note(worker, prose):
+    """A free-form worker comment (assumptions, progress prose): the attribution
+    disclaimer then the prose, blank-line separated, and NO hidden marker — a note
+    carries no machine state (PROTOCOL.md §4), so it never wears a marker. The
+    leading disclaimer is load-bearing, not cosmetic: it is exactly what makes
+    requeue-check read this as a worker comment and never an operator reply."""
+    prose = (prose or "").strip("\n")
+    parts = [disclaimer(worker)]
+    if prose:
+        parts.append(prose)
+    return "\n\n".join(parts)
+
+
 # --- transport ---------------------------------------------------------------
 
 def run_gh_io(args, input_text=None):
@@ -938,6 +951,33 @@ def cmd_release(args):
 
     clear_claim_state(worker)
     print(f"release: released issue={issue} worker={worker}")
+    return EXIT_OK
+
+
+# --- subcommand: note --------------------------------------------------------
+
+def cmd_note(args):
+    """Post a free-form worker comment (assumptions, a progress note) with the
+    attribution disclaimer prepended and no hidden marker. It is a pure comment:
+    it changes no label and touches no claim ref, so the task stays exactly where
+    it was — the missing worker-authored write the skill otherwise had you
+    hand-assemble (SKILL.md step 2a / Conventions), disclaimer and all."""
+    repo, issue, worker, body_file = args.repo, args.issue, args.worker, args.body_file
+    if not os.path.isfile(body_file):
+        print(f"note: no such file {body_file}", file=sys.stderr)
+        return EXIT_USAGE
+
+    prose = read_body_file(body_file)
+    if not prose.strip():
+        print(f"note: empty body {body_file}", file=sys.stderr)
+        return EXIT_USAGE
+
+    body = compose_note(worker, prose)
+    if not post_comment(repo, issue, body):
+        print(f"note: gh-failure issue={issue} stage=comment")
+        return EXIT_TRANSPORT
+
+    print(f"note: posted issue={issue} worker={worker}")
     return EXIT_OK
 
 
@@ -1991,6 +2031,17 @@ def build_parser():
     p.add_argument("worker")
     p.add_argument("reason", nargs="?", default="")
     p.set_defaults(func=cmd_release)
+
+    p = sub.add_parser(
+        "note",
+        help="post a free-form worker comment (disclaimer prepended, no marker); "
+             "changes no label or claim ref",
+    )
+    p.add_argument("repo")
+    p.add_argument("issue")
+    p.add_argument("worker")
+    p.add_argument("body_file")
+    p.set_defaults(func=cmd_note)
 
     p = sub.add_parser("watch", help="poll the queue, print on a startable change")
     p.add_argument("repo")
