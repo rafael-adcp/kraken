@@ -1,24 +1,15 @@
 #!/usr/bin/env bash
 # Shared helpers for the agent-behavior scenarios (tests/agent/scenarios/*.sh) —
-# source, don't execute.
-#
-# Where the conformance suite (tests/) proves the transition PROGRAM mechanically
-# with no model, this harness proves the SKILL's judgment: it drives a real
-# headless `claude -p "/kraken:unleash ..."` against the same gh-stub and asserts
-# on ARTIFACTS — the stub's final state (labels, machine lines in server order)
-# and the work repo's git state (branch pushed? trailers? default branch
-# untouched?). Transcripts are never asserted on; the wire contract is the
-# assertion surface (PROTOCOL.md §12).
-#
-# One scenario = one seeded coordination queue + one task body. Each scenario
-# gets: a fresh gh-stub state (GH_STUB_STATE), the gh-stub dir first on PATH so
-# both the coordination `gh issue` calls AND the work-repo `gh pr create` resolve
-# to the stub, and a real local work repo with a local *bare* remote so
-# `git push` and "default branch untouched" are genuine git facts, not stubs.
+# source, don't execute. Where the conformance suite proves the transition
+# PROGRAM mechanically, this harness proves the SKILL's judgment: it drives a
+# real headless `claude -p` against the gh-stub and asserts on ARTIFACTS (stub
+# labels/machine lines, work-repo git state), never transcripts (PROTOCOL.md §12).
+# One scenario = one seeded queue + task body; the gh-stub goes first on PATH so
+# both coordination and work-repo `gh` calls resolve to it, and the work repo has
+# a real bare remote so push / default-branch checks are genuine git facts.
 set -u
 
 # --- layout --------------------------------------------------------------------
-# ROOT is the repo root; AGENT_ROOT this dir. Callers set neither.
 AGENT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$AGENT_ROOT/../.." && pwd)"
 GH_STUB="$ROOT/tests/gh-stub"
@@ -27,11 +18,10 @@ SCRIPTS="$ROOT/skills/unleash"
 WORKER="${WORKER:-t1}"
 PROJECT="${PROJECT:-x}"
 COORD="${COORD:-stub-owner/tasks}"
-# The work repo slug the skill is told about (via the task body / project map).
-# gh pr create records PRs under this repo in the stub artifact.
+# Work repo slug the skill is told about; gh pr create records PRs under it.
 WORK_REPO_SLUG="${WORK_REPO_SLUG:-stub-owner/work}"
 
-# Per-scenario scratch. Everything lives under one tempdir so cleanup is one rm.
+# One tempdir holds all per-scenario scratch, so cleanup is one rm.
 SCRATCH="$(mktemp -d)"
 export GH_STUB_STATE="$SCRATCH/gh-state"
 WORK_DIR="$SCRATCH/work"          # the clone the agent edits
@@ -61,12 +51,10 @@ mk_task() {
 mk_task_body() { printf '%s\n' "$2" > "$GH_STUB_STATE/issues/$1/body"; }
 
 # --- work repo: a real git repo with a local bare remote ----------------------
-# The seed commit on `main` is the untouched baseline; the harness asserts the
-# remote's default branch never moves. A tracked file gives the agent something
-# real to change.
+# The seed commit on `main` is the untouched baseline the harness asserts never
+# moves; the tracked file gives the agent something real to change.
 setup_work_repo() {
   git init --quiet --bare "$WORK_BARE"
-  # Name the bare repo's default branch deterministically.
   git --git-dir="$WORK_BARE" symbolic-ref HEAD refs/heads/main
 
   git init --quiet -b main "$WORK_DIR"
@@ -79,24 +67,19 @@ setup_work_repo() {
   git -C "$WORK_DIR" commit --quiet -m "seed: initial commit"
   git -C "$WORK_DIR" remote add origin "$WORK_BARE"
   git -C "$WORK_DIR" push --quiet -u origin main
-  # Record the baseline default-branch tip for the untouched assertion.
   git --git-dir="$WORK_BARE" rev-parse main > "$SCRATCH/main-baseline.sha"
 }
 
 # --- environment capability probe ---------------------------------------------
-# skip_scenario REASON — a scenario that CANNOT run for real in this environment
-# (not a failure, not a fake pass). Prints a SKIP line and exits 2 so the runner
-# can tell a skip from an ok (0) or a fail (1); it counts skipped, never passed.
+# skip_scenario REASON — a scenario that CANNOT run for real here. Exits 2 so the
+# runner tells a skip from an ok (0) or a fail (1); it counts skipped, not passed.
 skip_scenario() { echo "SKIP: ${SCENARIO_NAME:-scenario} ($1)"; exit 2; }
 
 # --- driving the skill headlessly ---------------------------------------------
-# run_unleash — invoke the real skill under `claude -p`, once, non-interactively,
-# with the repo's own plugin dir loaded so CI needs no pre-install. stdout+stderr
-# go to $SCRATCH/agent.log; the exit code is returned. We assert on artifacts,
-# never on this log — it exists only for debugging a failed scenario.
-#
-# The prompt is fixed: the four scenarios differ only in the SEEDED STATE and the
-# TASK BODY, never in how the skill is invoked — that is the whole point.
+# run_unleash — invoke the real skill under `claude -p`, once, with the repo's
+# own plugin dir loaded so CI needs no pre-install. We assert on artifacts, never
+# on the log ($SCRATCH/agent.log — kept only for debugging a failed scenario).
+# The prompt is fixed; scenarios differ only in seeded state and task body.
 run_unleash() {
   local prompt="/kraken:unleash ${COORD} --worker-name ${WORKER} --project ${PROJECT} --once"
   local extra_ctx="${1:-}"
@@ -112,25 +95,18 @@ ${extra_ctx}"
     > "$SCRATCH/agent.log" 2>&1
   local rc=$?
 
-  # If the model never actually ran — spend/rate limit, auth failure, or a
-  # timeout with an empty transcript — the queue is untouched not because the
-  # skill misjudged but because no judgment happened. That is an environment
-  # SKIP, never a false FAIL. Detect it from the run's own output and bail
-  # BEFORE any assertion runs.
+  # The model never actually running (spend/rate/auth limit, or a timeout with an
+  # empty transcript) is an environment SKIP, not a false FAIL — detect it from
+  # the run's own output and bail BEFORE any assertion.
   if grep -Eqi 'spend limit|rate limit|usage limit|quota|overloaded|invalid api key|authentication_error|not authenticated|please run .*login|credit balance' "$SCRATCH/agent.log"; then
     skip_scenario "the nested claude -p could not run (spend/rate/auth limit): $(grep -Eio 'spend limit|rate limit|usage limit|quota|overloaded|invalid api key|authentication|credit balance' "$SCRATCH/agent.log" | head -n1). No judgment was exercised — re-run when the limit clears."
   fi
-  # A timeout (exit 124) that produced no meaningful transcript is the same kind
-  # of non-run: skip rather than assert on an untouched queue.
   if [ "$rc" -eq 124 ] && [ ! -s "$SCRATCH/agent.log" ]; then
     skip_scenario "the nested claude -p timed out before producing any output (${CLAUDE_AGENT_TIMEOUT}s). No judgment was exercised."
   fi
-  # The stub logs every invocation, so an empty log after the run is artifact
-  # proof the model never reached it: every `gh` resolved to the REAL gh against
-  # the placeholder coordination repo, so no judgment was exercised against the
-  # seeded queue. That is an environment SKIP, never a false FAIL — assert-on-
-  # artifacts cuts both ways. A run that reached the stub even once logs
-  # something, so a genuine misjudgment still FAILs.
+  # The stub logs every invocation, so an empty log means the model never reached
+  # it — every `gh` hit the real gh, not the seeded queue. Environment SKIP, not a
+  # FAIL; a run that reached the stub once logs something, so misjudgment still FAILs.
   if [ ! -s "$GH_STUB_STATE/log" ]; then
     skip_scenario "the nested claude never reached the gh-stub (its invocation log is empty): the stub's dir was not in front of the real 'gh' for the nested tool shell, so the model judged against the real gh, not the seeded queue. No judgment was exercised — an environment gap, not a skill fault."
   fi
@@ -155,12 +131,8 @@ comment_stream() {
   done
 }
 # Machine state lives in a hidden kraken marker — an HTML comment carrying JSON
-# (PROTOCOL.md §4), read marker-only under kraken-protocol/3. The retired
-# protocol/1 visible line grammar (`^<keyword>: <value>`) is no longer a machine
-# surface, so these helpers scan the stream for a marker of a given "type"
-# (optionally carrying a non-empty field). "type" is always the first key
-# kraken.py serializes, so a field, when present, follows it in the object.
-#
+# (PROTOCOL.md §4), read marker-only. These helpers scan the stream for a marker
+# of a given "type", optionally carrying a non-empty field (field follows "type").
 # has_marker ISSUE TYPE — a marker with "type":"TYPE" exists in the stream.
 has_marker() {
   comment_stream "$1" \

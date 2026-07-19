@@ -3,13 +3,11 @@
 # queue-from-issues.sh — feed the kraken queue from plain issues.
 #
 # Translates open issues you authored in a SOURCE repo into kraken tasks in your
-# personal coordination (DEST) repo: one issue per task, shaped like the task
-# template and labeled kraken-task + project:<name>. Run it whenever you sit down
-# at your machine — with a worker looping on the queue (see SKILL.md "Staying
-# unleashed"), the things you jot down through the day get picked up and fixed on
-# their own.
+# coordination (DEST) repo: one issue per task, shaped like the task template and
+# labeled kraken-task + project:<name>. With a worker looping on the queue, the
+# things you jot down through the day get picked up on their own.
 #
-# Idempotent: every translated source issue is tagged with a marker label (default
+# Idempotent: each translated source issue is tagged with a marker label (default
 # "queued") and skipped on later runs, so re-running never duplicates a task.
 #
 # Requires: gh (authenticated). No external jq — gh's built-in --jq is used.
@@ -117,8 +115,7 @@ fi
 
 count=0
 for n in "${NUMBERS[@]}"; do
-  # One call per issue: title and url are single-line (safe as lines 1-2),
-  # body is everything from line 3 on. Keeps us jq-free and cuts gh round-trips.
+  # title+url are single-line (lines 1-2), body is line 3 on — keeps us jq-free.
   data=$(gh issue view "$n" -R "$SOURCE" --json title,url,body --jq '.title, .url, .body')
   title=$(printf '%s\n' "$data" | sed -n '1p')
   url=$(printf '%s\n' "$data" | sed -n '2p')

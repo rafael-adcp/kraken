@@ -1,35 +1,27 @@
 #!/usr/bin/env bash
 # kraken-loop.sh — external "ambush" loop for a GitHub Copilot CLI tentacle.
 #
-# Copilot CLI has no Monitor tool to arm kraken's zero-token background watcher
-# (SKILL.md step 4), so this is the fallback SKILL.md documents: an
-# OUTSIDE-the-model shell loop that runs ONE `--once`-style drain pass per
-# iteration. A fresh `copilot` process per pass also gives each task the
-# fresh-context isolation SKILL.md would otherwise get from a per-task subagent.
+# Copilot CLI has no Monitor tool to arm kraken's zero-token watcher (SKILL.md
+# step 4), so this is the documented fallback: an outside-the-model shell loop
+# running ONE `--once`-style drain per iteration (a fresh `copilot` process per
+# pass also gives each task the fresh-context isolation a subagent would).
 #
 # Cost control: each poll first runs the FREE, read-only `kraken.py
-# list-startable` (one `gh issue list`). The model is only invoked when the queue
-# actually has a startable task — an idle queue never spends a token.
-#
-# The operator owns cadence + stop: Ctrl-C ends it, and it never outlives this
-# terminal. This is the versioned home of the loop — run it straight from a
-# kraken checkout; no copying it out of a session folder.
+# list-startable`; the model is only invoked when a task is actually startable,
+# so an idle queue never spends a token. The operator owns cadence + stop
+# (Ctrl-C); it never outlives this terminal. Run it straight from a checkout.
 #
 # Usage:
 #   scripts/kraken-loop.sh OWNER/tasks --worker-name <name> --project <name> \
 #                          [--poll <seconds>] [--once]
-#
-# Example:
-#   scripts/kraken-loop.sh rafael-adcp/personal-tasks \
-#     --worker-name kraken-copilot-env-1 --project kraken
 #
 # Every flag also has an env-var fallback (KRAKEN_TASKS, KRAKEN_WORKER,
 # KRAKEN_PROJECT, KRAKEN_POLL_SECONDS); an explicit flag wins over the env var.
 set -u
 
 # --- locate the repo -------------------------------------------------------
-# REPO_DIR is derived from this script's own location (scripts/ lives at the
-# repo root), so the loop works from any checkout without a hardcoded path.
+# REPO_DIR derives from this script's own location, so the loop works from any
+# checkout without a hardcoded path.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${KRAKEN_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 KRAKEN_PY="$REPO_DIR/skills/unleash/kraken.py"
@@ -107,8 +99,7 @@ drain_pass() {
      && [ -n "$startable" ]; then
     echo "kraken-loop: $ts startable task(s) — running a drain pass:"
     printf '%s\n' "$startable" | sed 's/^/  /'
-    # Add -s/--silent for terse logs. Drop --no-ask-user only if you want it to
-    # be able to escalate to YOU interactively (it can't in a headless loop).
+    # Add -s/--silent for terser logs.
     copilot -p "$PROMPT" --allow-all-tools --no-ask-user
     return 0
   fi

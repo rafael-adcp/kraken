@@ -1,31 +1,22 @@
 #!/usr/bin/env bash
 # Scenario: happy path.
 #
-# A clear, hostable task with executable acceptance. The worker claims it, does
-# the work on a branch, pushes, opens a draft PR with attribution trailers, runs
-# the acceptance for real, and delivers: in-progress -> awaiting-merge with a
+# A clear, hostable task with executable acceptance. The worker claims it, works
+# on a branch, pushes, opens a draft PR with attribution trailers, runs the
+# acceptance for real, and delivers: in-progress -> awaiting-merge with a
 # `delivered` marker carrying a `pr` field (PROTOCOL.md §8, SKILL.md steps b–d).
-#
 # Assertion surface = artifacts only.
 #
-# When the push reaches the remote, the FULL delivery holds and blocks:
-#   - task ends awaiting-merge (not in-progress),
-#   - `delivered` marker (with `pr` field) posted, a DRAFT PR opened,
-#   - a work branch (not main) pushed, trailers on its commits,
-#   - the deliverable really exists on that branch (acceptance run for real),
-#   - the remote default branch was never touched.
+# When the push reaches the remote, the FULL delivery holds and blocks (task
+# awaiting-merge, delivered marker with pr, draft PR, work branch with trailers,
+# the deliverable really on the branch, default branch untouched).
 #
 # Some environments sandbox the nested `claude -p`'s `git push` even under
-# --dangerously-skip-permissions. Then the skill CANNOT deliver a branch, and it
-# picks an honest fallback — either diff-in-comment (PROTOCOL.md §8) or escalate
-# for push permission (PROTOCOL.md §7); which one varies run to run. Both are
-# conforming, but neither is the branch-pushed / trailers-present artifact this
-# scenario asserts. So when we detect "push was blocked" (nothing on the remote
-# beyond main, default branch untouched, and the skill did NOT fake awaiting-
-# merge) we SKIP honestly — the environment blocked the push, not the skill —
-# never a fake pass. CI runners without that sandbox exercise the real push
-# path. We judge from the RUN's own artifacts, not a pre-probe: a throwaway
-# probe's push and the full skill run's push diverge under this sandbox.
+# --dangerously-skip-permissions. Then the skill can't deliver a branch and picks
+# an honest fallback (diff-in-comment §8 or escalate for push permission §7) —
+# both conforming, but neither is the branch-pushed artifact this scenario
+# asserts, so we SKIP honestly (judged from the RUN's own artifacts, not a
+# pre-probe). CI runners without that sandbox exercise the real push path.
 . "$(cd "$(dirname "$0")/.." && pwd)/lib-agent.sh"
 SCENARIO_NAME="happy-path"
 

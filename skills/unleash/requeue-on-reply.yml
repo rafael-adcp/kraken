@@ -1,36 +1,26 @@
 # Auto-requeue for kraken. Installed by `init` into the coordination repo as
 # .github/workflows/requeue-on-reply.yml (see SKILL.md).
 #
-# The operator's requeue gesture collapses from "reply AND remove the label" to
-# just "reply". Forgetting the label used to strip a task forever: answer a
-# needs-decision from your phone, forget the label, and the task never rejoins
-# the queue. This workflow watches new comments and, when a genuine OPERATOR
-# comment lands on a held task, removes the holding label so a worker requeues it.
+# Collapses the operator's requeue gesture from "reply AND remove the label" to
+# just "reply": when a genuine OPERATOR comment lands on a held task, this removes
+# the holding label so a worker requeues it (forgetting the label used to strip a
+# task from the queue forever).
 #
-# The logic is NOT reimplemented in YAML: it runs `kraken.py requeue-check`, the
-# same stdlib-only transition program the worker side uses, vendored into the
-# coordination repo by `init` (issue #37). The human-vs-tentacle discriminator
-# (PROTOCOL.md §4's attribution disclaimer), the two held-state rules, and the
-# structured requeue-directive check all live in kraken.py — derived from its own
-# DISCLAIMER / marker constants, not a second hand-kept copy — and are covered by
-# its unit tests, so this workflow shrinks to a checkout plus one exec.
+# The logic is NOT reimplemented in YAML: it runs `kraken.py requeue-check` (the
+# same program the worker side uses, vendored by `init`). The human-vs-tentacle
+# discriminator, the held-state rules, and the requeue-directive check all live
+# there, derived from its own constants and unit-tested.
 #
-# Two held states, handled asymmetrically (see the issue's Notes):
-#   - needs-decision: a human comment is almost always the answer, so ANY bare
-#     operator comment requeues.
-#   - awaiting-merge: the task is already DELIVERED, so it is left held UNLESS the
-#     comment carries an explicit, STRUCTURED requeue directive — a protocol/3
-#     `<!-- kraken {"type":"requeue"} -->` marker, or a standalone
-#     `requeue`/`requeue:` line.
+# Two held states, handled asymmetrically:
+#   - needs-decision: ANY bare operator comment requeues (it's almost always the answer).
+#   - awaiting-merge: already DELIVERED, so left held UNLESS the comment carries an
+#     explicit requeue directive — a `<!-- kraken {"type":"requeue"} -->` marker or
+#     a standalone `requeue`/`requeue:` line.
 #
-# No-ops (all proven by tests/conformance/test_18_requeue_on_reply.py): worker comments
-# (disclaimer present), comments on issues carrying no held label, and bot/self
-# comments (the reaper's stale-claim comment, this workflow's own confirmation,
-# the validator) — user.type == Bot.
-#
-# Debounce is structural: removing the holding label is idempotent, so a burst of
-# operator comments requeues once. A per-issue concurrency group serializes the
-# burst so two racing runs don't both post a confirmation.
+# No-ops (see tests/conformance/test_18_requeue_on_reply.py): worker comments,
+# comments on issues with no held label, and bot/self comments (user.type == Bot).
+# Debounce is structural (label removal is idempotent); a per-issue concurrency
+# group serializes a burst so two runs don't both confirm.
 name: Requeue on operator reply
 on:
   issue_comment:
@@ -55,9 +45,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       NUM: ${{ github.event.issue.number }}
-      # The untrusted comment body and its author type reach kraken.py through
-      # the environment, never argv — the same shell-injection discipline the
-      # inlined script kept (a comment could contain $(...) or backticks).
+      # Untrusted comment body/author reach kraken.py through the environment,
+      # never argv — shell-injection discipline (a body could contain $(...)).
       COMMENT_BODY: ${{ github.event.comment.body }}
       COMMENT_AUTHOR_TYPE: ${{ github.event.comment.user.type }}
     steps:

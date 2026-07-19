@@ -18,20 +18,19 @@ TEMPLATE="skills/unleash/task-template.yml"
 REAPER="skills/unleash/reclaim-stale.yml"
 REQUEUE="skills/unleash/requeue-on-reply.yml"
 VALIDATE="skills/unleash/validate-task.yml"
-# kraken.py is the single stdlib-only transition program. Every label /
-# machine-line / disclaimer emitter lives in it, so all the per-emitter
-# checks below resolve to that single module.
+# Every label / machine-line / disclaimer emitter lives in kraken.py, so all the
+# per-emitter checks below resolve to that single module.
 KRAKEN="skills/unleash/kraken.py"
-WATCHER="$KRAKEN" # label filter delegated to $LISTER
+WATCHER="$KRAKEN"
 LISTER="$KRAKEN"
 CLAIM="$KRAKEN"
 RELEASE="$KRAKEN"
 ESCALATE="$KRAKEN"
 DELIVER="$KRAKEN"
-HEARTBEAT="$KRAKEN" # comments only — touches no labels
+HEARTBEAT="$KRAKEN"
 
 fail=0
-err() { printf '  \033[31mx\033[0m %s\n' "$1"; fail=$((fail+1)); } # count, so per-section fail_before diffs stay accurate
+err() { printf '  \033[31mx\033[0m %s\n' "$1"; fail=$((fail+1)); }
 note() { printf '  · %s\n' "$1"; }
 
 # --- 1. Label strings match across every file that hard-codes them ----------
@@ -42,10 +41,10 @@ check_label() {
   for f in "$@"; do grep -qF -- "$label" "$f" || missing="$missing $f"; done
   [ -n "$missing" ] && err "label '$label' missing from:$missing"
 }
-# init creates all four; status surfaces only the three human-facing labels (no
-# kraken-task); the lister owns the startable filter (all four); claim guards on
-# the three held labels; escalate/deliver each swap in-progress for their target;
-# release only touches in-progress
+# init creates all four; status surfaces only the three human-facing labels;
+# the lister owns the startable filter (all four); claim guards the three held
+# labels; escalate/deliver each swap in-progress for their target; release only
+# touches in-progress.
 check_label "kraken-task"    "$SKILL" "$INIT" "$README" "$PROTOCOL" "$TEMPLATE" "$LISTER"
 check_label "in-progress"    "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER"
 check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$ESCALATE"
@@ -58,21 +57,14 @@ done
 [ "$fail" -eq 0 ] && note "4 canonical labels aligned across files"
 
 # --- 1b–1c. Contract vocabulary is single-sourced in kraken.py ---------------
-# kraken.py OWNS the disclaimer format and the marker vocabulary (its DISCLAIMER
-# and MARKER_TYPES constants, surfaced by `kraken.py contract`). Instead of
-# re-declaring those literals here and diffing prose against prose, we EXECUTE
-# the program and check the spec documents everything it emits. Structural, not
-# byte-equality between files. Since the coordination workflows became thin execs
-# of kraken.py (issue #37), there is no second in-YAML parser/emitter left to
-# cross-check. Under protocol/4 (issue #110) the claim is a git-ref CAS, so the
-# retired claim-window reset vocabulary (the old [1d] check) is gone — the
-# markers remain as audit trail and operator directives only.
+# kraken.py OWNS the disclaimer format and marker vocabulary (its DISCLAIMER and
+# MARKER_TYPES constants, surfaced by `kraken.py contract`). Rather than diffing
+# prose against prose, we EXECUTE the program and check the spec documents
+# everything it emits — structural, not byte-equality between files.
 if command -v python3 >/dev/null 2>&1; then
   kcontract() { python3 "$KRAKEN" contract "$@"; }
 
-  # [1b] Every marker "type" kraken.py emits (claim/heartbeat ride the claim
-  # ref's commit message; the rest head state-changing comments) is named in
-  # PROTOCOL.md's marker table.
+  # [1b] Every marker "type" kraken.py emits is named in PROTOCOL.md's table.
   echo "[1b] marker type vocabulary (kraken.py vs PROTOCOL.md)"
   fail_before=$fail
   while read -r t; do
@@ -81,10 +73,8 @@ if command -v python3 >/dev/null 2>&1; then
   done < <(kcontract marker-types)
   [ "$fail" -eq "$fail_before" ] && note "every marker type kraken.py emits is specified in PROTOCOL.md"
 
-  # [1c] Attribution disclaimer: the human-vs-tentacle filter is now kraken.py's
-  # (requeue-check reads it off the DISCLAIMER constant), unit-tested there, so
-  # there is no in-YAML pattern left to cross-check. All that remains here is
-  # that the docs still quote the disclaimer illustratively.
+  # [1c] The disclaimer filter is kraken.py's (unit-tested there); all that
+  # remains here is that the docs still quote it illustratively.
   echo "[1c] attribution disclaimer quoted in the docs"
   fail_before=$fail
   for f in "$PROTOCOL" "$SKILL"; do
@@ -147,9 +137,8 @@ for sh in scripts/*.sh skills/*/*.sh; do
   bash -n "$sh" 2>/dev/null || err "$sh has a bash syntax error"
 done
 if command -v python3 >/dev/null 2>&1; then
-  # tests/gh-stub/gh is the Python `gh` stub (issue #38): extensionless so it
-  # stays on PATH as `gh`, but it is Python, so it is syntax-checked here. The
-  # conformance suite (tests/conformance) and its harness are Python too.
+  # tests/gh-stub/gh is the Python `gh` stub — extensionless so it stays on PATH
+  # as `gh`, but Python, so it is syntax-checked here alongside the suite.
   for py in skills/*/*.py tests/*.py tests/unit/*.py tests/conformance/*.py tests/gh-stub/gh; do
     [ -f "$py" ] || continue
     python3 -m py_compile "$py" 2>/dev/null || err "$py has a python syntax error"
