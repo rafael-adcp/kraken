@@ -130,9 +130,9 @@ time:
    identically every time (semantics: `PROTOCOL.md` §5): a lost CAS (another
    worker already holds the ref) or a task that turned held since listing is
    skipped and the next candidate tried, writing nothing behind. Before its first
-   claim it also runs a **protocol-version handshake** — one cheap read of the
-   coordination repo's vendored `.github/kraken.py` `PROTOCOL_VERSION` compared
-   with this worker's — and refuses to drain on any mismatch or unreadable file
+   claim it also runs a **drift handshake** — one cheap read of the coordination
+   repo's vendored `.github/kraken.py` compared byte-for-byte with this worker's
+   bundled copy — and refuses to drain if they differ or the file is unreadable
    (fail closed), so stale vendored assets surface as a loud error, not silent
    corruption. Yours is only the exit code:
 
@@ -142,9 +142,9 @@ time:
      `{issue, title, body}` object on the final stdout line instead.)
    - `3` — nothing claimable: the queue is empty, or every candidate turned out
      held or lost as it iterated. Not an error — the drain is done (step 3).
-   - `12` — protocol-version handshake failed: this worker's `PROTOCOL_VERSION`
-     disagrees with the coordination repo's vendored `.github/kraken.py`, or that
-     file can't be read. The drain refused before claiming; the message names the
+   - `12` — drift handshake failed: the coordination repo's vendored
+     `.github/kraken.py` differs from this worker's bundled copy, or that file
+     can't be read. The drain refused before claiming; the message names the
      fix — run `/kraken:init OWNER/tasks --upgrade` (or upgrade this worker's
      plugin) so both sides agree, then retry. Do not improvise around it.
    - `20` — gh/network failure, claim state unknown. Re-check the issue's real

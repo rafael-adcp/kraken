@@ -638,7 +638,7 @@ def do_api():
                 existing = os.path.isfile(cfile)
                 # Model GitHub's contents API: updating an existing file requires
                 # its current blob sha; a create (absent file) must NOT send one.
-                # This is what protects a customized file from a create-only init.
+                # This is what lets a create-only init leave a drifted file intact.
                 if existing:
                     with open(cfile, "rb") as f:
                         cur_sha = _blob_sha(f.read())

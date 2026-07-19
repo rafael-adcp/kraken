@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Protocol-version handshake conformance: before its first claim, a drain reads
-the coordination repo's vendored `.github/kraken.py` PROTOCOL_VERSION and refuses
-to drain on any mismatch — or when that file cannot be read (fail closed) —
-naming `init --upgrade` as the fix. A matching version drains normally.
+"""Drift handshake conformance: before its first claim, a drain reads the
+coordination repo's vendored `.github/kraken.py` and refuses to drain when it
+differs from this worker's bundled copy — or when that file cannot be read (fail
+closed) — naming `init --upgrade` as the fix. A byte-identical vendored copy
+drains normally.
 
 This turns the silent asset drift `init --upgrade` repairs into a loud,
 actionable refusal, proven against the gh stub with no LLM.
@@ -11,8 +12,6 @@ import os
 import unittest
 
 from harness import KrakenConformanceTest, KRAKEN
-
-FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "protocol3")
 
 
 class ProtocolHandshakeTests(KrakenConformanceTest):
@@ -30,36 +29,40 @@ class ProtocolHandshakeTests(KrakenConformanceTest):
         self.assertEqual(self.comment_count(7), 0,
                          "a refused drain still commented on the task")
 
-    def test_refuses_on_version_mismatch(self):
-        # The coordination repo vendors the protocol/3 (v0.4.0) kraken.py; this
-        # worker speaks protocol/4 -> refuse.
+    def test_refuses_on_drift(self):
+        # The coordination repo vendors a stale, drifted kraken.py (bundled bytes
+        # plus a trailing marker) -> its bytes differ from this worker's -> refuse.
         self._seed_startable()
-        self.mk_content(".github/kraken.py", os.path.join(FIXTURES, "kraken.py.txt"))
+        with open(KRAKEN, "r", encoding="utf-8") as f:
+            text = f.read()
+        drifted = os.path.join(self.state, "drifted-kraken.py")
+        self._write(drifted, text + "\n# stale vendored copy (drifted)\n")
+        self.mk_content(".github/kraken.py", drifted)
         r = self.kraken("claim-next", "OWNER/tasks", "app", "w1")
-        self.assertEqual(r.rc, 12, "version mismatch must refuse with EXIT_PROTOCOL_MISMATCH")
-        self.assertIn("mismatch", r.out, "refusal did not name a version mismatch")
+        self.assertEqual(r.rc, 12, "drift must refuse with EXIT_PROTOCOL_MISMATCH")
+        self.assertIn("differs", r.out, "refusal did not name the drift")
         self.assertIn("init --upgrade", r.out, "refusal did not point at init --upgrade")
         self._assert_no_claim()
 
     def test_refuses_when_vendored_file_absent_fail_closed(self):
-        # No vendored kraken.py at all -> the version cannot be verified -> refuse
+        # No vendored kraken.py at all -> the drift cannot be verified -> refuse
         # (fail closed) rather than draining blind.
         self._seed_startable()
         r = self.kraken("claim-next", "OWNER/tasks", "app", "w1")
-        self.assertEqual(r.rc, 12, "an unverifiable version must refuse (fail closed)")
+        self.assertEqual(r.rc, 12, "an unverifiable vendored asset must refuse (fail closed)")
         self.assertIn("cannot verify", r.out, "fail-closed refusal not surfaced")
         self.assertIn("init --upgrade", r.out, "refusal did not point at init --upgrade")
         self._assert_no_claim()
 
-    def test_matching_version_drains_normally(self):
-        # The coordination repo vendors the current bundled kraken.py -> versions
-        # match -> the drain proceeds and claims the task.
+    def test_matching_content_drains_normally(self):
+        # The coordination repo vendors the exact bundled kraken.py -> in sync ->
+        # the drain proceeds and claims the task.
         self._seed_startable()
         self.mk_content(".github/kraken.py", KRAKEN)
         r = self.kraken("claim-next", "OWNER/tasks", "app", "w1")
-        self.assertEqual(r.rc, 0, "matching versions must drain normally")
+        self.assertEqual(r.rc, 0, "matching content must drain normally")
         self.assertIn("claim-next: claimed issue=7 worker=w1", r.out.split("\n"),
-                      "matching-version drain did not claim the startable task")
+                      "in-sync drain did not claim the startable task")
         self.assertTrue(self.has_label(7, "in-progress"), "task not claimed")
 
 
