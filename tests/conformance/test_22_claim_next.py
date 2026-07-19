@@ -7,7 +7,7 @@ import json
 import re
 import unittest
 
-from harness import KrakenConformanceTest
+from harness import KrakenConformanceTest, KRAKEN
 
 
 class ClaimNextTests(KrakenConformanceTest):
@@ -16,6 +16,10 @@ class ClaimNextTests(KrakenConformanceTest):
         # Keep the best-effort claim-state file out of the real home dir (already
         # isolated by the harness, but the original test sets a distinct path).
         self.kraken_state_dir = self.state + "/kraken-state"
+        # The drain performs a protocol handshake against the coordination repo's
+        # vendored .github/kraken.py before its first claim: seed a matching copy
+        # so the version check passes and the claim loop is what is under test.
+        self.mk_content(".github/kraken.py", KRAKEN)
 
     def test_claim_next(self):
         # --- 1. clean win: the oldest startable is claimed, briefing printed --

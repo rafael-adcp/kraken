@@ -457,7 +457,10 @@ class InitConstantsTests(unittest.TestCase):
         self.assertIn("init: asset .github/ISSUE_TEMPLATE/task.yml (created)", out)
         self.assertIn("init: label project:app (upserted)", out)
         self.assertIn(
-            "assets_created=1 assets_unchanged=1 assets_customized=1 labels=2", out)
+            "assets_created=1 assets_unchanged=1 assets_outdated=0 "
+            "assets_upgraded=0 assets_customized=1 labels=2", out)
+        # a customized asset is surfaced as an actionable hint, never clobbered
+        self.assertIn("customized", out)
 
 
 class CommentRecordsPaginationTests(unittest.TestCase):
@@ -521,11 +524,16 @@ class ClaimNextIterationTests(unittest.TestCase):
     def setUp(self):
         self._orig_classify = kraken.classify_queue
         self._orig_claim_once = kraken._claim_once
+        self._orig_verify = kraken.verify_protocol
+        # The protocol handshake is exercised by its own tests; here it always
+        # passes so only the iteration logic is under test.
+        kraken.verify_protocol = lambda repo: (True, "")
         self.attempted = []
 
     def tearDown(self):
         kraken.classify_queue = self._orig_classify
         kraken._claim_once = self._orig_claim_once
+        kraken.verify_protocol = self._orig_verify
 
     def _run(self, rows, claim_results, json_mode=False):
         kraken.classify_queue = lambda repo, project, include_body=False: rows
@@ -885,6 +893,89 @@ class WakeRetryDueTests(unittest.TestCase):
     def test_refreshed_flag_re_arms_after_each_failed_retry(self):
         self.assertFalse(kraken.wake_retry_due(1301.0, 1300.0, 300, 1500.0))
         self.assertTrue(kraken.wake_retry_due(1301.0, 1300.0, 300, 1600.0))
+
+
+class AssetManifestTests(unittest.TestCase):
+    """The asset manifest and its pure classifier — the read side of
+    `init --upgrade`, isolated from any network."""
+
+    def test_manifest_covers_every_bundled_asset(self):
+        # A stale workflow is as harmful as a stale parser (the reaper's
+        # permissions flipped between protocol/3 and /4), so the manifest MUST
+        # cover all six assets, not just kraken.py.
+        src_names = {name for name, _dest, _msg in kraken.INIT_ASSETS}
+        self.assertEqual(set(kraken.ASSET_MANIFEST), src_names,
+                         "ASSET_MANIFEST does not cover exactly the bundled assets")
+
+    def test_manifest_entries_are_nonempty_sha256_lists(self):
+        for name, hashes in kraken.ASSET_MANIFEST.items():
+            self.assertTrue(hashes, "%s has no released hashes recorded" % name)
+            for h in hashes:
+                self.assertRegex(h, r"^[0-9a-f]{64}$",
+                                 "%s: %r is not a sha256 hex digest" % (name, h))
+
+    def test_classify_asset_absent(self):
+        self.assertEqual(kraken.classify_asset(None, b"bundled", set()), "absent")
+
+    def test_classify_asset_unchanged(self):
+        self.assertEqual(kraken.classify_asset(b"same", b"same", set()), "unchanged")
+
+    def test_classify_asset_outdated_matches_a_release(self):
+        old, new = b"old release", b"new bundled"
+        released = {kraken.asset_sha256(old)}
+        self.assertEqual(kraken.classify_asset(old, new, released), "outdated")
+
+    def test_classify_asset_customized_matches_no_release(self):
+        released = {kraken.asset_sha256(b"old release")}
+        self.assertEqual(kraken.classify_asset(b"hand edit", b"new bundled", released),
+                         "customized")
+
+
+class ProtocolHandshakeTests(unittest.TestCase):
+    """The version handshake's pure logic, with the one contents read mocked:
+    parsing a vendored PROTOCOL_VERSION and the match / mismatch / fail-closed
+    decision that gates a drain."""
+
+    def setUp(self):
+        self._orig_get = kraken.gh_get_content
+
+    def tearDown(self):
+        kraken.gh_get_content = self._orig_get
+
+    def _vendored(self, raw):
+        kraken.gh_get_content = lambda repo, path: raw
+
+    def test_parse_protocol_version(self):
+        self.assertEqual(kraken.parse_protocol_version("PROTOCOL_VERSION = 4\n"), 4)
+        self.assertEqual(kraken.parse_protocol_version("x=1\nPROTOCOL_VERSION=3\ny"), 3)
+        self.assertIsNone(kraken.parse_protocol_version("no version here"))
+        self.assertIsNone(kraken.parse_protocol_version(None))
+
+    def test_matching_version_is_ok(self):
+        self._vendored(("PROTOCOL_VERSION = %d\n" % kraken.PROTOCOL_VERSION).encode())
+        ok, msg = kraken.verify_protocol("o/tasks")
+        self.assertTrue(ok)
+        self.assertEqual(msg, "")
+
+    def test_version_mismatch_refuses_and_names_upgrade(self):
+        self._vendored(("PROTOCOL_VERSION = %d\n" % (kraken.PROTOCOL_VERSION + 1)).encode())
+        ok, msg = kraken.verify_protocol("o/tasks")
+        self.assertFalse(ok)
+        self.assertIn("mismatch", msg)
+        self.assertIn("init --upgrade", msg)
+
+    def test_unreadable_vendored_file_fails_closed(self):
+        self._vendored(None)  # 404 / transport fault both surface as None
+        ok, msg = kraken.verify_protocol("o/tasks")
+        self.assertFalse(ok)
+        self.assertIn("cannot verify", msg)
+        self.assertIn("init --upgrade", msg)
+
+    def test_unparseable_vendored_file_fails_closed(self):
+        self._vendored(b"# a kraken.py with no version constant\n")
+        ok, msg = kraken.verify_protocol("o/tasks")
+        self.assertFalse(ok)
+        self.assertIn("cannot verify", msg)
 
 
 if __name__ == "__main__":

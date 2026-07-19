@@ -118,6 +118,14 @@ def read_text(path):
         return f.read()
 
 
+def _blob_sha(data):
+    """The git blob object sha of `data` — what GitHub's contents API returns as
+    a file's `sha` and requires back to update it. Deterministic on content, so a
+    read-then-write round-trip in a test presents the same sha it was handed."""
+    header = ("blob %d\0" % len(data)).encode("ascii")
+    return hashlib.sha1(header + data).hexdigest()
+
+
 def cmdsub(text):
     """Trailing-newline stripping, matching bash `$(cat ...)`."""
     return text.rstrip("\n")
@@ -149,7 +157,7 @@ def parse_args(args):
         "remove_label": "", "body": "", "endpoint": "", "limit": "", "repo": "",
         "pr_sub": "", "title": "", "head": "", "base": "", "draft": 0,
         "gql_query": "", "label_sub": "", "repo_sub": "", "method": "",
-        "put_content": "", "put_message": "", "color": "", "desc": "",
+        "put_content": "", "put_message": "", "put_sha": "", "color": "", "desc": "",
         "label_filters": [], "input": "",
     }
     i = 0
@@ -212,6 +220,8 @@ def parse_args(args):
                 p["put_content"] = nxt[len("content="):]
             elif nxt.startswith("message="):
                 p["put_message"] = nxt[len("message="):]
+            elif nxt.startswith("sha="):
+                p["put_sha"] = nxt[len("sha="):]
             i += 2
         elif a.startswith("-"):
             i += 1
@@ -625,19 +635,35 @@ def do_api():
         if P["method"] == "PUT":
             lock()
             try:
+                existing = os.path.isfile(cfile)
+                # Model GitHub's contents API: updating an existing file requires
+                # its current blob sha; a create (absent file) must NOT send one.
+                # This is what protects a customized file from a create-only init.
+                if existing:
+                    with open(cfile, "rb") as f:
+                        cur_sha = _blob_sha(f.read())
+                    if P["put_sha"] != cur_sha:
+                        unlock()
+                        http_422("contents/%s: sha required/mismatch to update" % cpath)
+                elif P["put_sha"]:
+                    unlock()
+                    http_422("contents/%s: sha given for a file that does not exist" % cpath)
                 os.makedirs(os.path.dirname(cfile), exist_ok=True)
                 raw = base64.b64decode(P["put_content"].replace("\n", ""))
                 with open(cfile, "wb") as f:
                     f.write(raw)
             finally:
-                unlock()
-            sys.stdout.write(json.dumps({"content": {"path": cpath}}) + "\n")
+                if os.path.isdir(LOCKDIR):
+                    unlock()
+            new_sha = _blob_sha(base64.b64decode(P["put_content"].replace("\n", "")))
+            sys.stdout.write(json.dumps({"content": {"path": cpath, "sha": new_sha}}) + "\n")
         else:
             if not os.path.isfile(cfile):
                 die("gh-stub: 404 contents/%s" % cpath)
             with open(cfile, "rb") as f:
-                enc = base64.b64encode(f.read()).decode("ascii")
-            emit({"content": enc})
+                data = f.read()
+            enc = base64.b64encode(data).decode("ascii")
+            emit({"content": enc, "sha": _blob_sha(data), "path": cpath})
     else:
         die("gh-stub: unsupported api endpoint '%s'" % endpoint)
 

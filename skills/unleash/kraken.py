@@ -37,6 +37,10 @@ Exit-code contract (PROTOCOL.md §12), preserved verbatim from the scripts:
     10  lost the claim CAS — another worker holds the claim ref; back off
         (writing nothing) and pick the next candidate
     11  no longer clear — a held label appeared since listing; skip the task
+    12  claim-next only: protocol-version handshake failed — this worker's
+        PROTOCOL_VERSION disagrees with the coordination repo's vendored
+        .github/kraken.py, or that file can't be read (fail closed). The drain
+        refused before claiming; run `init --upgrade` (or upgrade the plugin)
     20  gh / network transport failure — state unknown, re-check before retry
     3   claim-next only: no candidate was startable — the queue is empty, or
         every candidate turned out held/lost as it iterated (nothing to claim,
@@ -47,6 +51,7 @@ Exit-code contract (PROTOCOL.md §12), preserved verbatim from the scripts:
 import argparse
 import base64
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -58,6 +63,7 @@ import time
 EXIT_OK = 0
 EXIT_LOST = 10
 EXIT_NOT_CLEAR = 11
+EXIT_PROTOCOL_MISMATCH = 12  # drain refused: local vs vendored PROTOCOL_VERSION disagree
 EXIT_TRANSPORT = 20
 EXIT_NONE = 3  # claim-next: nothing startable to claim (not empty-vs-error ambiguous)
 EXIT_USAGE = 2
@@ -796,6 +802,14 @@ def cmd_claim_next(args):
     if refused is not None:
         return refused
 
+    # Protocol handshake (PROTOCOL.md drift guard): before the first claim, refuse
+    # to drain if this worker's PROTOCOL_VERSION disagrees with the coordination
+    # repo's vendored .github/kraken.py, or that file cannot be read (fail closed).
+    ok, message = verify_protocol(repo)
+    if not ok:
+        print(message)
+        return EXIT_PROTOCOL_MISMATCH
+
     rows = classify_queue(repo, project, include_body=True)
     if rows is None:
         print("claim-next: gh-failure stage=list")
@@ -1284,6 +1298,121 @@ def cmd_status(args):
 # The bootstrap `init`, single-sourced here so the skill and the program never
 # disagree on the asset set or the label canon.
 
+# --- asset manifest: the hashes of every *released* version of each bundled ---
+# asset. It exists to tell drift apart: an installed asset whose bytes hash to a
+# value in this manifest was shipped by some plugin release and never hand-edited
+# (so `init --upgrade` may safely replace it), while one matching no release is a
+# deliberate customization (never overwritten). The *current* bundled bytes are
+# hashed live at runtime — they need no manifest entry — so an in-development
+# asset reads as `unchanged`, not stale. The manifest therefore records only
+# PRIOR releases; a release appends each changed asset's new hash here.
+#
+# It covers ALL SIX assets, not just kraken.py: reclaim-stale.yml and
+# cleanup-closed.yml flipped `permissions: contents: read` -> `write` between
+# protocol/3 and protocol/4, so a stale workflow is as dangerous as a stale
+# parser. Seeded with the real v0.4.0 (protocol/3) hashes — the exact drift this
+# repo hit — so the repair path works on day one.
+ASSET_MANIFEST = {
+    "task-template.yml": [
+        "4700580692e8b2b40d120f2e1e280dfa6bbfaea1eaae27f29ee7b42c78b3f6aa",
+    ],
+    "kraken.py": [
+        "8ac696c864a6d169febe95698ec6d3d2ebef8844d3f3ff5e18ba2a26332b10ae",
+    ],
+    "reclaim-stale.yml": [
+        "ffd162aa1f2d6d62927b17dfafedb77a01bd55f5854ab73b5aa184db5e4eb1cc",
+    ],
+    "cleanup-closed.yml": [
+        "b2516a16da6b6ba982d4384278633e701b0bf699c017372e251a6ffacec94256",
+    ],
+    "requeue-on-reply.yml": [
+        "8707c0af3e0a496461b9fcbe10833bfbff49e23c70a4b9c30f04e0ba856edc53",
+    ],
+    "validate-task.yml": [
+        "156d002c42cb59b2a2e611dc5df652bde04e9102ebf92552a45ffe5ed06a733a",
+    ],
+}
+
+
+def asset_sha256(data):
+    """The sha256 hex digest of an asset's raw bytes — the manifest's key."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def classify_asset(current, bundled, released):
+    """Classify an installed asset against the bundled copy and its released
+    hashes (a pure decision, so it is unit-testable without any network):
+
+      - ``"absent"``     — nothing installed yet (``current is None``)
+      - ``"unchanged"``  — byte-identical to the bundled copy
+      - ``"outdated"``   — matches a KNOWN prior release, so it was shipped and
+                           never hand-edited: safe for --upgrade to replace
+      - ``"customized"`` — matches no release: a deliberate edit, never clobbered
+    """
+    if current is None:
+        return "absent"
+    if current == bundled:
+        return "unchanged"
+    if asset_sha256(current) in released:
+        return "outdated"
+    return "customized"
+
+
+# --- protocol-version handshake ----------------------------------------------
+# A worker reads the coordination repo's vendored `.github/kraken.py`
+# PROTOCOL_VERSION and compares it with its own before draining. This turns the
+# silent asset drift the manifest repairs into a loud, actionable refusal.
+PROTOCOL_VERSION_RE = re.compile(r"^PROTOCOL_VERSION\s*=\s*(\d+)", re.MULTILINE)
+VENDORED_KRAKEN_PATH = ".github/kraken.py"
+
+
+def parse_protocol_version(text):
+    """The PROTOCOL_VERSION integer declared in a kraken.py source, or None when
+    the text is missing/unparseable (a value that cannot be read at all)."""
+    if text is None:
+        return None
+    m = PROTOCOL_VERSION_RE.search(text)
+    return int(m.group(1)) if m else None
+
+
+def remote_protocol_version(repo):
+    """The PROTOCOL_VERSION the coordination repo's vendored `.github/kraken.py`
+    declares, or None if it cannot be read or parsed. One cheap contents-API
+    read; fail-closed by construction — an unreadable file yields None, which
+    verify_protocol turns into a refusal rather than a guess."""
+    raw = gh_get_content(repo, VENDORED_KRAKEN_PATH)
+    if raw is None:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return parse_protocol_version(text)
+
+
+def verify_protocol(repo):
+    """Compare this worker's PROTOCOL_VERSION with the coordination repo's
+    vendored one. Returns (ok, message): ok is True only when both are readable
+    and equal. A mismatch EITHER way — an old worker on an upgraded repo is as
+    broken as the reverse — or an unreadable/unparseable vendored file refuses,
+    with a message pointing at `init --upgrade` (fail closed)."""
+    remote = remote_protocol_version(repo)
+    if remote is None:
+        return (False,
+                "protocol handshake: cannot verify the coordination repo's "
+                "protocol version — %s is missing or unreadable. Refusing to "
+                "drain (fail closed). Run `kraken.py init --upgrade %s` to "
+                "reinstall the vendored assets." % (VENDORED_KRAKEN_PATH, repo))
+    if remote != PROTOCOL_VERSION:
+        return (False,
+                "protocol handshake: version mismatch — this worker speaks "
+                "protocol/%d but %s vendors protocol/%d. Refusing to drain. "
+                "Run `kraken.py init --upgrade %s` (or upgrade this worker's "
+                "plugin) so both sides agree." % (
+                    PROTOCOL_VERSION, VENDORED_KRAKEN_PATH, remote, repo))
+    return (True, "")
+
+
 # Each bundled asset init commits: (bundled filename, destination path in the
 # coordination repo, create commit message).
 INIT_ASSETS = (
@@ -1336,27 +1465,49 @@ def gh_repo_create_private(repo):
 
 def gh_get_content(repo, path):
     """The file's current bytes on the repo via the contents API, or None when it
-    is absent (404) OR unreadable. The caller cannot tell 404 from a transport
-    fault here and, like the skill, treats 'no readable file' as absent and
-    creates — a PUT over a file that truly exists then fails server-side (no
-    sha), so a lost read never silently clobbers a customized file."""
-    rc, out = run_gh(["api", f"/repos/{repo}/contents/{path}", "--jq", ".content"])
+    is absent (404) OR unreadable — a thin wrapper over gh_get_content_meta for
+    callers that only need the bytes (e.g. the protocol handshake)."""
+    content, _sha = gh_get_content_meta(repo, path)
+    return content
+
+
+def gh_get_content_meta(repo, path):
+    """(bytes, blob_sha) for `path` on the repo via the contents API, or
+    (None, None) when it is absent (404) OR unreadable. The blob sha is what the
+    contents API requires to *update* an existing file — a create never sends
+    one. The caller cannot tell 404 from a transport fault here and, like the
+    skill, treats 'no readable file' as absent."""
+    rc, out = run_gh(["api", f"/repos/{repo}/contents/{path}"])
     if rc != 0:
-        return None
+        return (None, None)
     try:
-        return base64.b64decode(re.sub(r"\s+", "", out))
+        obj = json.loads(out)
+    except (ValueError, json.JSONDecodeError):
+        return (None, None)
+    encoded = obj.get("content")
+    if not isinstance(encoded, str):
+        return (None, None)
+    try:
+        content = base64.b64decode(re.sub(r"\s+", "", encoded))
     except ValueError:
-        return None
+        return (None, None)
+    sha = obj.get("sha")
+    return (content, sha if isinstance(sha, str) else None)
 
 
-def gh_put_content(repo, path, data, message):
-    """Create `path` on the repo with `data` via the contents API (create-only;
-    callers reach here only when gh_get_content reported the file absent)."""
+def gh_put_content(repo, path, data, message, sha=None):
+    """Write `path` on the repo with `data` via the contents API. With no `sha`
+    this creates the file (callers reach here only when the file was reported
+    absent); passing the current blob `sha` UPDATES the existing file — GitHub
+    rejects an overwrite that omits it, so `init --upgrade` always supplies it."""
     b64 = base64.b64encode(data).decode("ascii")
-    rc, _ = run_gh([
+    api_args = [
         "api", f"/repos/{repo}/contents/{path}", "-X", "PUT",
         "-f", f"message={message}", "-f", f"content={b64}",
-    ])
+    ]
+    if sha is not None:
+        api_args += ["-f", f"sha={sha}"]
+    rc, _ = run_gh(api_args)
     return rc == 0
 
 
@@ -1371,14 +1522,18 @@ def gh_label_upsert(repo, name, color, description):
 
 
 def cmd_init(args):
-    """Stand up a coordination repo: verify-or-create it private, install the
-    bundled assets (create / skip-unchanged / flag-customized), and upsert the
-    canonical labels. Idempotent — a second run creates nothing new. Touches no
-    issues. Exit 0 on success, 20 on any gh/transport failure."""
-    repo, project = args.repo, args.project
+    """Stand up (or repair) a coordination repo: verify-or-create it private,
+    install the bundled assets, and upsert the canonical labels. Plain init is
+    create-only and never overwrites an existing asset — it merely REPORTS one as
+    `unchanged`, `outdated` (matches a prior release), or `customized` (matches
+    none). `--upgrade` additionally replaces every `outdated` asset with the
+    bundled copy (a customized asset is still never touched). Idempotent; touches
+    no issues. Exit 0 on success, 20 on any gh/transport failure."""
+    repo, project, upgrade = args.repo, args.project, args.upgrade
     report = {
         "repo": repo,
         "repo_status": "exists",
+        "upgrade": bool(upgrade),
         "assets": [],
         "labels": [],
         "project": project or None,
@@ -1391,7 +1546,9 @@ def cmd_init(args):
             return EXIT_TRANSPORT
         report["repo_status"] = "created"
 
-    # 2. Install the bundled assets, create-only — never clobber a customized one.
+    # 2. Install/repair the bundled assets. A create-only pass by default; with
+    #    --upgrade, an asset whose bytes match a KNOWN release (never hand-edited)
+    #    is replaced. A customized asset is only ever flagged, never clobbered.
     for name, dest, message in INIT_ASSETS:
         try:
             with open(os.path.join(SKILL_DIR, name), "rb") as fh:
@@ -1399,16 +1556,23 @@ def cmd_init(args):
         except OSError:
             print(f"init: missing bundled asset {name}", file=sys.stderr)
             return EXIT_USAGE
-        current = gh_get_content(repo, dest)
-        if current is None:
+        current, sha = gh_get_content_meta(repo, dest)
+        released = ASSET_MANIFEST.get(name, [])
+        kind = classify_asset(current, bundled, released)
+        if kind == "absent":
             if not gh_put_content(repo, dest, bundled, message):
                 print(f"init: gh-failure stage=asset path={dest}", file=sys.stderr)
                 return EXIT_TRANSPORT
             status = "created"
-        elif current == bundled:
-            status = "unchanged"
+        elif kind == "outdated" and upgrade:
+            if not gh_put_content(repo, dest, bundled,
+                                  f"chore: upgrade kraken asset {dest}", sha=sha):
+                print(f"init: gh-failure stage=asset path={dest}", file=sys.stderr)
+                return EXIT_TRANSPORT
+            status = "upgraded"
         else:
-            status = "customized"
+            # unchanged / outdated (no --upgrade) / customized — write nothing.
+            status = kind
         report["assets"].append({"path": dest, "status": status})
 
     # 3. Upsert the canonical labels (+ the project label when scoped).
@@ -1436,14 +1600,25 @@ def render_init(report):
         lines.append(f"init: asset {asset['path']} ({asset['status']})")
     for name in report["labels"]:
         lines.append(f"init: label {name} (upserted)")
-    created = sum(1 for a in report["assets"] if a["status"] == "created")
-    unchanged = sum(1 for a in report["assets"] if a["status"] == "unchanged")
-    customized = sum(1 for a in report["assets"] if a["status"] == "customized")
+    count = lambda s: sum(1 for a in report["assets"] if a["status"] == s)
+    created, unchanged = count("created"), count("unchanged")
+    outdated, upgraded, customized = count("outdated"), count("upgraded"), count("customized")
     lines.append(
         f"init: done repo={report['repo']} repo_status={report['repo_status']} "
         f"assets_created={created} assets_unchanged={unchanged} "
+        f"assets_outdated={outdated} assets_upgraded={upgraded} "
         f"assets_customized={customized} labels={len(report['labels'])}"
     )
+    # Actionable hints: outdated assets under a plain init can be repaired with
+    # --upgrade; a customized asset is a deliberate edit left for the operator.
+    if outdated and not report.get("upgrade"):
+        lines.append(
+            f"init: hint {outdated} asset(s) match an OLDER release — re-run "
+            f"`init --upgrade {report['repo']}` to reinstall the bundled copies")
+    if customized:
+        lines.append(
+            f"init: hint {customized} asset(s) differ from every known release "
+            f"(customized) — left untouched; reconcile them by hand if intended")
     return "\n".join(lines)
 
 
@@ -2053,6 +2228,9 @@ def build_parser():
     p.add_argument("repo")
     p.add_argument("--project", default="",
                    help="also upsert the project:<name> routing label")
+    p.add_argument("--upgrade", action="store_true",
+                   help="replace installed assets that match an older release "
+                        "with the bundled copy (customized assets stay untouched)")
     p.add_argument("--json", action="store_true",
                    help="emit the machine-readable init report")
     p.set_defaults(func=cmd_init)
