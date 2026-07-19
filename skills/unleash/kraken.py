@@ -465,6 +465,27 @@ def resolve_commit_meta(repo, shas):
     return meta
 
 
+def claim_ref_owner(repo, issue):
+    """The worker named in the claim commit the ref for `issue` currently points
+    at, or None when the ref is absent or unreadable. This is how a lost CAS
+    (HTTP 422) is told apart: a 422 is a genuine loss only when the ref belongs
+    to a DIFFERENT worker; a worker re-claiming its OWN in-flight claim after a
+    network failure already owns the task (PROTOCOL.md §5's re-check caveat).
+    None (transport/absent) is treated by the caller as 'not mine', so an
+    ambiguous read never turns a real loss into a false win."""
+    refs = claim_ref_list(repo)
+    if refs is None:
+        return None
+    sha = refs.get(int(issue)) if str(issue).lstrip("-").isdigit() else None
+    if not sha:
+        return None
+    meta = resolve_commit_meta(repo, [sha])
+    if meta is None:
+        return None
+    payload = parse_marker((meta.get(sha) or {}).get("message") or "") or {}
+    return payload.get("worker") or None
+
+
 # --- claim state file --------------------------------------------------------
 
 def state_dir():
@@ -777,19 +798,24 @@ def _claim_once(repo, issue, worker):
             return EXIT_NOT_CLEAR
 
     # 2. CAS — orphan claim commit, then create the claim ref. The server
-    #    accepts exactly one creator, so there is nothing to arbitrate: 422
-    #    means another worker owns the task and this worker wrote NOTHING.
+    #    accepts exactly one creator, so there is nothing to arbitrate.
     sha = create_claim_commit(repo, {"type": "claim", "worker": worker})
     if sha is None:
         print(f"claim: gh-failure issue={issue} stage=commit")
         return EXIT_TRANSPORT
     outcome = claim_ref_create(repo, issue, sha)
-    if outcome == "lost":
-        print(f"claim: lost-cas issue={issue} — another worker holds the claim ref")
-        return EXIT_LOST
-    if outcome != "won":
+    if outcome == "fail":
         print(f"claim: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
+    if outcome == "lost":
+        # A 422 is a genuine loss only when the ref belongs to ANOTHER worker.
+        # A worker re-claiming its OWN in-flight claim after a network failure
+        # (PROTOCOL.md §5's re-check caveat) already owns the task — recognize
+        # its own ref and fall through to re-project, rather than reporting a
+        # false loss. An unreadable/absent owner is treated as not-ours.
+        if claim_ref_owner(repo, issue) != worker:
+            print(f"claim: lost-cas issue={issue} — another worker holds the claim ref")
+            return EXIT_LOST
 
     # 3. Projection — the claim is already won and the ref holds it. Record the
     #    state file FIRST so the lifecycle hooks can release the claim even if

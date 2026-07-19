@@ -203,6 +203,21 @@ class RefCasTests(unittest.TestCase):
         kraken.run_gh = lambda args: (1, "")
         self.assertIsNone(kraken.claim_ref_list("o/t"))
 
+    def test_claim_ref_owner_names_the_ref_holder(self):
+        # The §5 re-check discriminator: a 422 is a real loss only when the ref
+        # belongs to another worker. claim_ref_owner reads the ref's commit
+        # marker to name the current holder.
+        kraken.run_gh = lambda args: (0, "refs/kraken/claims/7\tsha7\n")
+        kraken.graphql = lambda q: {"data": {"repository": {
+            "c0": {"committedDate": "t", "message": clm("w1")}}}}
+        self.assertEqual(kraken.claim_ref_owner("o/t", 7), "w1")
+        self.assertEqual(kraken.claim_ref_owner("o/t", "7"), "w1")
+        # Absent ref → None (treated as not-ours by the caller).
+        self.assertIsNone(kraken.claim_ref_owner("o/t", 9))
+        # Transport failure → None, never a guessed owner.
+        kraken.run_gh = lambda args: (1, "")
+        self.assertIsNone(kraken.claim_ref_owner("o/t", 7))
+
     def test_resolve_commit_meta_batches_and_parses(self):
         captured = {}
 
