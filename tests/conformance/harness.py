@@ -19,6 +19,7 @@ env; the `mk_*` methods seed the stub the way `lib.sh`'s helpers did; `kraken()`
 invokes a kraken.py subcommand; and the `assert_*`/inspection helpers replace
 `lib.sh`'s shell assertions.
 """
+import hashlib
 import json
 import os
 import shutil
@@ -179,7 +180,7 @@ class KrakenConformanceTest(unittest.TestCase):
 
     def mk_comment(self, n, body, at=None):
         """Append a comment in server order. Optional ISO `at` is written to a
-        .at sidecar (the reaper's staleness anchor reads comment createdAt)."""
+        .at sidecar (absent = derived from the issue's createdAt)."""
         cdir = os.path.join(self.issue_dir(n), "comments")
         os.makedirs(cdir, exist_ok=True)
         seq = len([f for f in os.listdir(cdir) if f.endswith(".md")]) + 1
@@ -206,6 +207,34 @@ class KrakenConformanceTest(unittest.TestCase):
 
     def mk_repo(self, slug):
         self._write(os.path.join(self.state, "repo", "nameWithOwner"), slug + "\n")
+
+    def mk_claim_ref(self, n, worker, age_hours=0, msg=None, mtype="claim"):
+        """Seed a live claim ref for issue `n` — the protocol/4 lock: the
+        STATE/refs/<n> file plus its commit object, committedDate backdated by
+        `age_hours` (the reaper's clock). The commit message is the standard
+        kraken marker, exactly as create_claim_commit writes it. Returns the
+        seeded sha."""
+        payload = {"type": mtype, "worker": worker}
+        if msg is not None:
+            payload["msg"] = msg
+        sha = hashlib.sha1(("seed-%s-%s" % (n, worker)).encode("utf-8")).hexdigest()
+        self._write(os.path.join(self.state, "objects", sha + ".json"),
+                    json.dumps({"message": make_marker(payload),
+                                "committedDate": ago_iso(age_hours)}))
+        self._write(os.path.join(self.state, "refs", str(n)), sha + "\n")
+        return sha
+
+    def claim_ref(self, n):
+        """The sha the live claim ref for issue `n` points at, or None when no
+        ref exists (the task is unlocked)."""
+        path = os.path.join(self.state, "refs", str(n))
+        if not os.path.isfile(path):
+            return None
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+
+    def claim_ref_exists(self, n):
+        return self.claim_ref(n) is not None
 
     def mk_content(self, path, src_file):
         dst = os.path.join(self.state, "contents", path)

@@ -30,7 +30,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
 | L52 | Coordination repo **MUST** be private and **MUST NOT** hold work code | 📋 operational + ✅ pinned | `kraken.py init` creates the repo **private** (never public); `tests/conformance/test_26_init.py` asserts the `repo create … --private` bootstrap and the private-only contract. |
-| L58 | Assignees **MUST NOT** be used to arbitrate anything | 🏗 structural | Arbitration (`kraken.py` `arbitrate_winner`) reads only claim markers in the claim window; assignees are never fetched or consulted. Pinned indirectly by `tests/conformance/test_04_claim_race.py`, `tests/conformance/test_05_claim_window.py`, `tests/unit` (arbitration ignores everything but claim markers/lines). |
+| L58 | Assignees **MUST NOT** be used to arbitrate anything | 🏗 structural | The claim is decided by the git-ref CAS (§5) — `kraken.py` never fetches or consults assignees. Pinned indirectly by `tests/conformance/test_04_claim_race.py` (the CAS race), `tests/conformance/test_05_claim_thread_independence.py`, and `tests/unit` `RefCasTests`. |
 
 ## §2 Task shape
 
@@ -50,33 +50,32 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | L125 | Startable definition; a task **MUST** carry at most one held label | ✅ pinned | Startable/held classification: `tests/conformance/test_01_list_startable.py`, `tests/conformance/test_12_list_startable_blocked.py` (blocked-by), `tests/conformance/test_13_watch_queue_blocked.py` (watch gate). At-most-one-held is enforced by the claim guard: `tests/conformance/test_03_claim_held.py`. |
 | L144 | Workers **MUST NOT** close task issues | 🏗 structural | `kraken.py` exposes no close/cancel path; closing is out of the transition surface (§11). See also §11 authorization. |
 
-## §4 Comments: the machine marker and attribution
+## §4 The machine marker and attribution
 
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| L165–166 | The marker JSON **MUST** be a single line carrying a string `type`, encoded with a real JSON serializer | ✅ pinned + 🧹 lint | `tests/unit` `MarkerTests` (`test_make_marker_is_compact_ascii_json`, `test_make_marker_round_trips_through_parse`); marker byte-form pinned in conformance by `assert_marker` in `tests/conformance/test_02_claim_clear.py`, `tests/conformance/test_24_protocol3_marker_only.py`. Serializer-not-interpolation cross-checked by `scripts/lint-skills.sh`. |
-| L170–172 | Consumers **MUST** scan every comment in server order; a malformed marker (undecodable JSON, no string `type`) **MUST** be ignored, never guessed | ✅ pinned | `tests/unit` `MarkerTests` (`test_parse_marker_rejects_undecodable_json`, `test_parse_marker_rejects_a_payload_without_a_string_type`, `test_malformed_marker_never_arbitrates`, `test_parse_marker_tolerates_surrounding_prose`); per-line scan `MarkerEdgeCaseTests`. |
-| L177 | `heartbeat` marker **MUST NOT** reset the claim window | ✅ pinned | `tests/conformance/test_08_heartbeat.py`; `tests/unit` `ArbitrationTests.test_heartbeat_does_not_reset`. |
-| L186–191 | A protocol/3 consumer reads the hidden marker and **NOTHING else**: the retired protocol/1 line grammar is not parsed, so free text can never occupy a machine-line position | ✅ pinned + 🧹 lint | `tests/unit` `MarkerOnlyReadingTests` (former claim/reset lines inert, result-file `released:` resets nothing, heartbeat message with `claimed-by:` forges no machine line, release reason newline injects nothing); `tests/conformance/test_24_protocol3_marker_only.py` (end-to-end marker-only + produced-comment shape). Marker vocabulary agreement across spec/emitter cross-checked by `scripts/lint-skills.sh`. |
-| L194 | Every worker-posted comment **MUST** open with the attribution disclaimer | ✅ pinned + 🧹 lint | Disclaimer asserted on claim `tests/conformance/test_02_claim_clear.py`, release `tests/conformance/test_06_release.py`, heartbeat `tests/conformance/test_08_heartbeat.py`, and `tests/unit` `MarkerReaderTests.test_composed_comment_carries_disclaimer_prose_and_marker`; disclaimer shape cross-checked by `scripts/lint-skills.sh`. |
+| L165–166 | The marker JSON **MUST** be a single line carrying a string `type`, encoded with a real JSON serializer | ✅ pinned + 🧹 lint | `tests/unit` `MarkerTests` (`test_make_marker_is_compact_ascii_json`, `test_make_marker_round_trips_through_parse`); marker byte-form pinned in conformance by `assert_marker` in `tests/conformance/test_02_claim_clear.py`, `tests/conformance/test_24_marker_and_free_text.py`. Serializer-not-interpolation cross-checked by `scripts/lint-skills.sh`. |
+| L170–172 | A malformed marker (undecodable JSON, no string `type`) **MUST** be ignored, never guessed | ✅ pinned | `tests/unit` `MarkerTests` (`test_parse_marker_rejects_undecodable_json`, `test_parse_marker_rejects_a_payload_without_a_string_type`, `test_parse_marker_tolerates_surrounding_prose`, `test_parse_marker_tolerates_a_trailing_cr`). |
+| L186–191 | Markers are the only machine state; free text is never parsed (a line beginning with a former keyword can never occupy a machine-line position) | ✅ pinned + 🧹 lint | `tests/conformance/test_24_marker_and_free_text.py` (a thread of former protocol/1 lines creates no lock; a free-text `released:` line does not free a live ref; the produced comment carries exactly one marker with the prose preserved verbatim); `tests/unit` `MarkerTests.test_release_reason_newline_stays_inside_the_json`, `ComposedCommentTests.test_colliding_free_text_is_preserved_verbatim_beside_one_marker`. Marker vocabulary agreement across spec/emitter cross-checked by `scripts/lint-skills.sh`. |
+| L194 | Every worker-posted comment **MUST** open with the attribution disclaimer | ✅ pinned + 🧹 lint | Disclaimer asserted on claim `tests/conformance/test_02_claim_clear.py`, release `tests/conformance/test_06_release.py`, and `tests/unit` `ComposedCommentTests.test_carries_disclaimer_prose_and_one_marker`; disclaimer shape cross-checked by `scripts/lint-skills.sh`. |
 
 ## §5 The claim algorithm
 
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| L223 | Label filtering **SHOULD** be client-side for determinism | ✅ pinned | `tests/conformance/test_01_list_startable.py` asserts exact client-side-filtered output; `tests/conformance/test_19_list_startable_call_count.py` pins the O(1) call count that client-side filtering enables. |
-| L227 | Guard: a held task **MUST** be skipped without writing anything | ✅ pinned | `tests/conformance/test_03_claim_held.py` (exit 11, zero writes). |
-| L234 | A loser **MUST** back off removing nothing | ✅ pinned | `tests/conformance/test_04_claim_race.py` (the claim race: loser exits 10, removes nothing); `tests/conformance/test_22_claim_next.py` + `tests/unit` `ClaimNextIterationTests` (`claim-next` skips a lost/held candidate forward — never retries it — and two concurrent `claim-next` workers claim two different tasks). |
-| L240 | Claim markers before the window start **MUST** be ignored | ✅ pinned | `tests/conformance/test_05_claim_window.py`; `tests/unit` `ArbitrationTests` (`test_released_resets_window`, `test_stale_claim_resets_window`, `test_needs_decision_resets_window`, `test_reset_after_claim_leaves_no_winner`, `test_delivered_is_a_review_bounce_reset`). |
-| L243 | A liveness signal **MUST NOT** reset the window | ✅ pinned | (same as §4 L177) `tests/conformance/test_08_heartbeat.py`, `tests/unit` `ArbitrationTests.test_heartbeat_does_not_reset`. |
-| L250 | A worker **MUST** work one task at a time; **MUST NOT** claim a second while holding a claim | ✅ pinned | `tests/conformance/test_28_claim_one_at_a_time.py`: `kraken.py claim` refuses (exit 11, writing nothing — no label, no comment) a claim on a *different* issue while a `claim-<worker>.json` state file marks an open claim, and `claim-next` refuses on any open claim; re-claiming the *same* issue is permitted (the §5 network-failure caveat), and resolving the claim (deliver / escalate / release) clears the guard. State-file lifecycle: `tests/conformance/test_15_claim_state_file.py`. |
+| L223 | Label filtering **SHOULD** be client-side for determinism | ✅ pinned | `tests/conformance/test_01_list_startable.py` asserts exact client-side-filtered output; `tests/conformance/test_19_list_startable_call_count.py` pins the O(1) call count (listing + the one claim-refs read) that client-side filtering enables. |
+| L227 | Guard: a held task **MUST** be skipped without writing anything | ✅ pinned | `tests/conformance/test_03_claim_held.py` (exit 11, zero writes, no git-data call). |
+| §5 CAS | Creating the claim ref is the arbiter: exactly one creator succeeds, HTTP 422 to the rest; the loser **MUST** back off writing nothing | ✅ pinned | `tests/conformance/test_04_claim_race.py` (two concurrent claims, exactly one `201`, the loser writes no comment and touches no label, the surviving ref names the winner); `tests/unit` `RefCasTests.test_claim_ref_create_maps_the_cas_outcomes` (201→won / 422→lost / other→fail) and `test_create_claim_commit_is_an_orphan_marker_commit`; `tests/conformance/test_22_claim_next.py` + `tests/unit` `ClaimNextIterationTests` (skip-on-loss forward-only; two concurrent `claim-next` workers claim two different tasks). |
+| §5 thread independence | Ownership is the ref, not the comment thread: a thread of stale claim/reset markers neither blocks nor grants a claim, and the claim path reads no comments | ✅ pinned | `tests/conformance/test_05_claim_thread_independence.py` (stale markers never block; a live ref alone holds the task); `tests/conformance/test_20_claim_ignores_comments.py` (a 150-comment thread costs the claim zero comment reads, asserted on the stub call log). |
+| §5 release the lock | Every terminal transition **MUST** delete the claim ref, **after** its comment/label writes | ✅ pinned | Escalate `tests/conformance/test_09_escalate.py`, deliver `tests/conformance/test_10_deliver.py`, release `tests/conformance/test_06_release.py` each assert the ref is gone; ordering-under-failure (ref delete last, task stays held) `tests/conformance/test_11_write_transition_failures.py`; `claim_ref_delete` idempotence (422 tolerated) `tests/unit` `RefCasTests.test_claim_ref_delete_tolerates_a_missing_ref`. |
+| L250 | A worker **MUST** work one task at a time; **MUST NOT** claim a second while holding a claim | ✅ pinned | `tests/conformance/test_28_claim_one_at_a_time.py`: `kraken.py claim` refuses (exit 11, writing nothing) a claim on a *different* issue while a `claim-<worker>.json` state file marks an open claim, and `claim-next` refuses on any open claim; re-claiming the *same* issue is permitted (the §5 network-failure caveat), and resolving the claim (deliver / escalate / release) clears the guard. State-file lifecycle: `tests/conformance/test_15_claim_state_file.py`. |
 
-## §6 Heartbeats and the reaper
+## §6 Heartbeats and the reconciler
 
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| L256 | A worker holding `in-progress` **SHOULD** heartbeat at least every 2h | 🧠 agent | Cadence is worker behavior. The reaper *mechanism* that consumes heartbeats is pinned below. |
-| §6 reaper | Staleness anchored to the worker's last liveness marker (`claim`/`heartbeat`), 6h `MAX_HOURS`; operator comments do not reset the clock | ✅ pinned | `tests/conformance/test_17_reclaim_stale.py` drives `kraken.py reap` — the subcommand `reclaim-stale.yml` now execs (issue #37) — against the stub; `tests/unit/test_workflow_commands.py` unit-tests the staleness anchoring. |
+| L256 | A worker holding a claim **SHOULD** heartbeat at least every 2h | 🧠 agent | Cadence is worker behavior. The heartbeat *mechanism* — advance the claim ref to a fresh commit, post no comment, do not free the claim — is pinned by `tests/conformance/test_08_heartbeat.py` and the reconciler that consumes it is pinned below. |
+| §6 reconciler | Staleness anchored to the claim ref's commit date (not `updatedAt`; nothing on the timeline resets it), 6h `MAX_HOURS`; the four rules — reclaim stale, delete orphan lock, heal missing label, requeue orphan projection | ✅ pinned | `tests/conformance/test_17_reclaim_stale.py` drives `kraken.py reap` — the subcommand `reclaim-stale.yml` now execs (issue #37) — through all four rules against the stub; `tests/unit/test_kraken.py` `ReconcilerClassificationTests` (rule dispatch, transport injected) and `tests/unit/test_workflow_commands.py` `ReapCommandTests` (staleness clock, boundary, env `MAX_HOURS`, transport failure). |
 | §6 requeue | requeue-on-reply asymmetry (bare comment requeues `needs-decision`, not `awaiting-merge`); no-op on worker/bot/unheld | ✅ pinned | `tests/conformance/test_18_requeue_on_reply.py` drives `kraken.py requeue-check` — the subcommand `requeue-on-reply.yml` now execs (issue #37) — against the stub; `tests/unit/test_workflow_commands.py` unit-tests the human-vs-worker discrimination + requeue-directive detection. |
 
 ## §7 Escalation
@@ -84,13 +83,13 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
 | L297 | The worker **MUST** escalate rather than guess | 🧠 agent | Deciding *when* to escalate is judgment — `tests/agent/`. |
-| L299 | The comment **MUST** land before the label swap | ✅ pinned | `tests/conformance/test_09_escalate.py`; `tests/conformance/test_11_write_transition_failures.py` (comment-fails → nothing changed, task stays held). |
+| L299 | The comment **MUST** land before the label swap, and the ref delete last | ✅ pinned | `tests/conformance/test_09_escalate.py` (labels swapped, ref deleted); `tests/conformance/test_11_write_transition_failures.py` (comment-fails → nothing changed; label-fails and ref-delete-fails → task stays held, ref survives). |
 
 ## §8 Delivery
 
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| §8 delivery | Post `delivered:` + `pr:`, then swap `in-progress`→`awaiting-merge`; comment first | ✅ pinned | `tests/conformance/test_10_deliver.py`; `tests/conformance/test_11_write_transition_failures.py` (gh failure ordering); review-bounce window reset: `tests/conformance/test_10_deliver.py` and `tests/unit` `test_delivered_is_a_review_bounce_reset`. |
+| §8 delivery | Post the `delivered` marker (with `pr`), swap `in-progress`→`awaiting-merge`, then delete the claim ref; comment first, ref last | ✅ pinned | `tests/conformance/test_10_deliver.py` (marker + label swap + ref deleted; review bounce re-claimable once the ref is gone); `tests/conformance/test_11_write_transition_failures.py` (gh failure ordering — the ref survives a failed label swap). |
 | L316 | Every delivered commit **MUST** carry the `Co-Authored-By` and `Kraken-Task:` trailers | ✅ pinned | The `Kraken-Task:` trailer's format and its `kraken@<version>` stamp are single-sourced in `kraken.py` (`contract task-trailer`, `task_trailer`/`plugin_version`) and unit-pinned (`tests/unit` `ContractCommandTests`, `PluginVersionTests`). That delivered commits actually carry **both** trailers on real git commits is pinned by `tests/conformance/test_29_deliver_commit_trailers.py`: a throwaway work repo builds a multi-commit delivery whose `Kraken-Task:` line is taken verbatim from `kraken.py contract task-trailer`, then asserts every `base..HEAD` commit carries both trailers — well-formed, read through git's own `%(trailers:...)` parser — and that the check fails on a trailer-less and a malformed commit. |
 | L323 | The PR body **SHOULD** carry `Closes …` when the work repo is on GitHub | 🧠 agent | PR authorship is agent behavior — `tests/agent/`. |
 | L333 | Work **MUST NOT** be silently lost (fall back to the diff in a comment) | 🧠 agent | Fallback behavior is judgment — `tests/agent/`. |
@@ -99,25 +98,25 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| L338–340 | A worker abandoning a claim **MUST** release honestly: post the `released` marker (window closes), **then** remove `in-progress` — comment first | ✅ pinned | `tests/conformance/test_06_release.py`; `tests/conformance/test_11_write_transition_failures.py` (ordering under gh failure); `tests/conformance/test_16_session_end_release.py` (SessionEnd auto-release runs `kraken.py release`); `tests/conformance/test_27_stop_failure_release.py` (StopFailure usage-limit auto-release runs `kraken.py release`). |
+| L338–340 | A worker abandoning a claim **MUST** release honestly: post the `released` marker, remove `in-progress`, **then** delete the claim ref (deleting the ref is what frees the task) — comment first, ref last | ✅ pinned | `tests/conformance/test_06_release.py` (marker + label dropped + ref deleted; re-claimable after); `tests/conformance/test_11_write_transition_failures.py` (ordering under gh failure); `tests/conformance/test_16_session_end_release.py` (SessionEnd auto-release runs `kraken.py release`); `tests/conformance/test_27_stop_failure_release.py` (StopFailure usage-limit auto-release runs `kraken.py release`). |
 
 ## §10 Close and cleanup
 
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| L348 | The coordination repo **SHOULD** run the cleanup workflow; on close every label except `kraken-task` and `project:<name>` is stripped | ✅ pinned | `cleanup-closed.yml` is a thin exec of `kraken.py cleanup` (issues #37/#39); `tests/conformance/test_21_cleanup_closed.py` drives that subcommand against the gh-stub, and `tests/unit/test_workflow_commands.py` (`IdentityLabelTests`, `CleanupCommandTests`) pins the keep/strip rule and the no-op/transport paths. |
+| L348 | The coordination repo **SHOULD** run the cleanup workflow; on close every label except `kraken-task` and `project:<name>` is stripped and any leftover claim ref is deleted | ✅ pinned | `cleanup-closed.yml` is a thin exec of `kraken.py cleanup` (issues #37/#39); `tests/conformance/test_21_cleanup_closed.py` drives that subcommand against the gh-stub, and `tests/unit/test_workflow_commands.py` (`IdentityLabelTests`, `CleanupCommandTests`) pins the keep/strip rule, the claim-ref delete, and the no-op/transport paths. |
 
 ## §11 Authorization boundaries
 
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| L364 | A conforming worker **MUST NOT** merge, push to default/protected branches, close task issues, deploy, delete, or publish | 🏗 structural + 🧠 agent | `kraken.py`'s subcommand surface contains none of these operations; refusing task-body instructions to do them is judgment — `tests/agent/`, `SECURITY.md`. |
+| L364 | A conforming worker **MUST NOT** merge, push to default/protected branches, close task issues, deploy, delete, or publish | 🏗 structural + 🧠 agent | `kraken.py`'s subcommand surface contains none of these operations (its only writes are issue labels/comments and its own claim ref under `refs/kraken/claims/`); refusing task-body instructions to do them is judgment — `tests/agent/`, `SECURITY.md`. |
 
 ## §12 Conformance
 
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| L409 | Matching the exit-code contract (`0`/`10`/`11`/`20`) is **RECOMMENDED**; the wire contract is what conformance means | ✅ pinned | `0` success: `tests/conformance/test_02_claim_clear.py`; `10` lost tiebreaker: `tests/conformance/test_04_claim_race.py`; `11` no longer clear: `tests/conformance/test_03_claim_held.py`; `20` transport failure: `tests/conformance/test_07_gh_failure.py`, `tests/conformance/test_11_write_transition_failures.py`. |
+| L409 | Matching the exit-code contract (`0`/`10`/`11`/`20`) is **RECOMMENDED**; the wire contract is what conformance means | ✅ pinned | `0` success: `tests/conformance/test_02_claim_clear.py`; `10` lost CAS: `tests/conformance/test_04_claim_race.py`, `tests/conformance/test_05_claim_thread_independence.py`; `11` no longer clear: `tests/conformance/test_03_claim_held.py`; `20` transport failure: `tests/conformance/test_07_gh_failure.py`, `tests/conformance/test_11_write_transition_failures.py`. |
 
 ## Open gaps (follow-up issues)
 

@@ -55,7 +55,7 @@ assert_no_label 5 closed           # workers never close tasks
 
 # --- honest surfacing: released OR escalated, with a reason/decision request ---
 if has_marker 5 released; then
-  # Path (a): honest release — the window is closed, in-progress removed.
+  # Path (a): honest release — the claim ref is deleted, in-progress removed.
   assert_no_label 5 in-progress
   assert_marker_field 5 released reason
 elif has_label 5 needs-decision; then

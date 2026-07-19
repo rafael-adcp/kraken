@@ -1,10 +1,10 @@
 name: Conformance
 
 # Mechanical proof of the queue protocol: the bundled transition program (kraken.py)
-# runs against a stateful gh stub — claim guard, claim race (exactly one winner),
-# claim-window arbitration, honest release, failure surfacing. Plus the kraken.py
-# unit tests. All Python (the conformance suite was ported from bash in #41). No
-# secrets, no tokens, no model calls (see #48 item 1).
+# runs against a stateful gh stub — claim guard, the claim-ref CAS race (exactly
+# one winner), heartbeat/deliver/release, the reap reconciler, failure surfacing.
+# Plus the kraken.py unit tests. All Python (the conformance suite was ported from
+# bash in #41). No secrets, no tokens, no model calls (see #48 item 1).
 on:
   pull_request:
     paths:

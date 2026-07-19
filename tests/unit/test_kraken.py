@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests for kraken.py — the parts the gh-stub conformance suite cannot
-exercise in isolation: the claim-window arbitration over hidden markers, marker
-decoding edge cases, the marker-only reading invariant (free text can never
-forge a machine line), and comment pagination beyond 100 comments.
+exercise in isolation: the protocol/4 claim-ref helpers (the CAS, the batched
+commit/issue meta reads, the liveness decode), marker decoding edge cases, and
+the comment pagination the status/validator paths still rely on.
 
 Stdlib only (unittest), no network, no gh. Run: python3 tests/unit/test_kraken.py
 """
@@ -24,14 +24,17 @@ sys.path.insert(0, os.path.abspath(SKILL_DIR))
 import kraken  # noqa: E402
 
 
-# --- protocol/3 marker builders (what a real comment carries) ----------------
+# --- marker builders (what a claim commit / a comment carries) ---------------
 
 def clm(worker):
     return kraken.make_marker({"type": "claim", "worker": worker})
 
 
-def hb(worker):
-    return kraken.make_marker({"type": "heartbeat", "worker": worker})
+def hb(worker, msg=None):
+    payload = {"type": "heartbeat", "worker": worker}
+    if msg is not None:
+        payload["msg"] = msg
+    return kraken.make_marker(payload)
 
 
 def dlv(worker, pr=None):
@@ -55,63 +58,10 @@ def stale(reason=None):
     return kraken.make_marker(payload)
 
 
-def needs(worker):
-    return kraken.make_marker({"type": "needs-decision", "worker": worker})
-
-
-class ArbitrationTests(unittest.TestCase):
-    """arbitrate_winner: the claim tiebreaker, isolated from any transport. Every
-    fixture is a protocol/3 hidden marker — the only wire format consumers read."""
-
-    def test_first_claim_in_window_wins(self):
-        self.assertEqual(kraken.arbitrate_winner([clm("alice"), clm("bob")]), "alice")
-
-    def test_no_claim_yields_empty(self):
-        self.assertEqual(kraken.arbitrate_winner(["some prose", rls("x")]), "")
-
-    def test_released_resets_window(self):
-        # tired-worker released; the newcomer is now the first live claim.
-        self.assertEqual(
-            kraken.arbitrate_winner([clm("tired-worker"), rls("tired-worker"), clm("fresh")]),
-            "fresh")
-
-    def test_stale_claim_resets_window(self):
-        self.assertEqual(
-            kraken.arbitrate_winner([clm("dead"), stale("no activity for 7h"), clm("reaper-heir")]),
-            "reaper-heir")
-
-    def test_needs_decision_resets_window(self):
-        self.assertEqual(
-            kraken.arbitrate_winner([clm("w1"), needs("w1"), clm("w2")]), "w2")
-
-    def test_delivered_is_a_review_bounce_reset(self):
-        # THE review-bounce gap: without delivered as a reset, the original
-        # claimant would win every future arbitration and a bounced-back task
-        # could never be re-claimed by anyone else.
-        self.assertEqual(
-            kraken.arbitrate_winner([clm("w1"), dlv("w1"), clm("w2")]), "w2")
-
-    def test_no_reset_keeps_original_owner(self):
-        # A control: with no reset, the first (rightful) owner keeps it even if a
-        # newcomer's claim comment lands later.
-        self.assertEqual(
-            kraken.arbitrate_winner([clm("rightful-owner"), clm("interloper")]),
-            "rightful-owner")
-
-    def test_heartbeat_does_not_reset(self):
-        # heartbeat is deliberately NOT a window reset — a worker heartbeating
-        # must never make its own claim re-claimable.
-        self.assertEqual(
-            kraken.arbitrate_winner([clm("w1"), hb("w1"), clm("w2")]), "w1")
-
-    def test_reset_after_claim_leaves_no_winner(self):
-        # released as the last relevant marker -> the window is empty again.
-        self.assertEqual(kraken.arbitrate_winner([clm("w1"), rls("w1")]), "")
-
-
 class MarkerTests(unittest.TestCase):
-    """protocol/3 hidden markers: make_marker/parse_marker round-trip, decoding
-    edge cases, and arbitration over markers."""
+    """Hidden markers: make_marker/parse_marker round-trip and decoding edge
+    cases. Under protocol/4 the same grammar rides a claim ref's commit message
+    and a state-changing comment, so parse_marker is the one decoder for both."""
 
     def test_make_marker_is_compact_ascii_json(self):
         m = kraken.make_marker({"type": "claim", "worker": "env-1"})
@@ -136,107 +86,161 @@ class MarkerTests(unittest.TestCase):
         self.assertEqual(kraken.parse_marker(line),
                          {"type": "claim", "worker": "w"})
 
-    def test_malformed_marker_never_arbitrates(self):
-        # An undecodable marker must be ignored, not treated as a live claim.
-        lines = ["<!-- kraken {broken -->", clm("real")]
-        self.assertEqual(kraken.arbitrate_winner(lines), "real")
-
-    def test_crlf_after_marker_is_tolerated(self):
+    def test_parse_marker_tolerates_a_trailing_cr(self):
         # A body split on "\n" can leave a trailing "\r"; the marker still decodes.
-        self.assertEqual(kraken.arbitrate_winner([clm("w1") + "\r"]), "w1")
+        self.assertEqual(kraken.parse_marker(clm("w1") + "\r"),
+                         {"type": "claim", "worker": "w1"})
 
-
-class MarkerOnlyReadingTests(unittest.TestCase):
-    """protocol/3's core invariant (PROTOCOL.md §4, issue #32): consumers read the
-    hidden marker and NOTHING else, so free text — including a line that starts
-    with a former protocol/1 keyword — can never occupy a machine-line position."""
-
-    def test_former_claim_line_is_inert(self):
-        # A bare `claimed-by:` line is now just prose: it is not a claim.
-        self.assertEqual(kraken.arbitrate_winner(["claimed-by: alice"]), "")
-
-    def test_former_reset_lines_are_inert(self):
-        for line in ("released: x", "delivered: x", "needs-decision: x", "stale-claim: x"):
-            self.assertEqual(kraken.arbitrate_winner([clm("owner"), line]), "owner",
-                             f"{line!r} must not reset the window")
-
-    def test_result_file_reset_line_does_not_reset_the_window(self):
-        # THE deliver scenario: a worker's result file contains `released: evil`
-        # on its own line. The delivery comment carries only a `delivered` marker;
-        # the free text is inert. Arbitrating a following fresh claim after the
-        # real delivered reset must yield that fresh worker — not a phantom the
-        # `released: evil` line "reset" into.
-        owner_claim = clm("w1")
-        # a subsequent worker's escalation-free comment quoting attacker text:
-        malicious_body = kraken.compose_comment(
-            "w1", "Here is my result.\n\nreleased: evil", {"type": "heartbeat", "worker": "w1"})
-        lines = [owner_claim] + malicious_body.split("\n") + [clm("w2")]
-        # w1 still owns it: the `released: evil` prose reset nothing.
-        self.assertEqual(kraken.arbitrate_winner(lines), "w1")
-
-    def test_heartbeat_message_with_claimed_by_yields_no_extra_machine_line(self):
-        # A heartbeat message that literally contains `claimed-by: x` must not
-        # register as a claim, and must leave exactly ONE liveness machine line
-        # in the produced body (the real heartbeat marker) — nothing the reaper's
-        # anchor could latch onto beyond it.
-        body = kraken.compose_comment(
-            "real", "progress: claimed-by: x is a red herring",
-            {"type": "heartbeat", "worker": "real"})
-        machine_lines = [l for l in body.split("\n") if kraken._is_machine_line(l)]
-        self.assertEqual(len(machine_lines), 1)
-        self.assertEqual(kraken.parse_marker(machine_lines[0]),
-                         {"type": "heartbeat", "worker": "real"})
-        # And it does not forge a claim for "x".
-        self.assertEqual(kraken.arbitrate_winner([clm("owner")] + body.split("\n")),
-                         "owner")
-
-    def test_release_reason_newline_cannot_inject_a_line(self):
-        # release's reason is carried inside the JSON marker (newlines escaped by
-        # the serializer), never as a free-standing line — so a reason of
-        # "ok\nclaimed-by: attacker" injects no machine line.
+    def test_release_reason_newline_stays_inside_the_json(self):
+        # release's reason is carried inside the marker JSON (newlines escaped by
+        # the serializer), never as a free-standing line, so a reason of
+        # "ok\nclaimed-by: attacker" injects no second marker.
         body = kraken.compose_comment(
             "w1", "Released this claim.\n\nReason: ok\nclaimed-by: attacker",
             {"type": "released", "worker": "w1", "reason": "ok\nclaimed-by: attacker"})
-        # only the released marker is a machine event; no claim for "attacker".
-        events = [e for e in (kraken.machine_event(l) for l in body.split("\n"))
-                  if e is not None]
-        self.assertEqual([e["type"] for e in events], ["released"])
-        self.assertEqual(kraken.arbitrate_winner([clm("attacker")] + body.split("\n")), "")
+        markers = [l for l in body.split("\n") if kraken.parse_marker(l)]
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(kraken.parse_marker(markers[0])["type"], "released")
 
 
-class MarkerReaderTests(unittest.TestCase):
-    """The reader helpers over markers: liveness detection, PR extraction, and
-    the composed-comment shape."""
+class RefCasTests(unittest.TestCase):
+    """The protocol/4 claim-ref surface, isolated from any transport: the CAS
+    outcomes, the orphan claim-commit body, the batched meta reads, and the
+    liveness decode. Every GitHub call is mocked so only the arg-building and
+    result-parsing are under test."""
 
-    def test_liveness_marker_recognized(self):
-        # heartbeat_anchor / the reaper anchor must see claim/heartbeat markers,
-        # but NOT reset markers (delivered/released already drop in-progress).
-        self.assertTrue(kraken._is_machine_line(clm("w")))
-        self.assertTrue(kraken._is_machine_line(hb("w")))
-        self.assertFalse(kraken._is_machine_line(dlv("w")))
+    def setUp(self):
+        self._orig_io = kraken.run_gh_io
+        self._orig_run = kraken.run_gh
+        self._orig_graphql = kraken.graphql
 
-    def test_pr_url_parsed_from_delivered_marker(self):
-        recs = [{"body": dlv("w", pr="https://x/pull/42"), "createdAt": "t"}]
-        self.assertEqual(kraken.parse_pr_url(recs), "https://x/pull/42")
+    def tearDown(self):
+        kraken.run_gh_io = self._orig_io
+        kraken.run_gh = self._orig_run
+        kraken.graphql = self._orig_graphql
 
-    def test_composed_comment_carries_disclaimer_prose_and_marker(self):
-        body = kraken.compose_comment(
-            "env-1", "Claimed this task.", {"type": "claim", "worker": "env-1"})
-        self.assertTrue(body.startswith("> \U0001f419 **Kraken worker `env-1`**"))
-        self.assertIn("Claimed this task.", body)
-        # The marker sits on its own line so a flat per-line scan finds it.
-        self.assertEqual(kraken.arbitrate_winner(body.split("\n")), "env-1")
+    def test_is_http_422(self):
+        self.assertTrue(kraken._is_http_422("gh: Reference already exists (HTTP 422)"))
+        self.assertFalse(kraken._is_http_422("gh: Not Found (HTTP 404)"))
+        self.assertFalse(kraken._is_http_422(""))
+        self.assertFalse(kraken._is_http_422(None))
 
-    def test_composed_comment_blank_line_separation(self):
-        # disclaimer, prose, and marker are each separated by a blank line, or
-        # GitHub folds the body into the disclaimer's blockquote.
-        body = kraken.compose_comment(
-            "env-1", "Some prose.", {"type": "claim", "worker": "env-1"})
-        parts = body.split("\n\n")
-        self.assertEqual(len(parts), 3)
-        self.assertTrue(parts[0].startswith("> \U0001f419"))
-        self.assertEqual(parts[1], "Some prose.")
-        self.assertTrue(parts[2].startswith("<!-- kraken "))
+    def test_claim_ref_name(self):
+        self.assertEqual(kraken.claim_ref(42), "refs/kraken/claims/42")
+        self.assertEqual(kraken.claim_ref("7"), "refs/kraken/claims/7")
+
+    def test_create_claim_commit_is_an_orphan_marker_commit(self):
+        captured = {}
+
+        def fake_io(args, input_text=None):
+            captured["args"] = args
+            captured["body"] = input_text
+            return 0, json.dumps({"sha": "abc123"}), ""
+        kraken.run_gh_io = fake_io
+
+        sha = kraken.create_claim_commit("o/tasks", {"type": "claim", "worker": "w1"})
+        self.assertEqual(sha, "abc123")
+        self.assertIn("repos/o/tasks/git/commits", captured["args"])
+        self.assertIn("--input", captured["args"])
+        payload = json.loads(captured["body"])
+        self.assertEqual(payload["parents"], [], "claim commit must be an orphan")
+        self.assertEqual(payload["tree"], kraken.EMPTY_TREE_SHA, "claim commit must use the empty tree")
+        self.assertEqual(kraken.parse_marker(payload["message"]),
+                         {"type": "claim", "worker": "w1"},
+                         "the commit message IS the claim marker")
+
+    def test_create_claim_commit_falls_back_to_head_tree_on_422(self):
+        trees = []
+
+        def fake_io(args, input_text=None):
+            joined = " ".join(args)
+            if joined.endswith("commits/HEAD"):  # gh_json HEAD read (via run_gh)
+                return 0, json.dumps({"commit": {"tree": {"sha": "headtree"}}}), ""
+            body = json.loads(input_text)
+            trees.append(body["tree"])
+            if body["tree"] == kraken.EMPTY_TREE_SHA:
+                return 1, "", "gh: unprocessable (HTTP 422)"
+            return 0, json.dumps({"sha": "def456"}), ""
+        kraken.run_gh_io = fake_io
+
+        sha = kraken.create_claim_commit("o/tasks", {"type": "claim", "worker": "w1"})
+        self.assertEqual(sha, "def456")
+        self.assertEqual(trees, [kraken.EMPTY_TREE_SHA, "headtree"],
+                         "must retry with the HEAD tree after the empty-tree 422")
+
+    def test_create_claim_commit_returns_none_on_transport_fault(self):
+        kraken.run_gh_io = lambda a, input_text=None: (1, "", "gh: network down")
+        self.assertIsNone(kraken.create_claim_commit("o/t", {"type": "claim", "worker": "w"}))
+
+    def test_claim_ref_create_maps_the_cas_outcomes(self):
+        kraken.run_gh_io = lambda a, input_text=None: (0, "{}", "")
+        self.assertEqual(kraken.claim_ref_create("o/t", 7, "sha"), "won")
+
+        kraken.run_gh_io = lambda a, input_text=None: (
+            1, "", "gh: Reference already exists (HTTP 422)")
+        self.assertEqual(kraken.claim_ref_create("o/t", 7, "sha"), "lost")
+
+        kraken.run_gh_io = lambda a, input_text=None: (1, "", "gh: 500 server error")
+        self.assertEqual(kraken.claim_ref_create("o/t", 7, "sha"), "fail")
+
+    def test_claim_ref_delete_tolerates_a_missing_ref(self):
+        kraken.run_gh_io = lambda a, input_text=None: (0, "", "")
+        self.assertTrue(kraken.claim_ref_delete("o/t", 7))
+        # Already gone (422) is success — the delete is idempotent.
+        kraken.run_gh_io = lambda a, input_text=None: (
+            1, "", "gh: Reference does not exist (HTTP 422)")
+        self.assertTrue(kraken.claim_ref_delete("o/t", 7))
+        # A real transport fault is not tolerated.
+        kraken.run_gh_io = lambda a, input_text=None: (1, "", "gh: network down")
+        self.assertFalse(kraken.claim_ref_delete("o/t", 7))
+
+    def test_claim_ref_list_parses_matching_refs(self):
+        kraken.run_gh = lambda args: (
+            0, "refs/kraken/claims/7\tsha7\nrefs/kraken/claims/12\tsha12\n")
+        self.assertEqual(kraken.claim_ref_list("o/t"), {7: "sha7", 12: "sha12"})
+
+    def test_claim_ref_list_transport_failure_is_none(self):
+        kraken.run_gh = lambda args: (1, "")
+        self.assertIsNone(kraken.claim_ref_list("o/t"))
+
+    def test_resolve_commit_meta_batches_and_parses(self):
+        captured = {}
+
+        def fake_graphql(q):
+            captured["q"] = q
+            return {"data": {"repository": {
+                "c0": {"committedDate": "2026-07-01T00:00:00Z", "message": clm("w1")}}}}
+        kraken.graphql = fake_graphql
+
+        meta = kraken.resolve_commit_meta("o/tasks", ["sha1"])
+        self.assertIn('object(oid: "sha1")', captured["q"])
+        self.assertEqual(meta["sha1"]["message"], clm("w1"))
+        self.assertEqual(meta["sha1"]["committedDate"], "2026-07-01T00:00:00Z")
+
+    def test_resolve_commit_meta_empty_input_is_no_call(self):
+        kraken.graphql = lambda q: self.fail("graphql must not be called for []")
+        self.assertEqual(kraken.resolve_commit_meta("o/t", []), {})
+
+    def test_resolve_issue_meta_batches_state_and_labels(self):
+        def fake_graphql(q):
+            self.assertIn("i7: issue(number: 7)", q)
+            return {"data": {"repository": {
+                "i7": {"state": "OPEN",
+                       "labels": {"nodes": [{"name": "in-progress"}]}}}}}
+        kraken.graphql = fake_graphql
+        self.assertEqual(kraken.resolve_issue_meta("o/tasks", [7]),
+                         {7: (True, ["in-progress"])})
+
+    def test_claim_meta_of_decodes_worker_msg_and_anchor(self):
+        cm = {"s1": {"committedDate": "2026-07-01T00:00:00Z",
+                     "message": hb("w1", "building the thing")}}
+        self.assertEqual(kraken.claim_meta_of("s1", cm),
+                         ("w1", "building the thing", "2026-07-01T00:00:00Z"))
+        # A plain claim carries no msg.
+        cm2 = {"s2": {"committedDate": "t", "message": clm("w2")}}
+        self.assertEqual(kraken.claim_meta_of("s2", cm2), ("w2", None, "t"))
+        # An unreadable commit yields all-None, never a guess.
+        self.assertEqual(kraken.claim_meta_of("missing", {}), (None, None, None))
 
 
 class ContractCommandTests(unittest.TestCase):
@@ -260,8 +264,6 @@ class ContractCommandTests(unittest.TestCase):
                          [kraken.disclaimer("env-1")])
 
     def test_task_trailer_defaults_to_the_doc_placeholders(self):
-        # No flags → every field is the doc placeholder, but the version is the
-        # real stamp (plugin_version), never a placeholder — that is the point.
         self.assertEqual(
             self._run("task-trailer"),
             [kraken.task_trailer("<coordination-repo>", "<issue>", "<worker-name>")],
@@ -275,34 +277,32 @@ class ContractCommandTests(unittest.TestCase):
         )
 
     def test_task_trailer_stamps_the_live_plugin_version(self):
-        # The kraken@<version> field must be the manifest's version, never a
-        # literal — this is the drift the single-sourcing exists to kill.
         line = self._run("task-trailer", "--repo", "acme/work",
                          "--issue", "12", "--worker", "env-1")[0]
         self.assertIn(f"kraken@{kraken.plugin_version()}", line)
 
-    def test_reset_types_echo_the_constant(self):
-        self.assertEqual(self._run("reset-types"), list(kraken.RESET_TYPES))
-
-    def test_liveness_types_echo_the_constant(self):
-        self.assertEqual(self._run("liveness-types"), list(kraken.LIVENESS_TYPES))
-
     def test_marker_types_echo_the_constant(self):
         self.assertEqual(self._run("marker-types"), list(kraken.MARKER_TYPES))
 
-    def test_marker_types_are_the_liveness_and_reset_vocabulary(self):
-        # protocol/3 vocabulary kraken.py builds/arbitrates on — requeue is
-        # operator-only and deliberately absent.
-        self.assertEqual(tuple(kraken.MARKER_TYPES),
-                         kraken.LIVENESS_TYPES + kraken.RESET_TYPES)
+    def test_marker_types_are_the_protocol4_vocabulary(self):
+        # Every type kraken.py emits (claim/heartbeat on the ref, the rest on
+        # comments); requeue is operator-only and deliberately absent.
+        self.assertEqual(
+            set(kraken.MARKER_TYPES),
+            {"claim", "heartbeat", "needs-decision", "delivered", "released", "stale-claim"})
         self.assertNotIn("requeue", kraken.MARKER_TYPES)
+
+    def test_retired_contract_fields_are_gone(self):
+        # reset-types / liveness-types belonged to the retired claim-window
+        # arbitration; they must not resurface as contract fields.
+        self.assertNotIn("reset-types", kraken.CONTRACT_FIELDS)
+        self.assertNotIn("liveness-types", kraken.CONTRACT_FIELDS)
 
 
 class AgentAgnosticDisclaimerTests(unittest.TestCase):
     """The disclaimer names no implementation, so every conforming worker — Claude
     Code, GitHub Copilot, or any other agent sharing this kraken.py — emits the
-    identical line (PROTOCOL.md §4). This is what lets a second implementation drain
-    the same queue without forging or diverging the human-vs-tentacle discriminator."""
+    identical line (PROTOCOL.md §4)."""
 
     def test_disclaimer_names_no_agent(self):
         line = kraken.disclaimer("env-1")
@@ -311,18 +311,52 @@ class AgentAgnosticDisclaimerTests(unittest.TestCase):
         self.assertIn("from a kraken tentacle, not a human.", line)
 
     def test_disclaimer_keeps_the_machine_matched_blockquote(self):
-        # The requeue filter / lint match only up to the worker-name backtick;
-        # that prefix is the contract and must be exactly this shape.
         self.assertTrue(
             kraken.disclaimer("env-1").startswith(
                 "> \U0001f419 **Kraken worker `env-1`**"))
 
 
+class ComposedCommentTests(unittest.TestCase):
+    """The composed-comment shape: disclaimer, prose (courtesy only), and one
+    marker, each blank-line separated so GitHub never folds the body into the
+    disclaimer's blockquote."""
+
+    def test_carries_disclaimer_prose_and_one_marker(self):
+        body = kraken.compose_comment(
+            "env-1", "Claimed this task.", {"type": "claim", "worker": "env-1"})
+        self.assertTrue(body.startswith("> \U0001f419 **Kraken worker `env-1`**"))
+        self.assertIn("Claimed this task.", body)
+        markers = [l for l in body.split("\n") if kraken.parse_marker(l)]
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(kraken.parse_marker(markers[0]), {"type": "claim", "worker": "env-1"})
+
+    def test_blank_line_separation(self):
+        body = kraken.compose_comment(
+            "env-1", "Some prose.", {"type": "claim", "worker": "env-1"})
+        parts = body.split("\n\n")
+        self.assertEqual(len(parts), 3)
+        self.assertTrue(parts[0].startswith("> \U0001f419"))
+        self.assertEqual(parts[1], "Some prose.")
+        self.assertTrue(parts[2].startswith("<!-- kraken "))
+
+    def test_colliding_free_text_is_preserved_verbatim_beside_one_marker(self):
+        # A result file with a colliding `released:` line: the prose is kept as
+        # written, and it is NOT a second marker (only the delivered marker is).
+        body = kraken.compose_comment(
+            "w1", "Shipped it.\n\nreleased: evil\nclaimed-by: evil",
+            {"type": "delivered", "worker": "w1"})
+        lines = body.split("\n")
+        self.assertIn("released: evil", lines)
+        self.assertIn("claimed-by: evil", lines)
+        markers = [l for l in lines if kraken.parse_marker(l)]
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(kraken.parse_marker(markers[0])["type"], "delivered")
+
+
 class PluginVersionTests(unittest.TestCase):
     """plugin_version() sources the Kraken-Task trailer's kraken@<version> from
     the bundled manifest the release workflow bumps — read at runtime, so the
-    trailer never carries a stale hand-copied version and never has to be
-    guessed by the worker model."""
+    trailer never carries a stale hand-copied version."""
 
     def _manifest(self, contents):
         fd, path = tempfile.mkstemp(suffix=".json")
@@ -336,7 +370,6 @@ class PluginVersionTests(unittest.TestCase):
         self.assertEqual(kraken.plugin_version(path), "9.9.9")
 
     def test_bundled_manifest_matches_the_shipped_plugin_json(self):
-        # The default lookup must resolve the real bundled manifest, not "unknown".
         with open(kraken.PLUGIN_MANIFEST, encoding="utf-8") as f:
             shipped = json.load(f)["version"]
         self.assertEqual(kraken.plugin_version(), shipped)
@@ -358,10 +391,9 @@ class PluginVersionTests(unittest.TestCase):
 
 class InitConstantsTests(unittest.TestCase):
     """The init subcommand single-sources the asset set and the label canon in
-    kraken.py (issue #30). These guard that single-sourcing: every asset it
-    installs must actually ship next to the module, and the label/render shapes
-    must stay well-formed — a rename or a dropped field is caught here, not in a
-    live bootstrap."""
+    kraken.py. These guard that single-sourcing: every asset it installs must
+    actually ship next to the module, and the label/render shapes must stay
+    well-formed."""
 
     def test_every_bundled_asset_exists_next_to_the_module(self):
         for name, dest, message in kraken.INIT_ASSETS:
@@ -384,8 +416,6 @@ class InitConstantsTests(unittest.TestCase):
         })
 
     def test_kraken_py_is_vendored_as_an_asset(self):
-        # The transition program vendors a copy of itself so the coordination
-        # workflows exec one parser instead of four dialects (issue #37).
         dests = {dest for _, dest, _ in kraken.INIT_ASSETS}
         self.assertIn(".github/kraken.py", dests)
 
@@ -415,91 +445,18 @@ class InitConstantsTests(unittest.TestCase):
             "assets_created=1 assets_unchanged=1 assets_customized=1 labels=2", out)
 
 
-class MarkerEdgeCaseTests(unittest.TestCase):
-    """Marker decoding edge cases within a multi-line comment body: only a line
-    carrying a well-formed marker is a machine line; prose that merely mentions a
-    former keyword is inert."""
-
-    def test_prose_mentioning_a_former_keyword_is_ignored(self):
-        lines = ["I think claimed-by: nobody is wrong", clm("real")]
-        self.assertEqual(kraken.arbitrate_winner(lines), "real")
-
-    def test_multiline_comment_bodies_scan_per_line(self):
-        # comment_bodies returns bodies split to lines; a disclaimer blockquote
-        # above the marker must not shadow it.
-        lines = [
-            "> \U0001f419 **Kraken worker `w1`** — automated comment...",
-            "",
-            clm("w1"),
-        ]
-        self.assertEqual(kraken.arbitrate_winner(lines), "w1")
-
-
-class CommentPaginationTests(unittest.TestCase):
-    """comment_bodies must page past 100 comments — a long-lived task's claim
-    window can scroll out of a single 100-comment page, and re-arbitration on a
-    truncated history would let a stale claim win forever."""
+class CommentRecordsPaginationTests(unittest.TestCase):
+    """comment_records must page past 100 comments — status' PR-link read and the
+    validator's debounce both walk the whole thread, and a truncated 100-comment
+    read would miss a delivered marker or an earlier validation comment."""
 
     def setUp(self):
         self._orig_run_gh = kraken.run_gh
-        self.calls = []
 
     def tearDown(self):
         kraken.run_gh = self._orig_run_gh
 
     def test_uses_paginated_rest_endpoint(self):
-        def fake_run_gh(args):
-            self.calls.append(args)
-            return 0, ""
-        kraken.run_gh = fake_run_gh
-
-        kraken.comment_bodies("OWNER/tasks", "42")
-        self.assertEqual(len(self.calls), 1)
-        args = self.calls[0]
-        self.assertEqual(args[0], "api")
-        self.assertIn("repos/OWNER/tasks/issues/42/comments", args)
-        self.assertIn("--paginate", args)
-
-    def test_returns_all_bodies_beyond_one_hundred(self):
-        # Simulate the transport returning 150 comment bodies (what --paginate
-        # yields once every page is walked). The 130th is the live claim.
-        bodies = [f"comment number {i}" for i in range(150)]
-        bodies[129] = clm("winner-past-page-one")
-
-        def fake_run_gh(args):
-            return 0, "\n".join(bodies)
-        kraken.run_gh = fake_run_gh
-
-        result = kraken.comment_bodies("OWNER/tasks", "42")
-        self.assertEqual(len(result), 150)
-        # And the arbitration reads the claim that lives past the 100 boundary —
-        # it would be invisible under a 100-comment truncation.
-        self.assertEqual(kraken.arbitrate_winner(result), "winner-past-page-one")
-
-    def test_transport_failure_returns_none(self):
-        def fake_run_gh(args):
-            return 1, ""
-        kraken.run_gh = fake_run_gh
-        self.assertIsNone(kraken.comment_bodies("OWNER/tasks", "42"))
-
-    def test_reset_past_page_boundary_still_resets(self):
-        # A reset at position 120 must still clear a claim from position 5, even
-        # when both are far apart across pages.
-        bodies = [f"noise {i}" for i in range(150)]
-        bodies[5] = clm("dead")
-        bodies[120] = rls("dead")
-        bodies[140] = clm("heir")
-
-        def fake_run_gh(args):
-            return 0, "\n".join(bodies)
-        kraken.run_gh = fake_run_gh
-
-        result = kraken.comment_bodies("OWNER/tasks", "42")
-        self.assertEqual(kraken.arbitrate_winner(result), "heir")
-
-    def test_comment_records_uses_same_paginated_endpoint(self):
-        # status' heartbeat/PR-link path reads timestamps off the SAME paginated
-        # REST comments endpoint, so its anchor is never truncated at 100 either.
         calls = []
 
         def fake_run_gh(args):
@@ -512,57 +469,50 @@ class CommentPaginationTests(unittest.TestCase):
         self.assertIn("repos/OWNER/tasks/issues/42/comments", calls[0])
         self.assertIn("--paginate", calls[0])
 
-    def test_comment_records_returns_records_past_one_hundred(self):
-        # 150 comment records (compact one-per-line, what gh --jq streams); the
-        # 130th carries the live liveness marker, invisible under a 100 truncation.
+    def test_returns_records_past_one_hundred(self):
         recs = [{"body": f"c {i}", "createdAt": f"2026-07-01T00:{i % 60:02d}:00Z"}
                 for i in range(150)]
-        recs[129] = {"body": hb("late"), "createdAt": "2026-07-09T00:00:00Z"}
+        recs[129] = {"body": dlv("w", pr="https://x/pull/9"), "createdAt": "2026-07-09T00:00:00Z"}
         out = "\n".join(kraken.json.dumps(r) for r in recs)
-
-        def fake_run_gh(args):
-            return 0, out
-        kraken.run_gh = fake_run_gh
+        kraken.run_gh = lambda args: (0, out)
         result = kraken.comment_records("OWNER/tasks", "42")
         self.assertEqual(len(result), 150)
-        self.assertEqual(kraken.heartbeat_anchor(result), "2026-07-09T00:00:00Z")
+        # The delivered marker past comment 100 is found — invisible under a
+        # 100-comment truncation.
+        self.assertEqual(kraken.parse_pr_url(result), "https://x/pull/9")
 
-    def test_comment_records_parses_pretty_printed_stream(self):
-        # The conformance stub pretty-prints each object across lines; the
-        # object-by-object decoder must handle that as well as compact output.
+    def test_parses_pretty_printed_stream(self):
         recs = [
-            {"body": clm("w1"), "createdAt": "2026-07-01T00:00:00Z"},
-            {"body": hb("w1"), "createdAt": "2026-07-01T05:00:00Z"},
+            {"body": dlv("w1", pr="https://x/pull/1"), "createdAt": "2026-07-01T00:00:00Z"},
+            {"body": "just prose", "createdAt": "2026-07-01T05:00:00Z"},
         ]
         pretty = "".join(kraken.json.dumps(r, indent=2) + "\n" for r in recs)
-
-        def fake_run_gh(args):
-            return 0, pretty
-        kraken.run_gh = fake_run_gh
+        kraken.run_gh = lambda args: (0, pretty)
         result = kraken.comment_records("OWNER/tasks", "42")
         self.assertEqual(len(result), 2)
-        self.assertEqual(kraken.heartbeat_anchor(result), "2026-07-01T05:00:00Z")
+        self.assertEqual(kraken.parse_pr_url(result), "https://x/pull/1")
+
+    def test_transport_failure_returns_none(self):
+        kraken.run_gh = lambda args: (1, "")
+        self.assertIsNone(kraken.comment_records("OWNER/tasks", "42"))
 
 
 class ClaimNextIterationTests(unittest.TestCase):
-    """cmd_claim_next's loop, isolated from any transport: the classification
-    (classify_queue) and the per-candidate claim (_claim_once) are both mocked,
-    so only the iteration logic — skip-on-held, skip-on-lost, forward-only,
-    stop-on-transport, honest-empty — is under test."""
+    """cmd_claim_next's loop, isolated from any transport: classify_queue and the
+    per-candidate _claim_once are both mocked, so only the iteration logic —
+    skip-on-held, skip-on-lost, forward-only, stop-on-transport, honest-empty —
+    is under test."""
 
     def setUp(self):
         self._orig_classify = kraken.classify_queue
         self._orig_claim_once = kraken._claim_once
-        self.attempted = []  # issue numbers _claim_once was actually called on
+        self.attempted = []
 
     def tearDown(self):
         kraken.classify_queue = self._orig_classify
         kraken._claim_once = self._orig_claim_once
 
     def _run(self, rows, claim_results, json_mode=False):
-        """rows: what classify_queue returns (or None). claim_results: dict
-        {issue_number: exit_code} the mocked _claim_once replays. Returns
-        (exit_code, stdout)."""
         kraken.classify_queue = lambda repo, project, include_body=False: rows
 
         def fake_claim_once(repo, issue, worker):
@@ -587,32 +537,28 @@ class ClaimNextIterationTests(unittest.TestCase):
         self.assertIn("body-7", out)
 
     def test_skips_held_rows_without_attempting_them(self):
-        # A held candidate is never even offered to _claim_once — the guard
-        # cost is spent once in the listing, not re-paid per row.
         rows = [
             (5, "held one", "t1", "held", "b5"),
             (7, "startable", "t2", "startable", "b7"),
         ]
         rc, out = self._run(rows, {7: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
-        self.assertEqual(self.attempted, [7])  # 5 skipped, never attempted
+        self.assertEqual(self.attempted, [7])
 
-    def test_skip_on_lost_tiebreaker_moves_forward_never_back(self):
-        # THE §5 invariant: a lost tiebreaker on the oldest candidate moves on
-        # to the next — it must never retry the issue it just lost.
+    def test_skip_on_lost_cas_moves_forward_never_back(self):
+        # THE §5 invariant: a lost CAS on the oldest candidate moves on to the
+        # next — it must never retry the issue it just lost.
         rows = [
             (7, "lost this", "t1", "startable", "b7"),
             (9, "win this", "t2", "startable", "b9"),
         ]
         rc, out = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
-        self.assertEqual(self.attempted, [7, 9])       # forward order
-        self.assertEqual(self.attempted.count(7), 1)   # 7 never retried
+        self.assertEqual(self.attempted, [7, 9])
+        self.assertEqual(self.attempted.count(7), 1)
         self.assertIn("claim-next: claimed issue=9 worker=w1", out)
 
     def test_skip_on_held_since_listing_moves_to_next(self):
-        # A candidate that acquired a held label between listing and claim
-        # (exit 11) is skipped, and the next candidate is tried.
         rows = [
             (7, "now held", "t1", "startable", "b7"),
             (9, "clear", "t2", "startable", "b9"),
@@ -637,15 +583,13 @@ class ClaimNextIterationTests(unittest.TestCase):
         self.assertEqual(self.attempted, [7, 9])
 
     def test_transport_during_claim_stops_immediately(self):
-        # A gh/network fault leaves the claim ambiguous: claim-next must stop
-        # (exit 20), never wander to another candidate with a write half-landed.
         rows = [
             (7, "ambiguous", "t1", "startable", "b7"),
             (9, "untouched", "t2", "startable", "b9"),
         ]
         rc, out = self._run(rows, {7: kraken.EXIT_TRANSPORT, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
-        self.assertEqual(self.attempted, [7])  # 9 never reached
+        self.assertEqual(self.attempted, [7])
         self.assertIn("state unknown", out)
 
     def test_transport_during_listing_is_twenty(self):
@@ -665,69 +609,30 @@ class ClaimNextIterationTests(unittest.TestCase):
 
 
 class StatusHelperTests(unittest.TestCase):
-    """The status console's pure helpers, isolated from any transport: the
-    heartbeat anchor (liveness-marker-only, newest-wins), PR-URL parsing, worker
-    resolution, and age formatting."""
+    """The status console's pure helpers, isolated from any transport: PR-URL
+    parsing, ISO parsing, and age formatting."""
 
     def _rec(self, body, created):
         return {"body": body, "createdAt": created}
 
-    def test_anchor_is_newest_liveness_marker(self):
-        recs = [
-            self._rec(clm("w1"), "2026-07-01T00:00:00Z"),
-            self._rec(hb("w1"), "2026-07-01T05:00:00Z"),
-        ]
-        self.assertEqual(kraken.heartbeat_anchor(recs), "2026-07-01T05:00:00Z")
-
-    def test_anchor_ignores_operator_comments(self):
-        # THE anchoring invariant (mirrors the reaper): a fresh operator comment
-        # must NOT reset the clock — only worker liveness markers anchor liveness.
-        recs = [
-            self._rec("> disclaimer\n\n" + clm("w1"), "2026-07-01T00:00:00Z"),
-            self._rec("any update? — the operator", "2026-07-01T09:00:00Z"),
-        ]
-        self.assertEqual(kraken.heartbeat_anchor(recs), "2026-07-01T00:00:00Z")
-
-    def test_anchor_none_when_worker_never_spoke(self):
-        recs = [self._rec("someone mislabeled this", "2026-07-01T00:00:00Z")]
-        self.assertIsNone(kraken.heartbeat_anchor(recs))
-
-    def test_anchor_finds_marker_inside_multiline_body(self):
-        recs = [self._rec("> \U0001f419 worker note\n\n" + hb("w1") + "\n\nstill going",
-                          "2026-07-01T02:00:00Z")]
-        self.assertEqual(kraken.heartbeat_anchor(recs), "2026-07-01T02:00:00Z")
-
     def test_parse_pr_url_from_delivered_marker(self):
-        recs = [self._rec(dlv("w1", pr="https://github.com/o/r/pull/42") + "\n\nbody",
-                          "t")]
-        self.assertEqual(kraken.parse_pr_url(recs),
-                         "https://github.com/o/r/pull/42")
+        recs = [self._rec(dlv("w1", pr="https://github.com/o/r/pull/42") + "\n\nbody", "t")]
+        self.assertEqual(kraken.parse_pr_url(recs), "https://github.com/o/r/pull/42")
 
     def test_parse_pr_url_newest_wins(self):
         recs = [
             self._rec(dlv("w1", pr="https://github.com/o/r/pull/1"), "t1"),
             self._rec(dlv("w2", pr="https://github.com/o/r/pull/9"), "t2"),
         ]
-        self.assertEqual(kraken.parse_pr_url(recs),
-                         "https://github.com/o/r/pull/9")
+        self.assertEqual(kraken.parse_pr_url(recs), "https://github.com/o/r/pull/9")
 
     def test_parse_pr_url_fallback_to_url_in_prose(self):
         recs = [self._rec("landed in https://github.com/o/r/pull/7 fyi", "t")]
-        self.assertEqual(kraken.parse_pr_url(recs),
-                         "https://github.com/o/r/pull/7")
+        self.assertEqual(kraken.parse_pr_url(recs), "https://github.com/o/r/pull/7")
 
     def test_parse_pr_url_none_when_absent(self):
         recs = [self._rec(dlv("w1") + "\n\njust prose", "t")]
         self.assertIsNone(kraken.parse_pr_url(recs))
-
-    def test_worker_resolves_via_arbitration(self):
-        recs = [
-            self._rec(clm("dead"), "t1"),
-            self._rec(stale("7h"), "t2"),
-            self._rec(clm("heir"), "t3"),
-        ]
-        self.assertEqual(
-            kraken.arbitrate_winner(kraken.flat_comment_lines(recs)), "heir")
 
     def test_parse_iso_roundtrip(self):
         self.assertEqual(kraken.parse_iso("2026-07-01T00:00:00Z"), 1782864000.0)
@@ -744,9 +649,10 @@ class StatusHelperTests(unittest.TestCase):
 
 
 class StatusComputeTests(unittest.TestCase):
-    """compute_status: the whole report assembled from queue nodes and injected
-    readers — grouping, project filter, orphan flagging, in-flight ages, and the
-    transport-failure propagation, all with no gh."""
+    """compute_status: the whole report assembled from queue nodes, the claim
+    refs (in-flight worker/age/msg) and injected readers (awaiting-merge PR
+    link) — grouping, project filter, orphan flagging, and transport-failure
+    propagation, all with no gh."""
 
     NOW = kraken.parse_iso("2026-07-01T10:00:00Z")
 
@@ -756,57 +662,70 @@ class StatusComputeTests(unittest.TestCase):
             "labels": {"nodes": [{"name": n} for n in labels]},
         }
 
-    def _readers(self, comments=None, merged=None, projects=None):
+    def _call(self, nodes, project="", claim_refs=None, commit_meta=None,
+              comments=None, merged=None, projects=None):
         comments = comments or {}
         merged = merged or {}
+        return kraken.compute_status(
+            "o/tasks", project, nodes, self.NOW,
+            claim_refs=claim_refs or {},
+            commit_meta=commit_meta or {},
+            comment_reader=lambda r, i: comments.get(i, []),
+            pr_merged=lambda u: merged.get(u, False),
+            project_lister=lambda r: projects if projects is not None else [])
 
-        def comment_reader(repo, issue):
-            return comments.get(issue, [])
-
-        def pr_merged(url):
-            return merged.get(url, False)
-
-        def project_lister(repo):
-            return projects if projects is not None else []
-
-        return dict(comment_reader=comment_reader, pr_merged=pr_merged,
-                    project_lister=project_lister)
-
-    def test_groups_by_held_label(self):
+    def test_groups_by_held_label_with_ref_liveness(self):
         nodes = [
             self._node(88, "review", ["kraken-task", "project:app", "awaiting-merge"]),
             self._node(97, "decide", ["kraken-task", "project:app", "needs-decision"]),
             self._node(99, "running", ["kraken-task", "project:app", "in-progress"]),
             self._node(12, "queued", ["kraken-task", "project:app"]),
         ]
-        comments = {
-            88: [{"body": dlv("w", pr="https://x/pull/1"), "createdAt": "t"}],
-            99: [{"body": clm("w1"), "createdAt": "2026-07-01T09:00:00Z"}],
-        }
-        report = kraken.compute_status(
-            "o/tasks", "", nodes, self.NOW,
-            **self._readers(comments=comments, projects=["app"]))
+        comments = {88: [{"body": dlv("w", pr="https://x/pull/1"), "createdAt": "t"}]}
+        claim_refs = {99: "s99"}
+        commit_meta = {"s99": {"committedDate": "2026-07-01T09:00:00Z",
+                               "message": hb("w1", "still going")}}
+        report = self._call(nodes, claim_refs=claim_refs, commit_meta=commit_meta,
+                            comments=comments, projects=["app"])
         self.assertEqual([r["number"] for r in report["review_queue"]], [88])
         self.assertEqual([r["number"] for r in report["decision_queue"]], [97])
         self.assertEqual([r["number"] for r in report["in_flight"]], [99])
-        # A non-held (queued) task is surfaced by list-startable, not here.
         self.assertEqual(report["in_flight"][0]["worker"], "w1")
         self.assertEqual(report["in_flight"][0]["heartbeat_age_seconds"], 3600)
+        self.assertEqual(report["in_flight"][0]["heartbeat_msg"], "still going")
+
+    def test_in_flight_from_ref_even_without_the_label(self):
+        # The crash window: a won CAS whose in-progress projection has not landed
+        # is still in flight (the ref is the truth).
+        nodes = [self._node(50, "just claimed", ["kraken-task", "project:app"])]
+        report = self._call(
+            nodes, claim_refs={50: "s"},
+            commit_meta={"s": {"committedDate": "2026-07-01T09:30:00Z", "message": clm("w9")}},
+            projects=["app"])
+        self.assertEqual([r["number"] for r in report["in_flight"]], [50])
+        self.assertEqual(report["in_flight"][0]["worker"], "w9")
+
+    def test_in_progress_label_without_a_ref_is_unknown_age(self):
+        # An orphan projection (label, no ref): surfaced in flight but with no
+        # worker/age — the reaper will requeue it.
+        nodes = [self._node(99, "silent", ["kraken-task", "project:app", "in-progress"])]
+        report = self._call(nodes, projects=["app"])
+        item = report["in_flight"][0]
+        self.assertIsNone(item["heartbeat_age_seconds"])
+        self.assertIsNone(item["worker"])
 
     def test_project_filter(self):
         nodes = [
             self._node(1, "a", ["kraken-task", "project:app", "in-progress"]),
             self._node(2, "b", ["kraken-task", "project:web", "in-progress"]),
         ]
-        comments = {
-            1: [{"body": clm("w"), "createdAt": "2026-07-01T09:00:00Z"}],
-            2: [{"body": clm("w"), "createdAt": "2026-07-01T09:00:00Z"}],
-        }
-        report = kraken.compute_status(
-            "o/tasks", "web", nodes, self.NOW, **self._readers(comments=comments))
+        claim_refs = {1: "s1", 2: "s2"}
+        commit_meta = {"s1": {"committedDate": "2026-07-01T09:00:00Z", "message": clm("w")},
+                       "s2": {"committedDate": "2026-07-01T09:00:00Z", "message": clm("w")}}
+        report = self._call(nodes, project="web", claim_refs=claim_refs, commit_meta=commit_meta)
         self.assertEqual([r["number"] for r in report["in_flight"]], [2])
         self.assertEqual(report["project"], "web")
-        self.assertEqual(report["projects"], ["web"])  # scoped, no label list call
+        self.assertEqual(report["projects"], ["web"])
 
     def test_orphan_flag_only_when_pr_merged(self):
         nodes = [
@@ -819,32 +738,18 @@ class StatusComputeTests(unittest.TestCase):
             91: [{"body": dlv("w", pr="https://x/pull/6"), "createdAt": "t"}],
         }
         merged = {"https://x/pull/5": True, "https://x/pull/6": False}
-        report = kraken.compute_status(
-            "o/tasks", "", nodes, self.NOW,
-            **self._readers(comments=comments, merged=merged, projects=["app"]))
+        report = self._call(nodes, comments=comments, merged=merged, projects=["app"])
         self.assertEqual(report["orphans"], [88])
         flags = {r["number"]: r["orphan"] for r in report["review_queue"]}
         self.assertTrue(flags[88])
         self.assertFalse(flags[91])
 
-    def test_no_liveness_marker_yields_unknown_age(self):
-        nodes = [self._node(99, "silent", ["kraken-task", "project:app", "in-progress"])]
-        comments = {99: [{"body": "operator note", "createdAt": "2026-07-01T09:00:00Z"}]}
+    def test_awaiting_merge_comment_failure_propagates_none(self):
+        nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]
         report = kraken.compute_status(
             "o/tasks", "", nodes, self.NOW,
-            **self._readers(comments=comments, projects=["app"]))
-        item = report["in_flight"][0]
-        self.assertIsNone(item["heartbeat_age_seconds"])
-        self.assertIsNone(item["worker"])
-
-    def test_comment_transport_failure_propagates_none(self):
-        nodes = [self._node(99, "x", ["kraken-task", "project:app", "in-progress"])]
-
-        def failing_reader(repo, issue):
-            return None
-        report = kraken.compute_status(
-            "o/tasks", "", nodes, self.NOW,
-            comment_reader=failing_reader,
+            claim_refs={}, commit_meta={},
+            comment_reader=lambda r, i: None,  # transport failure
             pr_merged=lambda u: False,
             project_lister=lambda r: [])
         self.assertIsNone(report)
@@ -854,42 +759,115 @@ class StatusComputeTests(unittest.TestCase):
         comments = {88: [{"body": dlv("w", pr="https://x/pull/5"), "createdAt": "t"}]}
         report = kraken.compute_status(
             "o/tasks", "", nodes, self.NOW,
+            claim_refs={}, commit_meta={},
             comment_reader=lambda r, i: comments.get(i, []),
             pr_merged=lambda u: None,  # transport failure
             project_lister=lambda r: [])
         self.assertIsNone(report)
 
 
+class ReconcilerClassificationTests(unittest.TestCase):
+    """cmd_reap's four reconciler rules, isolated from transport: the claim refs,
+    their commit meta, the per-issue meta, and the in-progress list are all
+    injected via mocked helpers, so only the rule dispatch — reclaim / orphan
+    lock / heal / requeue — is under test. Every write is recorded, none real."""
+
+    def setUp(self):
+        self._saved = {name: getattr(kraken, name) for name in (
+            "claim_ref_list", "resolve_commit_meta", "resolve_issue_meta",
+            "open_issue_numbers", "claim_ref_delete", "swap_labels", "post_comment")}
+        self.deleted = []
+        self.swaps = []
+        self.comments = []
+        kraken.claim_ref_delete = lambda repo, n: (self.deleted.append(n) or True)
+        kraken.swap_labels = lambda repo, n, remove=None, add=None: (
+            self.swaps.append((n, remove, add)) or True)
+        kraken.post_comment = lambda repo, n, body: (self.comments.append(n) or True)
+
+    def tearDown(self):
+        for name, fn in self._saved.items():
+            setattr(kraken, name, fn)
+
+    def _reap(self, refs, commit_meta, issue_meta, in_progress, max_hours=6):
+        kraken.claim_ref_list = lambda repo: refs
+        kraken.resolve_commit_meta = lambda repo, shas: commit_meta
+        kraken.resolve_issue_meta = lambda repo, nums: issue_meta
+        kraken.open_issue_numbers = lambda repo, label: in_progress
+        args = SimpleNamespace(repo="o/tasks", max_hours=max_hours)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            rc = kraken.cmd_reap(args)
+        return rc, buf.getvalue()
+
+    def _fresh(self):
+        return {"committedDate": kraken.datetime.datetime.now(
+            kraken.datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "message": clm("w")}
+
+    def _old(self, hours):
+        dt = kraken.datetime.datetime.now(kraken.datetime.timezone.utc) - \
+            kraken.datetime.timedelta(hours=hours)
+        return {"committedDate": dt.strftime("%Y-%m-%dT%H:%M:%SZ"), "message": clm("w")}
+
+    def test_rule1_orphan_lock_on_held_or_closed(self):
+        # ref on a needs-decision issue, and a ref on a closed issue: both deleted.
+        refs = {4: "s4", 6: "s6"}
+        rc, out = self._reap(
+            refs, {"s4": self._fresh(), "s6": self._fresh()},
+            {4: (True, ["needs-decision"]), 6: (False, [])}, [])
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(sorted(self.deleted), [4, 6])
+        self.assertEqual(self.swaps, [], "orphan-lock must not touch labels")
+        self.assertEqual(self.comments, [], "orphan-lock must not comment")
+
+    def test_rule2_stale_claim_reclaims_and_deletes(self):
+        refs = {1: "s1"}
+        rc, out = self._reap(refs, {"s1": self._old(8)},
+                             {1: (True, ["in-progress"])}, [1])
+        self.assertIn((1, "in-progress", "needs-decision"), self.swaps)
+        self.assertIn(1, self.comments)
+        self.assertIn(1, self.deleted, "stale claim's ref must be deleted last")
+
+    def test_rule3_heal_missing_label(self):
+        refs = {5: "s5"}
+        rc, out = self._reap(refs, {"s5": self._fresh()},
+                             {5: (True, [])}, [])
+        self.assertIn((5, None, "in-progress"), self.swaps)
+        self.assertNotIn(5, self.deleted, "a live claim's ref must survive the heal")
+
+    def test_rule4_requeue_orphan_projection(self):
+        # in-progress label #3 with NO ref -> requeue (label removed + note).
+        rc, out = self._reap({}, {}, {}, [3])
+        self.assertIn((3, "in-progress", None), self.swaps)
+        self.assertIn(3, self.comments)
+
+    def test_fresh_claim_with_label_is_left_alone(self):
+        refs = {2: "s2"}
+        rc, out = self._reap(refs, {"s2": self._fresh()},
+                             {2: (True, ["in-progress"])}, [2])
+        self.assertEqual(self.deleted, [])
+        self.assertEqual(self.swaps, [])
+        self.assertEqual(self.comments, [])
+
+
 class WakeRetryDueTests(unittest.TestCase):
-    """The watcher's lost-wake retry gate (wake_retry_due): re-emit ONLY when
-    the StopFailure hook stamped the wake-retry flag after the watcher's last
-    emission (the turn that wake started provably died on a usage limit) and
-    the retry spacing has elapsed. Pins that it is not a blind re-emission
-    timer — the REMIND_SECONDS regression tests/conformance/test_13_watch_queue_blocked.py guards against."""
+    """The watcher's lost-wake retry gate (wake_retry_due): re-emit ONLY when the
+    StopFailure hook stamped the wake-retry flag after the watcher's last
+    emission and the retry spacing has elapsed."""
 
     def test_no_flag_means_no_retry(self):
-        # No failed turn on record: never due, however long the queue sits.
         self.assertFalse(kraken.wake_retry_due(None, 1000.0, 300, 999999.0))
 
     def test_flag_after_last_emit_and_spacing_elapsed_is_due(self):
-        # Emit at t=1000, hook stamped the flag at t=1001 (the wake's turn
-        # died), spacing (300) elapsed by t=1300: retry owed.
         self.assertTrue(kraken.wake_retry_due(1001.0, 1000.0, 300, 1300.0))
 
     def test_flag_before_last_emit_is_stale(self):
-        # The flag predates the last emission: that wake's turn survived, so
-        # no retry — this is exactly what keeps it from being a timer.
         self.assertFalse(kraken.wake_retry_due(900.0, 1000.0, 300, 999999.0))
 
     def test_spacing_not_elapsed_yet(self):
-        # Flag is fresh but the retry spacing hasn't passed: hold — one failed
-        # wake per KRAKEN_WATCH_RETRY_SECONDS, not one per poll.
         self.assertFalse(kraken.wake_retry_due(1001.0, 1000.0, 300, 1299.0))
 
     def test_refreshed_flag_re_arms_after_each_failed_retry(self):
-        # A retry emit at t=1300 whose turn also died (flag re-stamped at
-        # t=1301): due again only at t>=1600 — the cycle ends when a turn
-        # finally survives and stops refreshing the flag.
         self.assertFalse(kraken.wake_retry_due(1301.0, 1300.0, 300, 1500.0))
         self.assertTrue(kraken.wake_retry_due(1301.0, 1300.0, 300, 1600.0))
 

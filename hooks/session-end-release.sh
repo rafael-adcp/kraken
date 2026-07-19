@@ -7,7 +7,7 @@
 # automatically: the task returns to the queue in seconds instead of waiting
 # ~6h for the reaper. It runs `kraken.py release` (via the shared loop in
 # lib-release-claims.sh), so the `released` marker lands before in-progress
-# drops — the ordering that closes the claim window (§9).
+# drops, and the claim ref last — the ordering that frees the lock honestly (§9).
 #
 # Scope, honestly: this covers a graceful end only. A Claude usage limit does
 # NOT end the session (the turn aborts, the session stays open waiting for

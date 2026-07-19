@@ -35,8 +35,8 @@ make check   # both of the above
 - **`make test`** runs the native stdlib runner — two `python3 -m unittest
   discover` passes over `tests/unit/` and `tests/conformance/`. The conformance
   suite drives the bundled transition program against a stateful `gh` stub,
-  proving the queue protocol mechanically (the claim race, claim-window
-  arbitration, honest release, …); the `tests/unit/` pass covers the `kraken.py`
+  proving the queue protocol mechanically (the claim-ref CAS race, thread
+  independence, the reconciler, honest release, …); the `tests/unit/` pass covers the `kraken.py`
   units. The conformance suite **requires `jq`**; without it those cases skip
   cleanly (`harness.setUp`), so it's safe on a minimal machine, but install `jq`
   to actually exercise them.

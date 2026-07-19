@@ -57,23 +57,22 @@ for bad in kraken_task in_progress needs_decision awaiting_merge; do
 done
 [ "$fail" -eq 0 ] && note "4 canonical labels aligned across files"
 
-# --- 1b–1d. Contract vocabulary is single-sourced in kraken.py ---------------
-# kraken.py OWNS the disclaimer format and the marker / claim-window vocabulary
-# (its DISCLAIMER, MARKER_TYPES, RESET_TYPES constants, surfaced by
-# `kraken.py contract`). Instead of re-declaring those literals here and diffing
-# prose against prose, we EXECUTE the program and check the spec documents
-# everything it reads/emits. Structural, not byte-equality between files. Since
-# the coordination workflows became thin execs of kraken.py (issue #37), there
-# is no second in-YAML parser/emitter left to cross-check — the stale-claim
-# marker and the human-vs-tentacle disclaimer filter now live in kraken.py and
-# are covered by its unit tests, so those execute-both checks collapse to the
-# vocabulary and docs-presence checks below.
+# --- 1b–1c. Contract vocabulary is single-sourced in kraken.py ---------------
+# kraken.py OWNS the disclaimer format and the marker vocabulary (its DISCLAIMER
+# and MARKER_TYPES constants, surfaced by `kraken.py contract`). Instead of
+# re-declaring those literals here and diffing prose against prose, we EXECUTE
+# the program and check the spec documents everything it emits. Structural, not
+# byte-equality between files. Since the coordination workflows became thin execs
+# of kraken.py (issue #37), there is no second in-YAML parser/emitter left to
+# cross-check. Under protocol/4 (issue #110) the claim is a git-ref CAS, so the
+# retired claim-window reset vocabulary (the old [1d] check) is gone — the
+# markers remain as audit trail and operator directives only.
 if command -v python3 >/dev/null 2>&1; then
   kcontract() { python3 "$KRAKEN" contract "$@"; }
 
-  # [1b] Every protocol/3 marker "type" kraken.py builds/arbitrates on is named
-  # in PROTOCOL.md's marker table (the stale-claim reset among them — kraken.py's
-  # `reap` is now its only emitter).
+  # [1b] Every marker "type" kraken.py emits (claim/heartbeat ride the claim
+  # ref's commit message; the rest head state-changing comments) is named in
+  # PROTOCOL.md's marker table.
   echo "[1b] marker type vocabulary (kraken.py vs PROTOCOL.md)"
   fail_before=$fail
   while read -r t; do
@@ -94,22 +93,8 @@ if command -v python3 >/dev/null 2>&1; then
   done
   [ "$fail" -eq "$fail_before" ] \
     && note "docs quote the attribution disclaimer illustratively"
-
-  # [1d] Claim-window resets: every reset type kraken.py treats as a window reset
-  # is documented as a marker type in PROTOCOL.md — catches the dangerous drift
-  # direction (a new reset in code the contract never learned about).
-  echo "[1d] claim-window reset types (kraken.py vs PROTOCOL.md)"
-  fail_before=$fail
-  n=0
-  while read -r kw; do
-    [ -z "$kw" ] && continue
-    n=$((n+1))
-    grep -qF -- "\`${kw}\`" "$PROTOCOL" \
-      || err "claim-window reset '$kw' in kraken.py missing from PROTOCOL.md"
-  done < <(kcontract reset-types)
-  [ "$fail" -eq "$fail_before" ] && note "$n reset type(s) in kraken.py all specified in PROTOCOL.md"
 else
-  note "python3 unavailable — skipping contract-derived checks (1b–1d)"
+  note "python3 unavailable — skipping contract-derived checks (1b–1c)"
 fi
 
 # --- 2. Every "step N" reference points at a step that exists ---------------

@@ -13,7 +13,7 @@ dependency graph come for free.
 
 The coordination contract itself — task shape, label state machine, the machine marker,
 claim algorithm, authorization boundaries — is normatively specified in
-[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/3`). This file is how a Claude
+[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/4`). This file is how a Claude
 Code worker executes that contract (subagent-per-task, Monitor watcher, the bundled
 scripts); if the two ever disagree, the spec wins.
 
@@ -86,13 +86,13 @@ time:
 
 | Command | Does |
 | --- | --- |
-| `kraken.py claim-next OWNER/tasks <project> <worker-name>` | list → guard → claim the oldest startable candidate in one shot; prints the won task (number, title, body) |
+| `kraken.py claim-next OWNER/tasks <project> <worker-name>` | list → guard → CAS-claim the oldest startable candidate in one shot; prints the won task (number, title, body) |
 | `kraken.py list-startable OWNER/tasks <project>` | (read-only) startable candidates, oldest first |
-| `kraken.py claim OWNER/tasks <issue> <worker-name>` | queued → `in-progress`: guard, label, claim comment, tiebreaker |
-| `kraken.py heartbeat OWNER/tasks <issue> <worker-name> "<progress>"` | liveness comment — keeps the reaper away, resets nothing |
-| `kraken.py escalate OWNER/tasks <issue> <worker-name> <question-file>` | `in-progress` → `needs-decision`: question posted, labels swapped |
-| `kraken.py deliver OWNER/tasks <issue> <worker-name> <result-file> [pr-url]` | `in-progress` → `awaiting-merge`: result posted, labels swapped |
-| `kraken.py release OWNER/tasks <issue> <worker-name> [reason]` | `in-progress` → queued, honestly (`released:` closes the claim window) |
+| `kraken.py claim OWNER/tasks <issue> <worker-name>` | queued → `in-progress`: guard, then the compare-and-swap on the claim ref; on a win, projects the label + claim comment |
+| `kraken.py heartbeat OWNER/tasks <issue> <worker-name> "<progress>"` | liveness — advances the claim ref to a fresh commit, keeping the reaper away. **Posts no comment** |
+| `kraken.py escalate OWNER/tasks <issue> <worker-name> <question-file>` | `in-progress` → `needs-decision`: question posted, labels swapped, claim ref released |
+| `kraken.py deliver OWNER/tasks <issue> <worker-name> <result-file> [pr-url]` | `in-progress` → `awaiting-merge`: result posted, labels swapped, claim ref released |
+| `kraken.py release OWNER/tasks <issue> <worker-name> [reason]` | `in-progress` → queued, honestly: `released` marker posted, label dropped, claim ref deleted (deleting the ref is what frees the task) |
 
 - Run it with `python3 "<this skill's folder>/kraken.py" <subcommand> …`. Do
   **not** inline rewritten `gh` commands for a transition a subcommand covers —
@@ -102,12 +102,14 @@ time:
   means gh/network failure with the write possibly half-landed: re-check the
   issue's real state before retrying, and never move on while a claim is
   ambiguous.
-- It composes the attribution disclaimer and the hidden machine marker
-  (`<!-- kraken {"type":...} -->`, carrying the `claim`, `heartbeat`,
-  `needs-decision`, `delivered`, `released` payloads) itself — never hand-write
-  those. The escalation question
-  and the result comment stay yours to write: put the body in a file and hand
-  the file to the subcommand.
+- The claim is a **compare-and-swap on the git ref `refs/kraken/claims/<issue>`**:
+  the server admits exactly one creator (HTTP 422 to the rest), so `kraken.py`
+  never reconstructs ownership from the comment thread. It composes the
+  attribution disclaimer and the hidden machine marker
+  (`<!-- kraken {"type":...} -->`) itself — the `claim`/`heartbeat` markers ride
+  the claim ref's commit, the `needs-decision`/`delivered`/`released` markers ride
+  their comment — never hand-write those. The escalation question and the result
+  comment stay yours to write: put the body in a file and hand it to the subcommand.
 
 ## Protocol
 
@@ -116,18 +118,19 @@ time:
    **without `in-progress`, `needs-decision`, or `awaiting-merge`** and **not
    dependency-blocked** — blocked-by checked server-side, honoring a
    `depends-on: #N` body line as a fallback, see `PROTOCOL.md` §3), then walks
-   them oldest-first — guard, label, `claim` marker comment, claim-window
-   arbitration — stopping at the first task it wins:
+   them oldest-first — guard, then the compare-and-swap on the claim ref —
+   stopping at the first task it wins:
 
    ```
    python3 "<this skill's folder>/kraken.py" claim-next OWNER/tasks <name> <worker-name>
    ```
 
    Pass `<name>` bare — the script prepends the `project:` prefix itself. The
-   whole deterministic list/guard/claim/arbitrate loop is the script's job,
-   executed identically every time (semantics: `PROTOCOL.md` §5): a lost
-   tiebreaker or a task that turned held since listing is skipped and the next
-   candidate tried, writing nothing behind. Yours is only the exit code:
+   whole deterministic list/guard/CAS loop is the script's job, executed
+   identically every time (semantics: `PROTOCOL.md` §5): a lost CAS (another
+   worker already holds the ref) or a task that turned held since listing is
+   skipped and the next candidate tried, writing nothing behind. Yours is only
+   the exit code:
 
    - `0` — claimed. The won task (number, title, and body — its goal /
      acceptance / notes) is printed, so you can brief the subagent without a
@@ -151,8 +154,8 @@ time:
    `needs-decision` / `failed`), PR URL, and one line. Still **one task at a time**
    — the subagent is for context isolation, never for parallelism. If it errors out,
    leave the task labeled honestly — either keep it `in-progress` for triage or hand
-   it back with `kraken.py release` (which posts the `released:` line that closes the claim
-   window; never just strip the label) — and continue the loop.
+   it back with `kraken.py release` (which posts the `released` marker and deletes
+   the claim ref — never just strip the label) — and continue the loop.
 
    Inside the subagent:
    a. **Assumptions.** Restate the goal and post your **Assumptions** (my global rule)
@@ -164,21 +167,23 @@ time:
       python3 "<this skill's folder>/kraken.py" escalate OWNER/tasks <issue> <worker-name> <question-file>
       ```
 
-      (it posts the `needs-decision:` comment and swaps the labels), then return
+      (it posts the `needs-decision` comment, swaps the labels, and releases the
+      claim ref), then return
       `needs-decision`. **Do not guess through it.** (When I answer on the issue and
       remove the `needs-decision` label, the task becomes claimable again — whoever
       picks it up inherits the full thread as context.)
    b. **Execute** in your environment, following all my rules (TDD, conventions,
-      comments policy). Keep changes scoped to the task. On a long task, post a
+      comments policy). Keep changes scoped to the task. On a long task, send a
       **heartbeat** at least every ~2 hours:
 
       ```
       python3 "<this skill's folder>/kraken.py" heartbeat OWNER/tasks <issue> <worker-name> "<one line of progress>"
       ```
 
-      The coordination repo's reaper workflow moves silent `in-progress` issues to
-      `needs-decision` after 6h, assuming the worker died — the heartbeat is what
-      keeps it away.
+      This advances your claim ref to a fresh commit (no timeline comment — the
+      progress line rides the commit, and `status` surfaces it). The coordination
+      repo's reconciler reclaims a claim whose ref has been silent for 6h,
+      assuming the worker died — the heartbeat is what keeps it away.
    c. **Validate** against the issue's **acceptance** — run it for real and report the
       real result. A task whose acceptance was not executed does not move forward.
    d. **Record the outcome** on the issue: write the result comment (what was done,
@@ -188,8 +193,8 @@ time:
       python3 "<this skill's folder>/kraken.py" deliver OWNER/tasks <issue> <worker-name> <result-file> <pr-url>
       ```
 
-      It posts the result with the `delivered:` line and **swaps `in-progress` for
-      `awaiting-merge`** — do NOT close. "Done" for a worker means *delivered for
+      It posts the result with the `delivered` marker, **swaps `in-progress` for
+      `awaiting-merge`**, and releases the claim ref — do NOT close. "Done" for a worker means *delivered for
       review*; the task closes when the work actually lands (the PR's `Closes` line
       handles that on merge — see Delivering the work). Failed or stalled: keep it
       open, label it honestly, and say exactly where it stands. (Review bounce: I
@@ -282,7 +287,8 @@ issue's notes say otherwise:
 `PROTOCOL.md` §11 is the normative version.)
 
 - Invoking this skill is my durable authorization to:
-  (a) manage issues **in the coordination repo** (labels, comments, close/reopen);
+  (a) manage issues **in the coordination repo** (labels, comments, close/reopen)
+  and your own claim ref under `refs/kraken/claims/` (create/heartbeat/delete it);
   (b) in the task's work repo, **deliver as described above**: create work branches
   (repo's naming convention), commit to them with the attribution trailers, push
   them, and open draft PRs.

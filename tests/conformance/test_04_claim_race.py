@@ -2,9 +2,10 @@
 """THE claim-race test: two workers claim the same issue concurrently, both
 passing the label guard (the stub's barrier holds each one at the guard read
 until both have arrived — the worst-case interleaving, deterministically).
-The invariant under test: EXACTLY one exits 0, the other exits 10 and removes
-nothing, and the winner is whoever's claim marker landed first."""
-import glob
+The invariant under test: the ref CAS admits EXACTLY one winner — one exits 0,
+the other exits 10 having written NOTHING (no comment, no label change) — and
+the surviving ref names the winner."""
+import json
 import os
 import unittest
 
@@ -21,25 +22,27 @@ class ClaimRaceTests(KrakenConformanceTest):
         )
         rc_a, rc_b = results[0].rc, results[1].rc
 
-        # Exactly one winner, one back-off — never zero, never two.
+        # Exactly one winner, one CAS loss — never zero, never two.
         self.assertEqual(sorted([rc_a, rc_b]), [0, 10],
                          "race exit codes (exactly one 0 and one 10)")
-
-        # The winner is whoever's claim marker landed first in server order.
-        first = ""
-        for path in sorted(glob.glob(os.path.join(self.issue_dir(7), "comments", "*.md"))):
-            with open(path, encoding="utf-8") as f:
-                body = f.read()
-            if '<!-- kraken {"type":"claim"' in body:
-                first = body
-                break
         winner = "w-a" if rc_a == 0 else "w-b"
-        self.assertIn('"worker":"%s"' % winner, first,
-                      "winner (%s) must match the first claim marker in server order" % winner)
 
-        # The loser backed off without removing anything.
+        # The surviving ref names the winner.
+        sha = self.claim_ref(7)
+        self.assertIsNotNone(sha, "claim ref missing after the race")
+        with open(os.path.join(self.state, "objects", sha + ".json"),
+                  encoding="utf-8") as f:
+            commit = json.load(f)
+        self.assertIn('"worker":"%s"' % winner, commit["message"],
+                      "the surviving ref must carry the winner's claim commit")
+
+        # The loser wrote NOTHING: only the winner's claim comment exists, and
+        # nobody removed a label while backing off.
         self.assertTrue(self.has_label(7, "in-progress"), "in-progress label missing after race")
-        self.assertEqual(self.comment_count(7), 2, "both claim comments preserved")
+        self.assertEqual(self.comment_count(7), 1,
+                         "exactly one claim comment (the CAS loser writes nothing)")
+        self.assertIn('"worker":"%s"' % winner, self.last_comment(7),
+                      "the one claim comment must be the winner's")
         self.assertFalse(any("remove-label" in l for l in self.log_lines()),
                          "a racer removed a label while backing off")
 

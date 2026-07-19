@@ -23,10 +23,10 @@ AI coding agents made each change cheap — but you are still the bus between th
 | Concern            | Kraken's answer                                             |
 | ------------------ | ----------------------------------------------------------- |
 | Queue & state      | GitHub Issues in a private coordination repo you own        |
-| Claiming (no race) | Label + `claim` marker comment; server-side ordering wins   |
+| Claiming (no race) | Atomic compare-and-swap on a git ref — one creator wins, HTTP 422 to the rest |
 | Dependencies       | Native `blocked-by` relationships — closing a task unblocks |
 | Parallelism        | Capacity = how many workers you launch; 1 task per worker   |
-| Dead workers       | Heartbeat comments + an hourly reaper workflow              |
+| Dead workers       | Ref-anchored heartbeats + an hourly reconciler workflow      |
 | Bad tasks          | A queue-entry validator flags a missing label/Goal/Acceptance |
 | Dashboard          | The GitHub UI — filters, notifications, mobile app          |
 | Audit trail        | The issue timeline: who, when, why, validated how           |
@@ -145,7 +145,7 @@ bouncing) a PR. The tentacles drive everything else.
 
 The coordination contract — task shape, state machine, the machine marker,
 the claim algorithm — is normatively specified in
-[`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/3`); it is agent-agnostic, so any
+[`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/4`); it is agent-agnostic, so any
 tool that follows it can be a tentacle on the same queue. How a Claude Code worker
 executes it — subagents, the watcher, the bundled transition program — lives in
 [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md); the GitHub Copilot CLI
@@ -267,7 +267,7 @@ An empty queue doesn't stop a worker: after the drain, `unleash` arms an
 event-driven watcher — a background shell script (via Claude Code's Monitor
 tool) polls the queue every 60s with a free `gh` call and wakes the worker
 **only when a startable task appears** — an idle queue costs zero LLM tokens.
-Each wake is an ordinary drain: same one task at a time, same claim tiebreaker.
+Each wake is an ordinary drain: same one task at a time, same claim-ref CAS.
 Enqueue from anywhere (`gh issue create`, web UI, mobile app) and the worker
 picks it up within a minute; the watcher lives until the session closes or you
 say stop.
@@ -357,7 +357,7 @@ a fresh, ephemeral runner is exactly the clean context you want; nothing here
 beats that, so wire it up. Kraken is for the other case: a queue you drain
 unattended against long-lived services and a toolchain that would cost minutes
 to rebuild on every runner. And because a tentacle speaks the agent-agnostic
-[`kraken-protocol/3`](PROTOCOL.md), the queue isn't wed to one vendor's action —
+[`kraken-protocol/4`](PROTOCOL.md), the queue isn't wed to one vendor's action —
 any tool that follows the protocol can drain it. **Prefer `claude-code-action`
 when** your automation is CI-shaped and a disposable runner is the correct
 environment; prefer Kraken when the environment is the point and you want no
@@ -415,9 +415,11 @@ compliant task never gets one.
 <details>
 <summary><b>A worker died mid-task — is the queue stuck?</b></summary>
 
-No. Workers heartbeat with progress comments, and the coordination repo's reaper
-workflow drags any `in-progress` issue that has been silent for 6h to
-`needs-decision` for you to triage — relaunch or investigate.
+No. Workers heartbeat by advancing their claim ref, and the coordination repo's
+reconciler workflow drags any claim whose ref has been silent for 6h to
+`needs-decision` for you to triage — relaunch or investigate. (It also cleans up
+after itself: an orphaned lock is deleted, and an `in-progress` label with no
+claim behind it is requeued.)
 
 </details>
 
@@ -428,8 +430,8 @@ It self-heals. A usage limit kills the **turn**, not the session: the model stop
 mid-drain and the session sits open waiting for input, so the `SessionEnd`
 auto-release never fires. What does fire is Claude Code's **`StopFailure`** hook
 (a turn ended by an API error), and Kraken registers it with matcher
-`rate_limit`: the bundled hook **releases the held claim on the spot** —
-`released:` with `reason: usage limit` on the issue timeline — so the task is
+`rate_limit`: the bundled hook **releases the held claim on the spot** — a
+`released` marker with `reason: usage limit` and the claim ref deleted — so the task is
 back on the queue in seconds instead of squatting `in-progress`, free for any
 worker on an account that still has quota. (`gh` still works at limit time;
 only the model API is blocked, which is why the release can land.)
@@ -441,9 +443,9 @@ limit lasts each retry fails for free, and the first one after the window resets
 wakes the worker, which re-claims the task and continues on the existing branch
 with the whole thread in hand. No operator gesture needed.
 
-The reaper stays the backstop for the residue — the hook itself failing, or a
+The reconciler stays the backstop for the residue — the hook itself failing, or a
 hard kill: 6h of silence still moves the task to `needs-decision` with a
-`stale-claim:` comment, and removing that label requeues it, as ever. The manual
+`stale-claim` comment, and removing that label requeues it, as ever. The manual
 shortcut also still works: remove `in-progress` from a stuck issue and it is
 startable again immediately.
 

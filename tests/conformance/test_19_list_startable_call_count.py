@@ -19,9 +19,11 @@ class ListStartableCallCountTests(KrakenConformanceTest):
         startable = sum(1 for l in r.out.split("\n") if l.endswith(":startable"))
         self.assertEqual(startable, 50, "all 50 free tasks report startable")
 
+        # One GraphQL listing page + one matching-refs read for the claim refs
+        # — both O(1) in queue size (the ref read is a single paginated call).
         calls = len(self.log_lines())
         self.assertLessEqual(calls, 2,
-                             "expected O(1) gh calls for 50 free tasks (single page), got %d: %s"
+                             "expected O(1) gh calls for 50 free tasks (listing + claim refs), got %d: %s"
                              % (calls, self.log_text()))
 
         # The depends-on fallback must also stay O(1): 30 candidates all falling
@@ -39,6 +41,7 @@ class ListStartableCallCountTests(KrakenConformanceTest):
         held = sum(1 for l in lines if l.endswith(":held"))
         self.assertEqual(held, 30, "all 30 fallback candidates held while the dep target is open")
 
+        # Listing page + claim-refs read + one batched depends-on resolve.
         calls = len(self.log_lines())
         self.assertLessEqual(calls, 3,
                              "expected O(1) gh calls for a 30-candidate depends-on fan-out, got %d: %s"
