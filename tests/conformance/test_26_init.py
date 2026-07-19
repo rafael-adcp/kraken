@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """init conformance: the bootstrap kraken.py init mechanizes — verify or create
 the coordination repo PRIVATE, install the bundled assets via the contents API
-(create / skip-unchanged / flag-customized), and upsert the canonical labels —
+(create / skip-unchanged / flag-drifted), and upsert the canonical labels —
 proven against the gh stub with no LLM."""
 import filecmp
 import os
@@ -56,19 +56,20 @@ class InitTests(KrakenConformanceTest):
         self.assertIn("init: asset %s (unchanged)" % ASSET_DSTS[0], r.out,
                       "re-run did not report the task template as unchanged")
 
-        # --- 3. flag-don't-clobber: a customized asset is reported, not overwritten
+        # --- 3. create-only: a drifted asset is reported by plain init, not
+        #        overwritten (a plain run never writes over an existing file) ---
         self.truncate_log()
         custom = os.path.join(self.state, "custom.yml")
-        self._write(custom, "name: my customized reaper\n")
+        self._write(custom, "name: my hand-edited reaper\n")
         self.mk_content(".github/workflows/reclaim-stale.yml", custom)
         r = self.kraken("init", "OWNER/tasks")
-        self.assertEqual(r.rc, 0, "flag-don't-clobber exit")
-        self.assertIn("init: asset .github/workflows/reclaim-stale.yml (customized)", r.out,
-                      "customized asset not flagged")
+        self.assertEqual(r.rc, 0, "create-only exit")
+        self.assertIn("init: asset .github/workflows/reclaim-stale.yml (drifted)", r.out,
+                      "drifted asset not flagged")
         self.assertTrue(filecmp.cmp(self._contents(".github/workflows/reclaim-stale.yml"), custom, shallow=False),
-                        "customized asset was overwritten — flag-don't-clobber violated")
+                        "plain init overwrote a drifted asset — create-only violated")
         self.assertNotIn("-X PUT", self.log_text(),
-                         "a PUT was issued during a run where every asset already exists")
+                         "a PUT was issued during a plain run where every asset already exists")
 
 
 if __name__ == "__main__":
