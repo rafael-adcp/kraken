@@ -59,52 +59,31 @@ EXIT_OK = 0
 EXIT_LOST = 10
 EXIT_NOT_CLEAR = 11
 EXIT_TRANSPORT = 20
-# claim-next only: the queue held no startable candidate — either it was empty,
-# or every candidate turned out held/lost as claim-next iterated. An honest
-# "nothing to claim", distinct from success (0) and from a transport fault (20).
-EXIT_NONE = 3
+EXIT_NONE = 3  # claim-next: nothing startable to claim (not empty-vs-error ambiguous)
 EXIT_USAGE = 2
 
-# The three "held" labels: a task carrying any of them is claimed, escalated, or
-# delivered — never startable. `in-progress` is the *projection* of the claim
-# ref (the lock itself); the other two are operator-facing states set by
-# uncontended transitions.
+# A task carrying any of these is held, never startable. `in-progress` is the
+# projection of the claim ref; the other two are operator-facing states.
 HELD_LABELS = ("in-progress", "needs-decision", "awaiting-merge")
 
-# --- protocol version --------------------------------------------------------
-# The wire contract this program speaks (PROTOCOL.md). protocol/4 arbitrates
-# the claim on a git-ref CAS (refs/kraken/claims/<issue>) and anchors liveness
-# to the claim ref's commit date; hidden markers (see MARKER_* below) remain
-# the machine payload for comments — audit trail and operator directives — but
-# never arbitrate a claim.
+# The wire contract this program speaks (PROTOCOL.md): protocol/4 arbitrates the
+# claim on a git-ref CAS and anchors liveness to the claim ref's commit date.
 PROTOCOL_VERSION = 4
 
-# --- plugin version ----------------------------------------------------------
-# The installed plugin's version, as stamped in the bundled marketplace manifest
-# the release workflow bumps. It is the `kraken@<version>` in the Kraken-Task
-# commit trailer (task_trailer below): read at runtime, never a second literal to
-# drift, and never something the worker model has to guess.
+# Installed plugin version, single-sourced from the manifest the release workflow
+# bumps; read at runtime for the Kraken-Task trailer, never a second literal.
 PLUGIN_MANIFEST = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..", "..", ".claude-plugin", "plugin.json",
 )
 PLUGIN_VERSION_UNKNOWN = "unknown"
 
-# This module's own folder — where the bundled assets `init` installs
-# (task-template.yml, this vendored kraken.py, and the four coordination
-# workflows) ship, next to this file, exactly as the unleash skill resolves its
-# bundled kraken.py.
 SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def plugin_version(manifest=PLUGIN_MANIFEST):
-    """The installed plugin's version, read from the bundled
-    `.claude-plugin/plugin.json` two levels up from this module
-    (skills/unleash/kraken.py -> <plugin root>/.claude-plugin/plugin.json). The
-    release workflow bumps ONLY that file, so reading it at runtime keeps the
-    Kraken-Task trailer's `kraken@<version>` in lockstep with the plugin without
-    a second version literal to maintain. Returns ``"unknown"`` if the manifest
-    is missing or unreadable — the trailer still forms, just unstamped."""
+    """Plugin version from the bundled `.claude-plugin/plugin.json`, or
+    ``"unknown"`` if it is missing or unreadable."""
     try:
         with open(manifest, encoding="utf-8") as f:
             version = json.load(f).get("version")
@@ -113,44 +92,33 @@ def plugin_version(manifest=PLUGIN_MANIFEST):
     return version if isinstance(version, str) and version else PLUGIN_VERSION_UNKNOWN
 
 # --- structured hidden markers -----------------------------------------------
-# A state-changing comment carries its machine payload in ONE hidden HTML-comment
-# marker — invisible in the rendered GitHub UI, so the visible prose is pure
-# human courtesy — of the form:
+# A state-changing comment (or a claim ref's commit message) carries its machine
+# payload in ONE hidden HTML-comment marker, e.g.
 #     <!-- kraken {"type":"claim","worker":"env-1"} -->
-# The payload is compact one-line JSON with a required string "type". Encoding it
-# with json.dumps (not string interpolation) retires the CRLF/quoting/prefix-scan
-# hazard class the visible line grammar inherited from the shell era.
-# ensure_ascii keeps the marker pure ASCII (no astral-plane bytes) so the
-# requeue filter never hits a locale-dependent match the way the 🐙 disclaimer
-# does. Under protocol/4 markers are audit trail and operator directives — a
-# claim ref's commit message reuses the same grammar — but they never arbitrate
-# a claim: the CAS on the claim ref does (see the claim-ref section below).
+# Compact ASCII-only JSON: json.dumps avoids the CRLF/quoting/prefix hazards of
+# the old visible-line grammar, and ASCII keeps the reaper/requeue greps
+# locale-independent. Under protocol/4 markers are audit trail only — the CAS on
+# the claim ref arbitrates, never a marker.
 MARKER_PREFIX = "<!-- kraken "
 MARKER_SUFFIX = " -->"
 MARKER_RE = re.compile(r"<!--\s*kraken\s+(\{.*?\})\s*-->")
 
 # Every marker "type" this program emits — the protocol/4 vocabulary. `claim`
-# and `heartbeat` ride the claim ref's commit message (heartbeat additionally
-# carries the progress text in "msg"); the rest head state-changing comments.
-# (`requeue` is operator-only; the workflow reads it, this program never emits
-# it, so it is not here.) The lint checks each appears in PROTOCOL.md's marker
-# table by executing `kraken.py contract marker-types`.
+# and `heartbeat` ride the claim ref's commit message; the rest head comments.
+# (`requeue` is operator-only.) The lint checks each against PROTOCOL.md's marker
+# table via `kraken.py contract marker-types`.
 MARKER_TYPES = ("claim", "heartbeat", "needs-decision", "delivered",
                 "released", "stale-claim")
 
 
 def make_marker(payload):
-    """Render a machine payload dict as the protocol/3 hidden marker. Compact,
-    ASCII-only JSON so the marker never carries a byte the reaper/requeue greps
-    could miss under a C locale."""
+    """Render a machine payload dict as the hidden marker (compact, ASCII-only)."""
     return MARKER_PREFIX + json.dumps(payload, separators=(",", ":")) + MARKER_SUFFIX
 
 
 def parse_marker(line):
-    """Decode the kraken marker payload on a line (a comment line or a claim
-    ref's commit message), or None if the line carries no well-formed marker. A
-    marker with a non-dict body or no string "type" is treated as absent — a
-    malformed marker is never guessed at."""
+    """Decode the kraken marker payload on a line, or None if it carries none.
+    A body that is not a dict with a string "type" is treated as absent."""
     m = MARKER_RE.search(line)
     if not m:
         return None
@@ -164,16 +132,11 @@ def parse_marker(line):
 
 
 # The attribution disclaimer — the ONE authoritative definition of its format.
-# Every worker authenticates as the operator, so a worker comment reads exactly
-# like a human's without this blockquote. It heads every comment a transition
-# writes; a blank line must follow it or GitHub folds the body into the quote.
-# {worker} is the only placeholder. The line is deliberately **agent-agnostic** —
-# it names no implementation ("a kraken tentacle", not "a Claude Code tentacle") —
-# so every conforming worker sharing this kraken.py, whatever agent drives it,
-# emits the identical disclaimer and the timeline reads uniformly. Docs (SKILL.md,
-# PROTOCOL.md §4) quote it illustratively and every other consumer (the requeue
-# workflow filter, the test helpers, the skill lint) derives from or is verified
-# against this constant via `kraken.py contract` — nothing re-declares it by hand.
+# Every worker authenticates as the operator, so without this blockquote a worker
+# comment reads like a human's. It heads every transition comment (a blank line
+# must follow, or GitHub folds the body into the quote). Deliberately
+# agent-agnostic ("a kraken tentacle", not "a Claude Code tentacle"); every other
+# consumer derives from this constant via `kraken.py contract`.
 DISCLAIMER = "> 🐙 **Kraken worker `{worker}`** — automated comment from a kraken tentacle, not a human."
 
 
@@ -182,14 +145,9 @@ def disclaimer(worker):
 
 
 # The Kraken-Task commit trailer — the ONE authoritative definition of its format,
-# the delivery-side twin of DISCLAIMER. Every delivered commit carries it so a
-# merge maps back to the task and the plugin version that produced it
-# (PROTOCOL.md §11). `{version}` is sourced from the bundled plugin.json via
-# plugin_version(), never hand-copied: the worker model cannot know the installed
-# version, and a pasted literal is exactly the drift this single-sourcing kills.
-# The companion `Co-Authored-By` line stays the agent's own — it carries the
-# agent's identity, which this program cannot know — so only the kraken-specific
-# line lives here.
+# the delivery-side twin of DISCLAIMER: it maps a merged commit back to the task
+# and the plugin version. `{version}` comes from plugin_version(), never a pasted
+# literal. The companion `Co-Authored-By` line stays the agent's own.
 TASK_TRAILER = "Kraken-Task: {repo}#{issue} (worker: {worker}, kraken@{version})"
 
 
@@ -203,10 +161,8 @@ def task_trailer(repo, issue, worker):
 
 
 def compose_comment(worker, prose, payload):
-    """Assemble a state-changing comment: the attribution disclaimer,
-    the human-facing prose (courtesy only — never machine-parsed), then the one
-    hidden marker carrying the machine payload. Blank lines separate the three so
-    GitHub does not fold the body into the disclaimer's blockquote."""
+    """Assemble a state-changing comment: disclaimer, human-facing prose, then the
+    one hidden marker, blank-line separated so GitHub keeps them distinct."""
     parts = [disclaimer(worker)]
     prose = (prose or "").strip("\n")
     if prose:
@@ -285,9 +241,8 @@ def comment_records(repo, issue):
     idx = 0
     length = len(out)
     while idx < length:
-        # Skip inter-object whitespace/newlines: `gh --jq` streams one object
-        # per result, but a jq that pretty-prints spreads each across lines, so
-        # decode object-by-object rather than line-by-line.
+        # Skip inter-object whitespace: a pretty-printing jq spreads each object
+        # across lines, so decode object-by-object, not line-by-line.
         while idx < length and out[idx] in " \t\r\n":
             idx += 1
         if idx >= length:
@@ -304,20 +259,17 @@ def comment_records(repo, issue):
 
 # --- claim refs: the protocol/4 CAS ------------------------------------------
 #
-# The claim is a git ref, refs/kraken/claims/<issue>, in the coordination repo.
-# Creating a ref is the one common GitHub write that FAILS on conflict — the
-# server accepts exactly one creator and answers HTTP 422 to everyone else — so
-# the ref is the arbiter and the loser writes nothing. The ref targets an
-# orphan commit (empty tree, no parents) whose message is the standard kraken
-# marker carrying the worker's identity, and whose server-stamped committedDate
-# is the liveness clock the reaper reads (a heartbeat force-updates the ref to
-# a fresh commit). Refs are invisible in the GitHub UI: the in-progress label
-# stays the operator's dashboard, written AFTER the CAS as a projection.
+# The claim is a git ref, refs/kraken/claims/<issue>. Creating a ref is the one
+# common GitHub write that FAILS on conflict (422 to all but one creator), so the
+# ref is the arbiter and the loser writes nothing. It points at an orphan commit
+# whose message is the kraken marker and whose server-stamped date is the reaper's
+# liveness clock. Refs are UI-invisible: the in-progress label is a projection
+# written after the CAS.
 
 CLAIM_REF_PREFIX = "refs/kraken/claims/"
-# git's well-known empty-tree object — present in every repository, so an
-# orphan commit can be created without reading anything first. If a host ever
-# rejects it, create_claim_commit falls back to the default branch's tree.
+# git's well-known empty-tree object, present in every repo, so an orphan commit
+# needs no prior read; create_claim_commit falls back to HEAD's tree if a host
+# rejects it.
 EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
@@ -345,11 +297,8 @@ def _head_tree_sha(repo):
 
 def create_claim_commit(repo, payload):
     """Create the orphan commit a claim ref points at: empty tree, no parents,
-    message = the standard kraken marker for `payload` (one grammar everywhere —
-    parse_marker reads commit messages and comment lines alike). The server
-    stamps the committer date, so the liveness clock is server-side, exactly
-    like comment createdAt was. Returns the commit SHA, or None on transport
-    failure."""
+    message = the kraken marker for `payload`. The server stamps the date, so the
+    liveness clock is server-side. Returns the SHA, or None on transport failure."""
     for tree in (EMPTY_TREE_SHA, None):
         if tree is None:
             tree = _head_tree_sha(repo)
@@ -637,16 +586,10 @@ def open_issue_numbers(repo, label):
 
 # --- subcommand: list-startable ---------------------------------------------
 #
-# The queue fetch and the blocked-by check are both batched through GraphQL so
-# an idle poll costs a small, queue-size-independent number of round trips —
-# never the old one-REST-call-per-non-held-task.
-#
-# GitHub's GraphQL `issues(labels: [...])` argument is a UNION over multiple
-# values (confirmed against a live repo — unlike the REST `--label` flag's
-# AND), so passing kraken-task and project:<name> there would OR the two
-# label sets together instead of intersecting them. Filtering on the single
-# "kraken-task" label server-side and the project label client-side (against
-# the very labels this same call already returns) sidesteps the ambiguity.
+# Queue fetch and blocked-by check are batched through GraphQL, so an idle poll
+# costs a queue-size-independent number of round trips. GraphQL's
+# `issues(labels: [...])` is a UNION (unlike REST's AND), so we filter server-side
+# on the single "kraken-task" label and match the project label client-side.
 
 def fetch_open_tasks(repo):
     """Every OPEN kraken-task issue in the repo, across all projects — number,
@@ -782,9 +725,8 @@ def cmd_list_startable(args):
 def _claim_once(repo, issue, worker):
     """The one contended claim sequence — guard, CAS, projection — executed
     identically every time (PROTOCOL.md §5). Returns an exit code and prints a
-    `claim:` diagnostic line for each outcome. Shared by the `claim` subcommand
-    and by `claim-next`'s per-candidate loop so the two can never drift: a loss
-    backs off writing nothing, exactly here, once."""
+    `claim:` diagnostic line. Shared by `claim` and `claim-next` so they can never
+    drift."""
 
     # 1. Guard — re-fetch labels; a held task is skipped with zero writes.
     labels_obj = gh_json(["-R", repo, "issue", "view", str(issue), "--json", "labels"])
@@ -797,8 +739,7 @@ def _claim_once(repo, issue, worker):
             print(f"claim: held issue={issue} label={held}")
             return EXIT_NOT_CLEAR
 
-    # 2. CAS — orphan claim commit, then create the claim ref. The server
-    #    accepts exactly one creator, so there is nothing to arbitrate.
+    # 2. CAS — orphan claim commit, then create the claim ref (only one creator wins).
     sha = create_claim_commit(repo, {"type": "claim", "worker": worker})
     if sha is None:
         print(f"claim: gh-failure issue={issue} stage=commit")
@@ -808,21 +749,16 @@ def _claim_once(repo, issue, worker):
         print(f"claim: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
     if outcome == "lost":
-        # A 422 is a genuine loss only when the ref belongs to ANOTHER worker.
-        # A worker re-claiming its OWN in-flight claim after a network failure
-        # (PROTOCOL.md §5's re-check caveat) already owns the task — recognize
-        # its own ref and fall through to re-project, rather than reporting a
-        # false loss. An unreadable/absent owner is treated as not-ours.
+        # A 422 is a real loss only if the ref is ANOTHER worker's. A worker
+        # re-claiming its own in-flight ref after a network failure (§5) already
+        # owns the task, so fall through to re-project. Unreadable owner = not ours.
         if claim_ref_owner(repo, issue) != worker:
             print(f"claim: lost-cas issue={issue} — another worker holds the claim ref")
             return EXIT_LOST
 
-    # 3. Projection — the claim is already won and the ref holds it. Record the
-    #    state file FIRST so the lifecycle hooks can release the claim even if
-    #    the projection writes below fail; then the in-progress label (the
-    #    operator's dashboard) and the claim comment (narrative). A failure
-    #    here leaves the claim HELD — exit 20 says re-check, and the reaper
-    #    heals a missing label on its next pass.
+    # 3. Projection. State file FIRST so lifecycle hooks can release the claim even
+    #    if the writes below fail; then the in-progress label and claim comment. A
+    #    failure here leaves the claim HELD — exit 20 says re-check, reaper heals.
     write_claim_state(repo, issue, worker)
     if not swap_labels(repo, issue, add="in-progress"):
         print(f"claim: gh-failure issue={issue} stage=label (claim held)")
@@ -850,12 +786,10 @@ def cmd_claim(args):
 
 def cmd_claim_next(args):
     """Collapse the deterministic claim loop into one invocation: list startable
-    candidates oldest-first, then guard + CAS each in turn, stopping at the
-    first win. Per-candidate losses (10/11) move on to the next one, exactly as
-    the drain loop did by hand; a transport fault (20) stops immediately with
-    the state-unknown semantics; an exhausted queue is an honest EXIT_NONE.
-    Never turns a lost CAS into a retry on the same issue (PROTOCOL.md §5) — it
-    iterates forward, never back."""
+    candidates oldest-first, then guard + CAS each in turn, stopping at the first
+    win. Losses (10/11) move to the next candidate; a transport fault (20) stops
+    with state-unknown; an exhausted queue is EXIT_NONE. Never retries a lost CAS
+    on the same issue (PROTOCOL.md §5) — it iterates forward, never back."""
     repo, project, worker = args.repo, args.project, args.worker
 
     refused = refuse_second_claim(worker)
@@ -895,9 +829,8 @@ def cmd_claim_next(args):
 
 def cmd_heartbeat(args):
     """Liveness: force-move the claim ref to a fresh commit whose server-stamped
-    date restarts the reaper's clock and whose marker message carries the
-    progress text. No timeline comment — a long task no longer floods the
-    thread; `status` surfaces the age and the message from the ref."""
+    date restarts the reaper's clock and whose marker carries the progress text.
+    No timeline comment — `status` surfaces the age and message from the ref."""
     repo, issue, worker, message = args.repo, args.issue, args.worker, args.message
     sha = create_claim_commit(
         repo, {"type": "heartbeat", "worker": worker, "msg": message}
@@ -937,9 +870,9 @@ def cmd_escalate(args):
     if not swap_labels(repo, issue, remove="in-progress", add="needs-decision"):
         print(f"escalate: gh-failure issue={issue} stage=labels")
         return EXIT_TRANSPORT
-    # Comment and labels first, the lock last: a half-executed escalation
-    # leaves the task held rather than free with no question on record. A
-    # leftover ref (delete failed) is an orphan lock the reaper deletes.
+    # Comment and labels first, the lock last: a half-executed escalation leaves
+    # the task held, not free with no question on record. A leftover ref is an
+    # orphan lock the reaper deletes.
     if not claim_ref_delete(repo, issue):
         print(f"escalate: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
@@ -997,9 +930,8 @@ def cmd_release(args):
     if not swap_labels(repo, issue, remove="in-progress"):
         print(f"release: gh-failure issue={issue} stage=label")
         return EXIT_TRANSPORT
-    # The ref IS the claim: deleting it is what actually frees the task for
-    # the next worker (comment and label are narrative/projection). Last, so
-    # the task never looks free while half-released.
+    # The ref IS the claim: deleting it is what frees the task (comment and label
+    # are narrative). Last, so the task never looks free while half-released.
     if not claim_ref_delete(repo, issue):
         print(f"release: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
@@ -1012,10 +944,8 @@ def cmd_release(args):
 # --- subcommand: watch -------------------------------------------------------
 
 def snapshot_state(repo, project):
-    """Compute the queue snapshot in-process — the same startable/held split
-    list-startable emits in --snapshot mode, via the same classify_queue.
-    Returns the snapshot text, or None on a transport failure (the watcher
-    skips that cycle)."""
+    """The queue snapshot list-startable emits in --snapshot mode, via the same
+    classify_queue. Returns the snapshot text, or None on transport failure."""
     rows = classify_queue(repo, project)
     if rows is None:
         return None
@@ -1026,13 +956,9 @@ def snapshot_state(repo, project):
 
 def wake_retry_due(flag_mtime, last_emit, retry_seconds, now):
     """Whether the watcher owes a lost-wake retry: the StopFailure hook stamped
-    the wake-retry flag AFTER this watcher's last emission — meaning the turn
-    that wake started died on a usage limit, so the wake was consumed for
-    nothing — and the retry spacing has elapsed. A flag older than the last
-    emission is stale (that wake's turn survived) and never re-triggers; no
-    flag means no failed turn on record. This is NOT the removed blind
-    re-emission timer: without a proven-dead wake, the change-gated emit stays
-    the only path."""
+    the wake-retry flag AFTER this watcher's last emission (that wake's turn died
+    on a usage limit) and the retry spacing has elapsed. A flag older than the
+    last emission is stale; no flag means no failed turn on record."""
     if flag_mtime is None:
         return False
     return flag_mtime > last_emit and now - last_emit >= retry_seconds
@@ -1054,10 +980,8 @@ def cmd_watch(args):
                 line for line in snapshot.split("\n") if line.endswith(":startable")
             ]
             count = len(startable)
-            # The emit gate: a startable task exists AND either the queue
-            # changed since the last poll, or a lost-wake retry is due
-            # (wake_retry_due) — the one case where an unchanged queue still
-            # hides an undelivered wake. No blind re-emission timer.
+            # Emit gate: a startable task exists AND either the queue changed or
+            # a lost-wake retry is due. No blind re-emission timer.
             due = wake_retry_due(
                 wake_retry_mtime(), last_emit, retry_seconds, time.time()
             )
@@ -1077,20 +1001,12 @@ def cmd_watch(args):
 
 # --- subcommand: status ------------------------------------------------------
 #
-# The operator console, mechanized (PROTOCOL.md §12): the same read-only view
-# skills/status/SKILL.md used to teach an LLM to orchestrate — review queue,
-# decision queue, in-flight with heartbeat ages, the merged-PR-but-open-issue
-# orphan heuristic, and the launch recon — computed deterministically here so
-# the skill is a thin renderer and the data is reusable (scripts, cron, `--json`
-# for downstream tooling). Read-only: no label change, no comment, no write.
-#
-# Reuse, don't duplicate: the queue itself comes from the same paginated
-# fetch_open_tasks GraphQL walk list-startable uses (held tasks keep their
-# kraken-task label, so the walk returns them). In-flight worker/age/progress
-# come from the claim refs (one matching-refs read + one batched commit-meta
-# call — the same clock the reaper reads); per-issue comment reads happen only
-# for awaiting-merge tasks (the PR link), through the paginated comment_records
-# path so a long thread is never read truncated.
+# The operator console, mechanized (PROTOCOL.md §12): a read-only view — review
+# queue, decision queue, in-flight with heartbeat ages, the merged-PR-but-open
+# orphan heuristic, and launch recon — computed deterministically so the skill is
+# a thin renderer and the data is reusable (`--json`). No write of any kind.
+# Reuses fetch_open_tasks (queue), the claim refs (in-flight worker/age/progress),
+# and paginated comment reads only for awaiting-merge tasks (the PR link).
 
 _PR_URL_RE = re.compile(r"https?://\S+?/pull/\d+")
 
@@ -1233,8 +1149,8 @@ def compute_status(repo, project, nodes, now, *, claim_refs, commit_meta,
         elif "needs-decision" in labels:
             decision.append({"number": number, "title": title})
         elif "in-progress" in labels or number in claim_refs:
-            # In flight: the label projection OR the lock itself — a claim
-            # whose label projection has not landed yet is still running work.
+            # In flight: the label projection OR the lock itself — a claim whose
+            # label has not landed yet is still running work.
             worker, msg, anchor = None, None, None
             age = None
             sha = claim_refs.get(number)
@@ -1365,12 +1281,11 @@ def cmd_status(args):
 
 
 # --- subcommand: init --------------------------------------------------------
-# The bootstrap `init` mechanizes, single-sourced here so the skill and the
-# program never disagree on the asset set or the label canon (issue #30, the
-# trio with claim-next #25 and status #27).
+# The bootstrap `init`, single-sourced here so the skill and the program never
+# disagree on the asset set or the label canon.
 
-# Each bundled asset init commits: (bundled filename next to this module,
-# destination path in the coordination repo, commit message used on create).
+# Each bundled asset init commits: (bundled filename, destination path in the
+# coordination repo, create commit message).
 INIT_ASSETS = (
     ("task-template.yml", ".github/ISSUE_TEMPLATE/task.yml",
      "chore: add kraken task template"),
@@ -1386,11 +1301,10 @@ INIT_ASSETS = (
      "chore: add kraken validate-task workflow"),
 )
 
-# The canonical state-machine labels — (name, color, description). The GitHub
-# labels UI IS kraken's dashboard, so the colors trace the flow left to right:
-# blue queued -> yellow working -> red needs-you / green ready-to-land. This is
-# the one authoritative home for PROTOCOL.md §3's SHOULD colors; init upserts
-# with --force so a re-run re-canonicalizes any drift in place.
+# The canonical state-machine labels — (name, color, description). The labels UI
+# IS kraken's dashboard, so colors trace the flow left to right: blue queued ->
+# yellow working -> red needs-you / green ready-to-land. The authoritative home
+# for PROTOCOL.md §3's SHOULD colors; init upserts with --force.
 CANONICAL_LABELS = (
     ("kraken-task", "1D76DB", "A unit of work for a kraken worker — the queue"),
     ("in-progress", "FBCA04", "Claimed by a worker and being executed"),
@@ -1535,19 +1449,15 @@ def render_init(report):
 
 
 # --- coordination-repo workflow subcommands ----------------------------------
-# The three logic-bearing coordination workflows (reclaim-stale, requeue-on-reply,
-# validate-task) used to re-implement the protocol parse in a weaker language
-# each — jq-regex, grep-ERE, awk. Vendored into the coordination repo (init
-# installs this file as a sixth asset), kraken.py runs their logic directly, so
-# there is ONE parser, in ONE language, sharing the same marker decoder,
-# disclaimer, and label vocabulary the worker side already uses — and gaining the
-# same unit tests. Each workflow shrinks to a checkout + a single exec of the
-# matching subcommand below.
+# The three logic-bearing workflows (reclaim-stale, requeue-on-reply,
+# validate-task) run their logic here rather than re-implementing the protocol
+# parse in jq/grep/awk — ONE parser, sharing the marker decoder, disclaimer, and
+# label vocabulary (and unit tests) with the worker side. Each workflow is a
+# checkout + a single exec of the matching subcommand below.
 
-# The reaper's default staleness threshold, in hours. A claim ref whose commit
-# date is older than this — or whose commit cannot be read at all — belongs to
-# a dead worker and is reclaimed to needs-decision. The workflow passes it
-# through the MAX_HOURS env var (kept for continuity).
+# The reaper's default staleness threshold, in hours. A claim ref older than this
+# — or unreadable — belongs to a dead worker and is reclaimed to needs-decision.
+# The workflow passes it through the MAX_HOURS env var.
 REAP_DEFAULT_MAX_HOURS = 6
 
 
@@ -1772,9 +1682,8 @@ def cmd_requeue_check(args):
     body = os.environ.get("COMMENT_BODY", "")
     author_type = os.environ.get("COMMENT_AUTHOR_TYPE", "")
 
-    # Self/bot comments (the reaper's stale-claim:, this workflow's own
-    # confirmation, the validator) never requeue — they carry no disclaimer but
-    # are not human.
+    # Self/bot comments (the reaper's stale-claim:, this workflow's confirmation,
+    # the validator) never requeue — no disclaimer, but not human.
     if author_type == "Bot":
         print(f"requeue: bot/self comment on #{issue} — no-op")
         return EXIT_OK
@@ -1821,8 +1730,8 @@ def cmd_requeue_check(args):
     return EXIT_OK
 
 
-# The issue-form headings the bundled task-template produces, and the field
-# GitHub renders for a blank issue-form field. Section detection keys on these.
+# The issue-form headings the bundled task-template produces, and the placeholder
+# GitHub renders for a blank field. Section detection keys on these.
 VALIDATION_MARKER = {"type": "validation"}
 NO_RESPONSE_PLACEHOLDER = "_No response_"
 
@@ -2001,10 +1910,9 @@ def cmd_cleanup(args):
     return EXIT_OK
 
 
-# is the read side of single-sourcing: the disclaimer format and the machine
-# marker vocabulary live in the constants above, and every other consumer
-# derives from or is verified against them by executing this command rather
-# than re-declaring the literals.
+# --- subcommand: contract ----------------------------------------------------
+# The read side of single-sourcing: consumers fetch the disclaimer format and
+# marker vocabulary from here instead of re-declaring the literals.
 CONTRACT_FIELDS = {
     "disclaimer": lambda args: [disclaimer(args.worker)],
     "task-trailer": lambda args: [task_trailer(args.repo, args.issue, args.worker)],
@@ -2013,10 +1921,9 @@ CONTRACT_FIELDS = {
 
 
 def cmd_contract(args):
-    """Print an authoritative contract literal (no network). The single source of
-    truth for the disclaimer format and the marker vocabulary — the requeue
-    workflow filter, the test helpers, and the skill lint read these instead of
-    re-declaring them, so a format change lands in exactly one place."""
+    """Print an authoritative contract literal (no network) — the single source of
+    truth for the disclaimer format and marker vocabulary, so a format change lands
+    in one place."""
     for line in CONTRACT_FIELDS[args.field](args):
         print(line)
     return EXIT_OK
