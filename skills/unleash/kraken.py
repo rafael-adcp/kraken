@@ -2093,6 +2093,7 @@ CONTRACT_FIELDS = {
     "disclaimer": lambda args: [disclaimer(args.worker)],
     "task-trailer": lambda args: [task_trailer(args.repo, args.issue, args.worker)],
     "marker-types": lambda args: list(MARKER_TYPES),
+    "protocol-version": lambda args: [str(PROTOCOL_VERSION)],
 }
 
 

@@ -299,6 +299,11 @@ class ContractCommandTests(unittest.TestCase):
     def test_marker_types_echo_the_constant(self):
         self.assertEqual(self._run("marker-types"), list(kraken.MARKER_TYPES))
 
+    def test_protocol_version_echoes_the_constant(self):
+        # The authoritative accessor lint-skills.sh [1d] reads to keep
+        # plugin.json's declared kraken-protocol/<n> from drifting off the code.
+        self.assertEqual(self._run("protocol-version"), [str(kraken.PROTOCOL_VERSION)])
+
     def test_marker_types_are_the_protocol4_vocabulary(self):
         # Every type kraken.py emits (claim/heartbeat on the ref, the rest on
         # comments — including the non-state-changing `note`); requeue is
