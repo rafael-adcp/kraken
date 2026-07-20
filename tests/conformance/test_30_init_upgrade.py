@@ -11,6 +11,7 @@ trailing marker line), so the test needs no vendored fixture of a past release.
 """
 import filecmp
 import os
+import re
 import unittest
 
 from harness import KrakenConformanceTest, SCRIPTS
@@ -42,13 +43,20 @@ class InitUpgradeTests(KrakenConformanceTest):
                 if ("contents/%s" % dst) in l and "PUT" in l]
 
     def _drifted_src(self, name):
-        """A temp copy of the bundled asset with a trailing marker line — so it
-        differs from the bundled bytes (drift) while staying a plausible stale
-        vendored copy. --upgrade restores the exact bundled bytes over it."""
+        """A temp copy of the bundled asset that differs from the bundled bytes
+        (drift) while staying a plausible stale vendored copy; --upgrade restores
+        the exact bundled bytes over it. kraken.py is the drift-handshake
+        sentinel, and the HYBRID handshake only REFUSES on a PROTOCOL_VERSION gap
+        (a mere byte diff merely warns) — so its drift bumps the vendored version
+        too, keeping it a genuine protocol drift the next drain must refuse."""
         with open(BUNDLED[name], "r", encoding="utf-8") as f:
             text = f.read()
+        drifted = text + "\n# stale vendored copy (drifted)\n"
+        if name == "kraken.py":
+            drifted = re.sub(r"(?m)^PROTOCOL_VERSION\s*=\s*\d+",
+                             "PROTOCOL_VERSION = 999", drifted)
         src = os.path.join(self.state, "drifted-" + name)
-        self._write(src, text + "\n# stale vendored copy (drifted)\n")
+        self._write(src, drifted)
         return src
 
     def _seed_drift(self):

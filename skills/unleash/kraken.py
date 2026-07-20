@@ -814,13 +814,16 @@ def cmd_claim_next(args):
     if refused is not None:
         return refused
 
-    # Drift handshake (PROTOCOL.md drift guard): before the first claim, refuse to
-    # drain if the coordination repo's vendored .github/kraken.py differs from this
-    # worker's bundled copy, or that file cannot be read (fail closed).
-    ok, message = verify_protocol(repo)
-    if not ok:
+    # Drift handshake (PROTOCOL.md "Versioning"): before the first claim, run the
+    # hybrid check on the coordination repo's vendored .github/kraken.py. A
+    # protocol-version gap (or an unverifiable one) refuses (fail closed); a
+    # same-version byte difference only warns and proceeds.
+    action, message = verify_protocol(repo)
+    if action == "refuse":
         print(message)
         return EXIT_PROTOCOL_MISMATCH
+    if action == "warn":
+        print(message, file=sys.stderr)
 
     rows = classify_queue(repo, project, include_body=True)
     if rows is None:
@@ -1373,37 +1376,78 @@ def classify_asset(current, bundled):
 
 # --- drift handshake ---------------------------------------------------------
 # Before draining, a worker reads the coordination repo's vendored
-# `.github/kraken.py` and compares it byte-for-byte with its OWN bundled copy.
-# They are meant to be identical — `init` vendors the plugin's copy verbatim — so
-# any difference means the plugin and the coordination repo have drifted apart: a
-# stale parser (and, by implication, stale workflows) that silently mis-handle the
-# protocol. This turns that silent drift into a loud, actionable refusal. One
-# cheap contents read, fail closed: an unreadable vendored file refuses rather
-# than guessing.
+# `.github/kraken.py` and runs a HYBRID handshake against its OWN bundled copy.
+# The wire protocol — not the exact bytes — is the compatibility boundary:
+#   - the vendored file is unreadable/absent, or (once its bytes differ) its
+#     PROTOCOL_VERSION is unparseable or different from this worker's → the two
+#     sides may mis-handle the protocol, so refuse the drain (exit 12, fail
+#     closed), naming `init --upgrade`;
+#   - byte-different but the SAME PROTOCOL_VERSION → a compatible patch (docs,
+#     comments, non-wire code): warn loudly on stderr and proceed, so a
+#     docs-only release no longer bricks every drain and two workers on
+#     different plugin versions can share a queue while they speak one protocol;
+#   - byte-identical → silent, fully in sync.
+# One cheap contents read, fail closed on anything unverifiable.
 VENDORED_KRAKEN_PATH = ".github/kraken.py"
+
+_VENDORED_PROTOCOL_VERSION_RE = re.compile(rb"(?m)^PROTOCOL_VERSION\s*=\s*(\d+)")
+
+
+def parse_protocol_version(source):
+    """The integer value of the `PROTOCOL_VERSION = <n>` assignment in kraken.py
+    source *bytes*, or None when the source is absent or carries no parseable
+    assignment. Matched on the raw bytes (independent of any text decoding of the
+    vendored file) — the version compare the drift handshake gates on."""
+    if source is None:
+        return None
+    m = _VENDORED_PROTOCOL_VERSION_RE.search(source)
+    return int(m.group(1)) if m else None
 
 
 def verify_protocol(repo):
-    """Compare the coordination repo's vendored `.github/kraken.py` with this
-    worker's bundled copy. Returns (ok, message): ok is True only when the
-    vendored file is readable and byte-identical to the bundled one. A drifted
-    file — or an unreadable/absent one (fail closed) — refuses, with a message
-    pointing at `init --upgrade`."""
+    """Hybrid drift handshake against the coordination repo's vendored
+    `.github/kraken.py`. Returns ``(action, message)`` with ``action`` one of:
+
+      - ``"refuse"`` — the vendored file is unreadable/absent, or (once its bytes
+        differ) its PROTOCOL_VERSION is unparseable or differs from this
+        worker's. The wire protocol is the compatibility boundary, so a version
+        gap — or an unverifiable one — fails closed (the caller exits 12). The
+        message names `init --upgrade`.
+      - ``"warn"``   — byte-different but the SAME PROTOCOL_VERSION: a compatible
+        patch. The drain proceeds; the caller surfaces the message on stderr.
+      - ``"ok"``     — byte-identical: silent, fully in sync (empty message).
+
+    A pure decision but for the one contents read, so it is unit-testable without
+    a network."""
     vendored = gh_get_content(repo, VENDORED_KRAKEN_PATH)
     if vendored is None:
-        return (False,
+        return ("refuse",
                 "drift handshake: cannot verify the coordination repo's vendored "
                 "assets — %s is missing or unreadable. Refusing to drain (fail "
                 "closed). Run `kraken.py init --upgrade %s` to reinstall the "
                 "vendored assets." % (VENDORED_KRAKEN_PATH, repo))
-    if vendored != bundled_asset("kraken.py"):
-        return (False,
+    if vendored == bundled_asset("kraken.py"):
+        return ("ok", "")
+    theirs = parse_protocol_version(vendored)
+    if theirs is None:
+        return ("refuse",
                 "drift handshake: %s differs from this worker's bundled kraken.py "
-                "(plugin %s) — the coordination repo's vendored assets are stale. "
-                "Refusing to drain. Run `kraken.py init --upgrade %s` (or upgrade "
-                "this worker's plugin) so both sides agree." % (
-                    VENDORED_KRAKEN_PATH, plugin_version(), repo))
-    return (True, "")
+                "and its PROTOCOL_VERSION cannot be read — refusing to drain (fail "
+                "closed). Run `kraken.py init --upgrade %s` (or upgrade this "
+                "worker's plugin) so both sides agree." % (VENDORED_KRAKEN_PATH, repo))
+    if theirs != PROTOCOL_VERSION:
+        return ("refuse",
+                "drift handshake: the coordination repo's vendored %s speaks "
+                "kraken-protocol/%d but this worker speaks kraken-protocol/%d — "
+                "refusing to drain. Run `kraken.py init --upgrade %s` (or upgrade "
+                "this worker's plugin) so both sides speak the same protocol." % (
+                    VENDORED_KRAKEN_PATH, theirs, PROTOCOL_VERSION, repo))
+    return ("warn",
+            "drift handshake (warning): %s differs from this worker's bundled "
+            "kraken.py but both speak kraken-protocol/%d — proceeding. This is a "
+            "patch-level difference (docs/comments/non-wire code); run "
+            "`kraken.py init --upgrade %s` to re-sync the vendored assets when "
+            "convenient." % (VENDORED_KRAKEN_PATH, PROTOCOL_VERSION, repo))
 
 
 # Each bundled asset init commits: (bundled filename, destination path in the

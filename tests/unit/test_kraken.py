@@ -528,7 +528,7 @@ class ClaimNextIterationTests(unittest.TestCase):
         self._orig_verify = kraken.verify_protocol
         # The protocol handshake is exercised by its own tests; here it always
         # passes so only the iteration logic is under test.
-        kraken.verify_protocol = lambda repo: (True, "")
+        kraken.verify_protocol = lambda repo: ("ok", "")
         self.attempted = []
 
     def tearDown(self):
@@ -930,9 +930,11 @@ class AssetClassifierTests(unittest.TestCase):
 
 
 class ProtocolHandshakeTests(unittest.TestCase):
-    """The drift handshake's pure logic, with the one contents read mocked: the
-    vendored `.github/kraken.py` is compared byte-for-byte with this worker's
-    bundled copy, and the match / drift / fail-closed decision gates a drain."""
+    """The hybrid drift handshake's pure logic, with the one contents read
+    mocked. The wire protocol is the compatibility boundary: an unreadable
+    vendored `.github/kraken.py`, or a byte-different one whose PROTOCOL_VERSION
+    is unparseable or differs, REFUSES (fail closed); a byte-different copy with
+    the SAME version only WARNS and proceeds; a byte-identical copy is silent."""
 
     def setUp(self):
         self._orig_get = kraken.gh_get_content
@@ -943,26 +945,59 @@ class ProtocolHandshakeTests(unittest.TestCase):
     def _vendored(self, raw):
         kraken.gh_get_content = lambda repo, path: raw
 
+    def _bump_version(self, source, n):
+        import re as _re
+        return _re.sub(rb"(?m)^PROTOCOL_VERSION\s*=\s*\d+",
+                       b"PROTOCOL_VERSION = %d" % n, source)
+
     def test_matching_content_is_ok(self):
         # The coordination repo vendors the exact bundled kraken.py -> in sync.
         self._vendored(kraken.bundled_asset("kraken.py"))
-        ok, msg = kraken.verify_protocol("o/tasks")
-        self.assertTrue(ok)
+        action, msg = kraken.verify_protocol("o/tasks")
+        self.assertEqual(action, "ok")
         self.assertEqual(msg, "")
 
-    def test_drift_refuses_and_names_upgrade(self):
-        self._vendored(b"# a stale, drifted kraken.py\n")
-        ok, msg = kraken.verify_protocol("o/tasks")
-        self.assertFalse(ok)
+    def test_same_version_byte_drift_warns_and_proceeds(self):
+        # Byte-different (a docs/patch-level change) but the SAME PROTOCOL_VERSION
+        # -> warn, do not refuse. This is what stops patch releases bricking the
+        # fleet.
+        self._vendored(kraken.bundled_asset("kraken.py") + b"\n# patch-level drift\n")
+        action, msg = kraken.verify_protocol("o/tasks")
+        self.assertEqual(action, "warn")
+        self.assertIn("kraken-protocol/%d" % kraken.PROTOCOL_VERSION, msg)
+        self.assertIn("proceeding", msg)
+
+    def test_version_mismatch_refuses_and_names_upgrade(self):
+        # Byte-different AND a different PROTOCOL_VERSION -> the wire contracts
+        # disagree -> refuse (fail closed), naming init --upgrade.
+        self._vendored(self._bump_version(kraken.bundled_asset("kraken.py"),
+                                          kraken.PROTOCOL_VERSION + 1))
+        action, msg = kraken.verify_protocol("o/tasks")
+        self.assertEqual(action, "refuse")
+        self.assertIn("kraken-protocol/%d" % (kraken.PROTOCOL_VERSION + 1), msg)
+        self.assertIn("init --upgrade", msg)
+
+    def test_unparseable_version_refuses(self):
+        # Byte-different and no readable PROTOCOL_VERSION -> cannot prove the
+        # protocol matches -> refuse (fail closed).
+        self._vendored(b"# a stale, drifted kraken.py with no version line\n")
+        action, msg = kraken.verify_protocol("o/tasks")
+        self.assertEqual(action, "refuse")
         self.assertIn("differs", msg)
         self.assertIn("init --upgrade", msg)
 
     def test_unreadable_vendored_file_fails_closed(self):
         self._vendored(None)  # 404 / transport fault both surface as None
-        ok, msg = kraken.verify_protocol("o/tasks")
-        self.assertFalse(ok)
+        action, msg = kraken.verify_protocol("o/tasks")
+        self.assertEqual(action, "refuse")
         self.assertIn("cannot verify", msg)
         self.assertIn("init --upgrade", msg)
+
+    def test_parse_protocol_version(self):
+        self.assertEqual(
+            kraken.parse_protocol_version(b"x = 1\nPROTOCOL_VERSION = 7\ny = 2\n"), 7)
+        self.assertIsNone(kraken.parse_protocol_version(b"no version here"))
+        self.assertIsNone(kraken.parse_protocol_version(None))
 
 
 if __name__ == "__main__":

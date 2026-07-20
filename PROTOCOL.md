@@ -18,6 +18,20 @@ version it targets (this plugin: in `.claude-plugin/plugin.json`), and the
 `Kraken-Task:` commit trailer's `kraken@<version>` maps any delivered commit
 back to a protocol revision via the release notes.
 
+**Drift handshake.** The protocol version is the compatibility boundary, so a
+worker MAY guard against draining a queue it can no longer speak to. The
+reference worker does: before its first claim it reads the coordination repo's
+vendored copy of the transition program (this plugin: `.github/kraken.py`) and
+runs a **hybrid handshake** against its own bundled copy. If that file is
+unreadable/absent, or (once its bytes differ) its declared protocol version is
+unparseable or differs from the worker's, the worker **MUST NOT** drain — it
+fails closed (this plugin: exit 12), naming the re-sync fix (`init --upgrade`).
+A byte difference with the **same** protocol version is a compatible patch
+(docs, comments, non-wire code): the worker SHOULD warn loudly and proceed, so a
+patch-level release does not brick the fleet and two workers on different plugin
+versions can share one queue while they speak the same protocol. A byte-identical
+copy is fully in sync and passes silently.
+
 **What changed in `kraken-protocol/4`.** Claiming became a true **compare-and-swap
 on a git ref**. Through protocol/3 the claim was arbitrated *after the fact*:
 because adding a label and posting a comment both succeed for every racer, the

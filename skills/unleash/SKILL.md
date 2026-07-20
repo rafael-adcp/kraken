@@ -133,11 +133,14 @@ time:
    identically every time (semantics: `PROTOCOL.md` §5): a lost CAS (another
    worker already holds the ref) or a task that turned held since listing is
    skipped and the next candidate tried, writing nothing behind. Before its first
-   claim it also runs a **drift handshake** — one cheap read of the coordination
-   repo's vendored `.github/kraken.py` compared byte-for-byte with this worker's
-   bundled copy — and refuses to drain if they differ or the file is unreadable
-   (fail closed), so stale vendored assets surface as a loud error, not silent
-   corruption. Yours is only the exit code:
+   claim it also runs a **hybrid drift handshake** — one cheap read of the
+   coordination repo's vendored `.github/kraken.py` checked against this worker's
+   bundled copy. The protocol version is the compatibility boundary: an
+   unreadable/absent file, or (once the bytes differ) a vendored `PROTOCOL_VERSION`
+   that is unparseable or different from this worker's, refuses the drain (fail
+   closed), so a protocol gap surfaces as a loud error, not silent corruption; a
+   byte difference with the **same** version is a compatible patch, warned on
+   stderr while the drain proceeds. Yours is only the exit code:
 
    - `0` — claimed. The won task (number, title, and body — its goal /
      acceptance / notes) is printed, so you can brief the subagent without a
@@ -145,11 +148,14 @@ time:
      `{issue, title, body}` object on the final stdout line instead.)
    - `3` — nothing claimable: the queue is empty, or every candidate turned out
      held or lost as it iterated. Not an error — the drain is done (step 3).
-   - `12` — drift handshake failed: the coordination repo's vendored
-     `.github/kraken.py` differs from this worker's bundled copy, or that file
-     can't be read. The drain refused before claiming; the message names the
-     fix — run `/kraken:init OWNER/tasks --upgrade` (or upgrade this worker's
-     plugin) so both sides agree, then retry. Do not improvise around it.
+   - `12` — drift handshake refused: the coordination repo's vendored
+     `.github/kraken.py` declares a different `PROTOCOL_VERSION` than this
+     worker's (or its version, or the file itself, can't be read). The drain
+     refused before claiming — the two sides may mis-handle the protocol; the
+     message names the fix — run `/kraken:init OWNER/tasks --upgrade` (or upgrade
+     this worker's plugin) so both sides speak the same protocol, then retry. A
+     same-version byte difference does **not** land here — it only warns on
+     stderr and the drain proceeds. Do not improvise around a refusal.
    - `20` — gh/network failure, claim state unknown. Re-check the issue's real
      state before retrying; never move to another task while a claim of yours is
      ambiguous.
