@@ -301,10 +301,12 @@ class ContractCommandTests(unittest.TestCase):
 
     def test_marker_types_are_the_protocol4_vocabulary(self):
         # Every type kraken.py emits (claim/heartbeat on the ref, the rest on
-        # comments); requeue is operator-only and deliberately absent.
+        # comments — including the non-state-changing `note`); requeue is
+        # operator-only and deliberately absent.
         self.assertEqual(
             set(kraken.MARKER_TYPES),
-            {"claim", "heartbeat", "needs-decision", "delivered", "released", "stale-claim"})
+            {"claim", "heartbeat", "needs-decision", "delivered", "released",
+             "stale-claim", "note"})
         self.assertNotIn("requeue", kraken.MARKER_TYPES)
 
     def test_retired_contract_fields_are_gone(self):

@@ -92,7 +92,7 @@ time:
 | `kraken.py list-startable OWNER/tasks <project>` | (read-only) startable candidates, oldest first |
 | `kraken.py claim OWNER/tasks <issue> <worker-name>` | queued → `in-progress`: guard, then the compare-and-swap on the claim ref; on a win, projects the label + claim comment |
 | `kraken.py heartbeat OWNER/tasks <issue> <worker-name> "<progress>"` | liveness — advances the claim ref to a fresh commit, keeping the reaper away. **Posts no comment** |
-| `kraken.py note OWNER/tasks <issue> <worker-name> <body-file>` | posts a free-form worker comment (assumptions, a note) with the disclaimer prepended and no marker; changes no label and no claim ref |
+| `kraken.py note OWNER/tasks <issue> <worker-name> <body-file>` | posts a free-form worker comment (assumptions, a note) with the disclaimer prepended and a non-state-changing `note` marker (the structural worker-comment signal); changes no label and no claim ref |
 | `kraken.py escalate OWNER/tasks <issue> <worker-name> <question-file>` | `in-progress` → `needs-decision`: question posted, labels swapped, claim ref released |
 | `kraken.py deliver OWNER/tasks <issue> <worker-name> <result-file> [pr-url]` | `in-progress` → `awaiting-merge`: result posted, labels swapped, claim ref released |
 | `kraken.py release OWNER/tasks <issue> <worker-name> [reason]` | `in-progress` → queued, honestly: `released` marker posted, label dropped, claim ref deleted (deleting the ref is what frees the task) |
