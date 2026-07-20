@@ -30,6 +30,17 @@ mkdir -p "$GH_STUB_STATE/issues"
 : > "$GH_STUB_STATE/log"
 trap 'rm -rf "$SCRATCH"' EXIT
 
+# The drift handshake (PROTOCOL.md "Drift handshake") reads the coordination
+# repo's vendored .github/kraken.py before the first claim and refuses to drain
+# (exit 12, fail closed) on a protocol mismatch or an unreadable file. Vendor
+# this worker's bundled copy into the stub so the handshake sees a byte-identical,
+# same-version sentinel and passes silently — faithfully simulating a properly
+# init-ed coordination repo. Without this every scenario would refuse before
+# claiming; each scenario exercises the SKILL's judgment, not the handshake
+# (which the conformance suite pins on its own).
+mkdir -p "$GH_STUB_STATE/contents/.github"
+cp "$SCRIPTS/kraken.py" "$GH_STUB_STATE/contents/.github/kraken.py"
+
 # The gh-stub must win over the real gh for BOTH repos in this run.
 export PATH="$GH_STUB:$PATH"
 
