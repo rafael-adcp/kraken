@@ -110,10 +110,12 @@ MARKER_RE = re.compile(r"<!--\s*kraken\s+(\{.*?\})\s*-->")
 
 # Every marker "type" this program emits — the protocol/4 vocabulary. `claim`
 # and `heartbeat` ride the claim ref's commit message; the rest head comments.
-# (`requeue` is operator-only.) The lint checks each against PROTOCOL.md's marker
-# table via `kraken.py contract marker-types`.
+# `note` heads a free-form worker comment and changes no machine state — it
+# exists only so the comment is recognizable as worker-authored (§4). (`requeue`
+# is operator-only.) The lint checks each against PROTOCOL.md's marker table via
+# `kraken.py contract marker-types`.
 MARKER_TYPES = ("claim", "heartbeat", "needs-decision", "delivered",
-                "released", "stale-claim")
+                "released", "stale-claim", "note")
 
 
 def make_marker(payload):
@@ -178,15 +180,13 @@ def compose_comment(worker, prose, payload):
 
 def compose_note(worker, prose):
     """A free-form worker comment (assumptions, progress prose): the attribution
-    disclaimer then the prose, blank-line separated, and NO hidden marker — a note
-    carries no machine state (PROTOCOL.md §4), so it never wears a marker. The
-    leading disclaimer is load-bearing, not cosmetic: it is exactly what makes
-    requeue-check read this as a worker comment and never an operator reply."""
-    prose = (prose or "").strip("\n")
-    parts = [disclaimer(worker)]
-    if prose:
-        parts.append(prose)
-    return "\n\n".join(parts)
+    disclaimer, the prose, then a single non-state-changing `note` marker
+    (PROTOCOL.md §4), blank-line separated so GitHub keeps them distinct. The
+    marker is what makes requeue-check read this as a worker comment
+    *structurally* — the disclaimer stays as human-facing attribution but is no
+    longer the arbiter. A `note` marker carries no machine state: reap, requeue,
+    and validate all treat it as inert (they key on their own marker types)."""
+    return compose_comment(worker, prose, {"type": "note", "worker": worker})
 
 
 # --- transport ---------------------------------------------------------------
@@ -1801,13 +1801,25 @@ def cmd_reap(args):
 
 
 def is_worker_comment(body):
-    """Whether a comment was posted by a worker, by PROTOCOL.md §4's contract:
-    every worker comment MUST *open* with the attribution disclaimer blockquote,
-    so a comment whose FIRST line does not is (by the protocol's own definition)
-    a human's. The match is derived from the DISCLAIMER constant — the prefix up
-    to the worker-name backtick, so it is name-agnostic and never a second
-    hand-kept copy of the format. Only the first line counts: an operator who
-    quotes the disclaimer mid-reply is still a human."""
+    """Whether a comment was posted by a worker — requeue-on-reply's discriminator
+    (PROTOCOL.md §4). **Structural**: a worker comment is one that carries a hidden
+    kraken marker on ANY line. Every worker-posted comment now wears one (the
+    transition markers for state changes, the `note` marker for a free-form note),
+    so marker presence — not the presentation text — is the arbiter, closing the
+    fragility class kraken-protocol removed everywhere else.
+
+    A comment whose FIRST line opens with the attribution disclaimer also counts,
+    as a back-compat fallback for legacy threads and any comment written before
+    `note` gained its marker (the prefix is derived from the DISCLAIMER constant,
+    never a second copy). The disclaimer stays the human-facing attribution but is
+    no longer load-bearing for requeue.
+
+    Accepted edge (§4): an operator who pastes a raw kraken marker into a reply is
+    read as a worker and will not requeue — the same class of edge as an operator
+    quoting the disclaimer on the first line; removing the held label by hand is
+    the escape hatch."""
+    if any(parse_marker(line) is not None for line in body.split("\n")):
+        return True
     prefix = DISCLAIMER.split("{worker}")[0]  # "> 🐙 **Kraken worker `"
     first_line = body.split("\n", 1)[0].rstrip("\r")
     return first_line.startswith(prefix)
@@ -1837,22 +1849,23 @@ def cmd_requeue_check(args):
     through the environment (COMMENT_BODY / COMMENT_AUTHOR_TYPE), never argv —
     the same untrusted-input discipline the workflow kept, so a comment carrying
     $(...) or backticks is only ever data. No-ops (never requeue): bot/self
-    comments, worker comments (disclaimer present), and comments on an issue
-    carrying no held label. needs-decision requeues on ANY bare operator comment;
-    awaiting-merge (delivered) only on an explicit requeue directive. Exit 0
-    always on a clean run, 20 on gh/transport failure."""
+    comments, worker comments (any hidden marker, or a legacy disclaimer first
+    line — §4), and comments on an issue carrying no held label. needs-decision
+    requeues on ANY bare operator comment; awaiting-merge (delivered) only on an
+    explicit requeue directive. Exit 0 always on a clean run, 20 on gh/transport
+    failure."""
     repo, issue = args.repo, args.issue
     body = os.environ.get("COMMENT_BODY", "")
     author_type = os.environ.get("COMMENT_AUTHOR_TYPE", "")
 
     # Self/bot comments (the reaper's stale-claim:, this workflow's confirmation,
-    # the validator) never requeue — no disclaimer, but not human.
+    # the validator) never requeue — user.type is the tell, not the marker.
     if author_type == "Bot":
         print(f"requeue: bot/self comment on #{issue} — no-op")
         return EXIT_OK
 
     if is_worker_comment(body):
-        print(f"requeue: worker comment (disclaimer present) on #{issue} — no-op")
+        print(f"requeue: worker comment (marker or disclaimer) on #{issue} — no-op")
         return EXIT_OK
 
     labels = issue_label_names(repo, issue)

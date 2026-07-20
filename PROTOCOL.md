@@ -153,7 +153,7 @@ Legal transitions and who performs them:
 | `in-progress` → `awaiting-merge` | worker | delivery (§8) |
 | `in-progress` → queued | worker | release (§9) |
 | `needs-decision` → queued | operator | reply on the thread — the requeue workflow (§6) drops the label; or remove it by hand |
-| `needs-decision` → queued | requeue workflow | a non-tentacle comment arrives (§4 disclaimer absent) |
+| `needs-decision` → queued | requeue workflow | a non-tentacle comment arrives (§4 marker/disclaimer absent) |
 | `awaiting-merge` → queued | operator | review feedback on the thread, then remove the label (a bare comment does NOT requeue — see §6) |
 | `awaiting-merge` → closed | merge | the PR's `Closes` reference (§8), or a manual close |
 
@@ -195,6 +195,7 @@ the surrounding prose is a pure human courtesy. **Grammar** (normative):
 | `delivered` | `worker`, `pr`? | comment | delivery | result posted, review pending (optional `pr` URL) (§8) |
 | `released` | `worker`, `reason`? | comment | release | claim handed back (optional `reason`) (§9) |
 | `stale-claim` | `reason`? | comment | reconciler | a stale/orphaned claim was reclaimed (§6) |
+| `note` | `worker` | comment | note | free-form worker comment (assumptions/progress); carries **no** machine state — inert to reap/requeue/validate (SKILL.md §2a) |
 | `requeue` | — | comment | operator | bounce a delivered (`awaiting-merge`) task back for rework (§6) |
 | `validation` | — | comment | validator | task fails the queue-entry gate; the comment lists what to fix (§2.1) |
 
@@ -203,8 +204,10 @@ the claim is decided by the ref CAS (§5), not by reading markers: the `claim`
 and `heartbeat` markers on the ref carry worker identity and progress for
 `status` to render, and the comment markers (`needs-decision`, `delivered`,
 `released`, `stale-claim`) are the human-facing record of a transition plus the
-`pr`/`reason` fields tooling reads. No consumer reconstructs ownership from the
-comment thread.
+`pr`/`reason` fields tooling reads. The `note` marker rides a free-form worker
+comment and records nothing — it changes no label and no claim ref; it exists
+only so a note is recognizable as worker-authored (below). No consumer
+reconstructs ownership from the comment thread.
 
 **Reading (markers only).** A conforming consumer reads machine state from the
 hidden marker and **nothing else**: it MUST NOT parse the visible prose of a
@@ -214,8 +217,8 @@ keyword is inert — it can never occupy a machine-line position.
 
 Every worker-posted coordination-repo comment MUST open with the
 **attribution disclaimer** — every worker may authenticate as the operator,
-so the disclaimer is what lets the timeline distinguish tentacle comments
-from human ones:
+so the disclaimer is what lets a *human reading the timeline* distinguish
+tentacle comments from human ones:
 
 ```
 > 🐙 **Kraken worker `<worker-name>`** — automated comment from a kraken tentacle, not a human.
@@ -225,9 +228,22 @@ The disclaimer is deliberately **agent-agnostic**: it names no implementation
 ("a kraken tentacle", never "a Claude Code tentacle"), so every conforming worker
 — whatever agent drives it — emits the *identical* line and the timeline reads
 uniformly. This is what lets a second implementation drain the same queue without
-diverging the human-vs-tentacle discriminator. The machine-recognized part is the
-blockquote **up to the worker-name backtick** (`> 🐙 **Kraken worker \``): that
-shape is the contract, and it is all the `requeue-on-reply.yml` filter matches on.
+diverging the human-vs-tentacle discriminator.
+
+**The machine discriminator is the hidden marker, not the disclaimer.** Every
+worker-posted comment also carries a marker (a transition marker for a state
+change, the `note` marker for a free-form note), and marker presence is the
+normative worker-comment discriminator: a consumer that must tell a worker
+comment from an operator reply (the `requeue-on-reply.yml` filter) treats a
+comment as worker-authored when it **carries any valid kraken marker**, falling
+back to a first line opening with the disclaimer prefix (`> 🐙 **Kraken worker \``)
+for legacy or marker-less threads. The disclaimer stays a MUST as the human-facing
+attribution, but it is **no longer load-bearing** for requeue — machine semantics
+ride the marker, presentation text does not. **Accepted edge:** an operator who
+pastes a raw kraken marker into a reply is read as a worker and will not requeue
+(the same class of edge as an operator quoting the disclaimer on the first line);
+removing the held label by hand is the escape hatch.
+
 The disclaimer sits *above* the prose and marker with a blank line between, or
 GitHub folds the body into the quote. The block above is **illustrative**: the
 Kraken reference implementation defines the format once as the `DISCLAIMER`
@@ -313,20 +329,24 @@ success (the delete is idempotent).
   ([`skills/unleash/requeue-on-reply.yml`](skills/unleash/requeue-on-reply.yml)):
   on a new comment, it removes the holding label so the task requeues — so the
   operator's gesture collapses from "reply **and** remove the label" to just
-  "reply". The human-vs-tentacle discriminator is §4's attribution disclaimer:
-  a comment that does **not** open with the `> 🐙 **Kraken worker …`
-  blockquote is treated as the operator. It is a **no-op** on worker comments
-  (disclaimer present), on issues carrying no held label, and on bot/self
+  "reply". The human-vs-tentacle discriminator is §4's hidden marker: a comment
+  carrying any valid kraken marker — or, as a legacy fallback, opening with the
+  `> 🐙 **Kraken worker …` blockquote — is treated as a worker; every other
+  comment is the operator. It is a **no-op** on worker comments (marker or
+  disclaimer present), on issues carrying no held label, and on bot/self
   comments (`user.type == Bot`) — which is what keeps the reaper's own
   `stale-claim` comment from instantly undoing the escalation it just posted.
   The two held states are handled asymmetrically: a bare operator comment
   requeues **`needs-decision`** (a human comment is almost always the answer;
   a "let me think" self-corrects via re-escalation), but **`awaiting-merge`**
   is already *delivered* and is left held unless the comment carries an
-  explicit, structured **requeue directive** — either a
-  `<!-- kraken {"type":"requeue"} -->` marker or a standalone `requeue:` line
-  (a line whose only content is `requeue`/`requeue:`). A `requeue:` buried in
-  a prose sentence MUST NOT bounce a ready branch back to a worker.
+  explicit **requeue directive** — a standalone `requeue:` line (a line whose
+  only content is `requeue`/`requeue:`). A `requeue:` buried in a prose sentence
+  MUST NOT bounce a ready branch back to a worker. (Because any comment bearing
+  a hidden marker now reads as worker-authored, a pasted
+  `<!-- kraken {"type":"requeue"} -->` marker is subsumed by the §4 accepted
+  edge — the standalone line, or removing the label by hand, is the operator's
+  path.)
   Requeuing is idempotent, so a burst of comments requeues once (the first
   drops the label; the rest find nothing held).
 

@@ -37,25 +37,48 @@ def disclaimer_body(worker, *rest):
 # --- human-vs-worker discrimination ------------------------------------------
 
 class WorkerCommentTests(unittest.TestCase):
-    """requeue-on-reply's discriminator: a comment is a worker's iff its FIRST
-    line is the attribution disclaimer (PROTOCOL.md §4). Derived from the
-    DISCLAIMER constant, so it is name-agnostic and never a second copy."""
+    """requeue-on-reply's discriminator: a comment is a worker's iff it carries a
+    hidden kraken marker on any line (PROTOCOL.md §4), with a first-line
+    attribution disclaimer as a legacy fallback. Both are derived from kraken.py
+    constants, never a second copy."""
 
     def test_disclaimer_headed_comment_is_a_worker(self):
         self.assertTrue(kraken.is_worker_comment(disclaimer_body("env-1", "some prose")))
 
+    def test_marker_bearing_comment_is_a_worker(self):
+        # The structural discriminator: any hidden marker → worker, even without a
+        # leading disclaimer line.
+        body = "prose\n\n" + kraken.make_marker({"type": "delivered", "worker": "w1"})
+        self.assertTrue(kraken.is_worker_comment(body))
+
+    def test_note_comment_is_a_worker(self):
+        # compose_note now carries a `note` marker, so a note is worker-authored
+        # structurally — not merely because of its disclaimer line.
+        self.assertTrue(kraken.is_worker_comment(kraken.compose_note("env-1", "assuming X")))
+
+    def test_operator_pasting_a_raw_marker_is_read_as_worker(self):
+        # Accepted edge (PROTOCOL.md §4): a raw kraken marker pasted by an
+        # operator reads as a worker comment; hand-removing the label is the
+        # escape hatch.
+        self.assertTrue(kraken.is_worker_comment(
+            "bounce it\n\n" + kraken.make_marker({"type": "requeue"})))
+
     def test_bare_human_comment_is_not_a_worker(self):
         self.assertFalse(kraken.is_worker_comment("option B, go"))
 
-    def test_disclaimer_mid_body_is_not_a_worker(self):
-        # An operator quoting the disclaimer mid-reply is still a human — only
-        # the opening line classifies.
+    def test_malformed_marker_does_not_classify_as_worker(self):
+        # A line that is not a decodable kraken marker (no string type) is inert.
+        self.assertFalse(kraken.is_worker_comment("here is <!-- kraken not-json -->"))
+
+    def test_disclaimer_mid_body_still_a_worker_via_no_marker_is_human(self):
+        # An operator quoting the disclaimer mid-reply, with no marker anywhere,
+        # is still a human — only the opening line counts for the disclaimer path.
         body = "answering below:\n\n" + kraken.disclaimer("env-1") + "\n\noption B"
         self.assertFalse(kraken.is_worker_comment(body))
 
     def test_name_agnostic(self):
-        # Any worker name matches — the filter keys on the prefix up to the
-        # opening backtick, not a specific name.
+        # Any worker name matches — the disclaimer fallback keys on the prefix up
+        # to the opening backtick, not a specific name.
         for name in ("env-1", "kraken-copilot-9", "a"):
             self.assertTrue(kraken.is_worker_comment(disclaimer_body(name)))
 
@@ -332,6 +355,14 @@ class RequeueCheckCommandTests(unittest.TestCase):
         self.assertEqual(self.swaps, [])
         self.assertEqual(self.posts, [])
 
+    def test_note_marker_comment_is_a_noop(self):
+        # A worker note now carries a `note` marker; requeue-check must read it as
+        # a worker comment structurally and leave needs-decision held.
+        rc = self._run(1, ["needs-decision"], kraken.compose_note("w1", "assuming X"), "User")
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(self.swaps, [])
+        self.assertEqual(self.posts, [])
+
     def test_needs_decision_requeues_on_bare_reply(self):
         rc = self._run(1, ["kraken-task", "needs-decision"], "option B", "User")
         self.assertEqual(self.swaps, [(str(1), "needs-decision", None)])
@@ -348,10 +379,16 @@ class RequeueCheckCommandTests(unittest.TestCase):
         self.assertEqual(self.swaps, [(str(1), "awaiting-merge", None)])
         self.assertTrue(self.posts[0][1].startswith("requeue: explicit requeue"))
 
-    def test_awaiting_merge_requeues_on_marker(self):
+    def test_awaiting_merge_pasted_requeue_marker_is_read_as_worker(self):
+        # Accepted edge (PROTOCOL.md §4): a comment carrying ANY hidden marker now
+        # reads as worker-authored, so a pasted requeue marker no longer bounces a
+        # delivered task — the standalone `requeue:` line, or hand-removal, is the
+        # operator's path.
         body = "bounce\n\n" + kraken.make_marker({"type": "requeue"})
         rc = self._run(1, ["awaiting-merge"], body, "User")
-        self.assertEqual(self.swaps, [(str(1), "awaiting-merge", None)])
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(self.swaps, [])
+        self.assertEqual(self.posts, [])
 
     def test_no_held_label_is_a_noop(self):
         rc = self._run(1, ["kraken-task"], "nice work", "User")

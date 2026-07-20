@@ -39,6 +39,16 @@ class RequeueOnReplyTests(KrakenConformanceTest):
                          "#2b operator reply quoting the disclaimer mid-body was misread as a worker comment")
         self.assertTrue(self.last_comment(20).startswith("requeue: "), "#2b missing requeue confirmation comment")
 
+        # #2c — structural discrimination: a marker-bearing worker comment with NO
+        # leading disclaimer is still recognized as a worker and does not requeue.
+        self.mk_issue(21, "marker-only worker comment must not requeue needs-decision",
+                      "kraken-task", "project:app", "needs-decision")
+        r = self.run_case(21, 'progress\n\n<!-- kraken {"type":"note","worker":"w1"} -->', "User")
+        self.assertEqual(r.rc, 0, "#2c run")
+        self.assertTrue(self.has_label(21, "needs-decision"),
+                        "#2c a marker-bearing worker comment wrongly requeued needs-decision")
+        self.assertEqual(self.comment_count(21), 0, "#2c got a comment it should not have")
+
         self.mk_issue(3, "no held label", "kraken-task", "project:app")
         r = self.run_case(3, "nice work everyone", "User")
         self.assertEqual(r.rc, 0, "#3 run")
@@ -63,12 +73,17 @@ class RequeueOnReplyTests(KrakenConformanceTest):
                          "#6 awaiting-merge not removed on a standalone requeue: directive")
         self.assertTrue(self.last_comment(6).startswith("requeue: "), "#6 missing requeue confirmation comment")
 
-        # #6b — awaiting-merge bounced back by the structured protocol/3 requeue marker.
-        self.mk_issue(60, "awaiting-merge, structured requeue marker", "kraken-task", "project:app", "awaiting-merge")
+        # #6b — accepted edge (PROTOCOL.md §4): a comment carrying ANY hidden marker
+        # now reads as worker-authored, so a pasted requeue marker no longer bounces
+        # a delivered task. The standalone `requeue:` line (#6) — which carries no
+        # marker — or hand-removal is the operator's path.
+        self.mk_issue(60, "awaiting-merge, pasted requeue marker reads as worker",
+                      "kraken-task", "project:app", "awaiting-merge")
         r = self.run_case(60, 'bounce it back\n\n<!-- kraken {"type":"requeue"} -->', "User")
         self.assertEqual(r.rc, 0, "#6b run")
-        self.assertFalse(self.has_label(60, "awaiting-merge"), "#6b awaiting-merge not removed on a requeue marker")
-        self.assertTrue(self.last_comment(60).startswith("requeue: "), "#6b missing requeue confirmation comment")
+        self.assertTrue(self.has_label(60, "awaiting-merge"),
+                        "#6b a pasted marker was misread and wrongly bounced delivered work")
+        self.assertEqual(self.comment_count(60), 0, "#6b got a comment it should not have")
 
         # #6c — accidental-collision fix: a prose "requeue:" must NOT bounce work.
         self.mk_issue(61, "awaiting-merge, requeue: buried in prose", "kraken-task", "project:app", "awaiting-merge")
