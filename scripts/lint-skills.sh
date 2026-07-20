@@ -14,6 +14,7 @@ INIT="skills/init/SKILL.md"
 STATUS="skills/status/SKILL.md"
 README="README.md"
 PROTOCOL="PROTOCOL.md"
+PLUGIN=".claude-plugin/plugin.json"
 TEMPLATE="skills/unleash/task-template.yml"
 REAPER="skills/unleash/reclaim-stale.yml"
 REQUEUE="skills/unleash/requeue-on-reply.yml"
@@ -83,8 +84,24 @@ if command -v python3 >/dev/null 2>&1; then
   done
   [ "$fail" -eq "$fail_before" ] \
     && note "docs quote the attribution disclaimer illustratively"
+
+  # [1d] plugin.json's declared protocol version tracks kraken.py's
+  # PROTOCOL_VERSION — the drift class that let plugin.json advertise
+  # kraken-protocol/3 long after the protocol/4 bump. Executed, not diffed:
+  # the constant is the single source, and the declaration must equal it.
+  echo "[1d] protocol version (plugin.json vs kraken.py PROTOCOL_VERSION)"
+  fail_before=$fail
+  pv="$(kcontract protocol-version)"
+  declared="$(grep -oE 'kraken-protocol/[0-9]+' "$PLUGIN" | sort -u)"
+  if [ -z "$declared" ]; then
+    err "$PLUGIN declares no kraken-protocol/<n> version"
+  elif [ "$declared" != "kraken-protocol/$pv" ]; then
+    err "$PLUGIN declares '$declared' but kraken.py PROTOCOL_VERSION is $pv"
+  fi
+  [ "$fail" -eq "$fail_before" ] \
+    && note "plugin.json declares kraken-protocol/$pv, matching kraken.py"
 else
-  note "python3 unavailable — skipping contract-derived checks (1b–1c)"
+  note "python3 unavailable — skipping contract-derived checks (1b–1d)"
 fi
 
 # --- 2. Every "step N" reference points at a step that exists ---------------
