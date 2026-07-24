@@ -481,6 +481,33 @@ alternatives table in
 </details>
 
 <details>
+<summary><b>Is the Copilot CLI worker as self-healing as the Claude Code one?</b></summary>
+
+At the protocol layer, yes — **"agent-agnostic"** in [PROTOCOL.md](PROTOCOL.md)
+means the **wire contract**: the labels, the claim-ref CAS, the hidden markers,
+and the attribution disclaimer are identical for every harness. It does **not**
+promise identical failure-recovery latency, because the recovery machinery is
+harness-specific: the bundled `SessionEnd`/`StopFailure` hooks are **Claude Code
+hook events** and never fire around a `copilot` process.
+
+The Copilot harness gets its equivalent from
+[`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) itself: `kraken.py claim`
+records the open claim in `~/.kraken/claim-<worker>.json` and every terminal
+transition (deliver/escalate/release) removes it, so when the `copilot` process
+exits with that file still present the drain provably died holding the claim —
+crash, kill, or a rate-limit abort — and the loop runs `kraken.py release` on
+the spot. Its exit/Ctrl-C trap does the same when the loop itself is stopped
+mid-drain. The release is scoped to the loop's own `--worker-name`, so a
+co-located worker's live claim is never touched.
+
+The asymmetry that remains: a **bare** `copilot -p …` invocation outside the
+loop has no supervisor, so a death there waits for the ~6h reconciler — just
+like a hard kill / power loss does on either harness. If you drain with
+Copilot, run it through the loop.
+
+</details>
+
+<details>
 <summary><b>How do I update the plugin?</b></summary>
 
 `/plugin marketplace update kraken`. The plugin is pinned to the version in its

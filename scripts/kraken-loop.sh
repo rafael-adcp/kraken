@@ -11,6 +11,11 @@
 # so an idle queue never spends a token. The operator owns cadence + stop
 # (Ctrl-C); it never outlives this terminal. Run it straight from a checkout.
 #
+# Self-heal: the bundled SessionEnd/StopFailure hooks only fire inside a Claude
+# Code session, so the loop carries its own — if a drain dies holding a claim
+# (copilot crash, rate-limit abort, Ctrl-C), it releases the claim on the spot
+# via hooks/lib-release-claims.sh instead of waiting ~6h for the reaper.
+#
 # Usage:
 #   scripts/kraken-loop.sh OWNER/tasks --worker-name <name> --project <name> \
 #                          [--poll <seconds>] [--once]
@@ -88,6 +93,29 @@ esac
 [ -f "$KRAKEN_PY" ] || { echo "kraken-loop: cannot find $KRAKEN_PY — run from a kraken checkout." >&2; exit 1; }
 cd "$REPO_DIR" || { echo "kraken-loop: cannot cd into $REPO_DIR" >&2; exit 1; }
 
+# --- fast claim-release (self-heal) ----------------------------------------
+# The SessionEnd/StopFailure hooks only fire inside a Claude Code session, so
+# this loop is the Copilot harness's equivalent. `kraken.py claim` writes
+# $KRAKEN_STATE_DIR/claim-<worker>.json and every terminal transition
+# (deliver/escalate/release) removes it, so a file that survives the `copilot`
+# process is proof the drain died holding the claim (crash, kill, rate-limit
+# abort). Release it on the spot — scoped to THIS worker's claim only — so the
+# task requeues in seconds instead of waiting ~6h for the reconciler
+# (PROTOCOL.md §6). Best-effort: a failed release falls back to the reaper.
+. "$REPO_DIR/hooks/lib-release-claims.sh"
+
+release_own_claim() { # $1 = reason
+  release_all_claims "$1" "$WORKER"
+}
+
+# The trap covers the loop itself dying while a drain is in flight: Ctrl-C
+# (SIGINT hits the whole foreground group, killing copilot first), kill, or a
+# closing terminal. Idempotent — a released claim leaves no state file behind.
+trap 'release_own_claim "kraken-loop terminated"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
 PROMPT="Act as kraken worker $WORKER, draining project:$PROJECT from $TASKS.
 Follow AGENTS.md, SKILL.md and PROTOCOL.md. Do ONE drain pass: claim at most one
 startable task, execute it end to end, deliver it as a draft PR, then stop."
@@ -101,6 +129,9 @@ drain_pass() {
     printf '%s\n' "$startable" | sed 's/^/  /'
     # Add -s/--silent for terser logs.
     copilot -p "$PROMPT" --allow-all-tools --no-ask-user
+    # A claim that survived the copilot process is abandoned — nobody is left
+    # to finish or release it. Free the task now, not in ~6h.
+    release_own_claim "copilot exited mid-drain"
     return 0
   fi
   echo "kraken-loop: $ts queue idle — skipping model."

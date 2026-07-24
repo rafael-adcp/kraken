@@ -6,7 +6,13 @@ This document is the normative specification of the coordination contract
 between a task queue built on GitHub Issues and the workers that drain it. It
 is deliberately **agent-agnostic**: nothing below requires Claude Code — any
 agent (or human) that follows this contract is a conforming worker, and every
-conforming client can share one queue.
+conforming client can share one queue. Agent-agnostic scopes the **wire
+contract** — the labels, the claim-ref CAS, the markers, the attribution — not
+each harness's operational ergonomics: self-healing machinery such as the
+bundled Claude Code lifecycle hooks or `scripts/kraken-loop.sh`'s
+release-on-exit for Copilot CLI lives outside this contract, and
+failure-recovery latency MAY therefore differ between conforming workers (the
+reconciler, §6, is the floor every harness shares).
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY**
 are to be interpreted as described in RFC 2119.
