@@ -263,6 +263,13 @@ class StubState:
                         json.dumps({"message": message, "committedDate": _iso_now()}))
         return sha
 
+    def single_ref(self, n):
+        f = self.ref_path(n)
+        if not os.path.isfile(f):
+            return None
+        sha = self._read(f).rstrip("\n")
+        return {"ref": "refs/kraken/claims/%s" % n, "object": {"sha": sha}}
+
     def matching_refs(self):
         rdir = self.path("refs")
         out = []
@@ -491,6 +498,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if m and method == "DELETE":
             self._delete_ref(int(m.group(1)))
+            return
+
+        m = re.match(r"^/repos/[^/]+/[^/]+/git/ref/kraken/claims/([0-9]+)$", path)
+        if m and method == "GET":
+            ref = s.single_ref(int(m.group(1)))
+            if ref is None:
+                self._send(404, {"message": "Not Found"})
+            else:
+                self._send(200, ref)
             return
 
         if re.search(r"/git/matching-refs/kraken/claims/", path) and method == "GET":

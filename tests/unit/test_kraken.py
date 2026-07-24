@@ -198,18 +198,27 @@ class RefCasTests(unittest.TestCase):
 
     def test_claim_ref_owner_names_the_ref_holder(self):
         # The §5 re-check discriminator: a 422 is a real loss only when the ref
-        # belongs to another worker. claim_ref_owner reads the ref's commit
-        # marker to name the current holder.
-        kraken.http_request = lambda m, p, body=None: (200, json.dumps([
-            {"ref": "refs/kraken/claims/7", "object": {"sha": "sha7"}}]))
+        # belongs to another worker. claim_ref_owner GETs the single claim ref
+        # by exact name (git/ref/, not the matching-refs prefix scan) and reads
+        # its commit marker to name the current holder.
+        def present(m, p, body=None):
+            # Only the exact ref for issue 7 exists; every other issue 404s.
+            if p.endswith("/git/ref/kraken/claims/7"):
+                return (200, json.dumps(
+                    {"ref": "refs/kraken/claims/7", "object": {"sha": "sha7"}}))
+            return (404, json.dumps({"message": "Not Found"}))
+        kraken.http_request = present
         kraken.graphql = lambda q: {"data": {"repository": {
             "c0": {"committedDate": "t", "message": clm("w1")}}}}
         self.assertEqual(kraken.claim_ref_owner("o/t", 7), "w1")
         self.assertEqual(kraken.claim_ref_owner("o/t", "7"), "w1")
-        # Absent ref → None (treated as not-ours by the caller).
+        # Absent ref (404) → None (treated as not-ours by the caller).
         self.assertIsNone(kraken.claim_ref_owner("o/t", 9))
-        # Transport failure → None, never a guessed owner.
+        # Transport failure → None, never a guessed owner — an ambiguous read
+        # must never turn a real CAS loss into a false win.
         kraken.http_request = lambda m, p, body=None: (500, "")
+        self.assertIsNone(kraken.claim_ref_owner("o/t", 7))
+        kraken.http_request = lambda m, p, body=None: (kraken.STATUS_NETWORK_FAILURE, "")
         self.assertIsNone(kraken.claim_ref_owner("o/t", 7))
 
     def test_resolve_commit_meta_batches_and_parses(self):
