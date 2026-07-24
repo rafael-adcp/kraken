@@ -322,6 +322,13 @@ delivered, the result with the acceptance check executed, and the close:
 
 ## Why not just use X?
 
+| Alternative | Coordination primitive | Infra required | Agent-agnostic | Prefer it when |
+| --- | --- | --- | --- | --- |
+| **GitHub Copilot coding agent** | Issue assignment (native GitHub) | Hosted sandbox; nothing beyond GitHub Actions | No | Code is on GitHub and the task needs nothing the platform doesn't already give it |
+| **Claude Code cloud / scheduled agents** | A schedule waking a managed sandbox | Zero — the sandbox is managed for you | No | You want scheduled runs with no environment to keep and the sandbox suits the work |
+| **`claude-code-action` in CI** | An event trigger (push / PR / label) | Ephemeral, disposable CI runner | No | Automation is CI-shaped and a fresh runner is the correct environment |
+| **Kraken** | An issue queue drained via [`kraken-protocol/4`](PROTOCOL.md) | Your prepared, long-lived environment | Yes | The environment is the point — work must run where your services, data, and credentials already live, with named, audited workers |
+
 By 2026 the obvious reflex is "doesn't this already exist?" — assigning an issue
 to an agent is native GitHub, Claude Code runs scheduled agents in the cloud, and
 `claude-code-action` runs it in CI. It does exist, and for a single repo living
