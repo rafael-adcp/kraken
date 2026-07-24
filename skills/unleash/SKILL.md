@@ -32,7 +32,9 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
   apart in the audit trail. Pick names that say where the work ran.
 - `--project`: only take tasks labeled `project:<name>`. Mandatory because a worker
   runs in an environment prepared for a specific project — an unscoped worker could
-  claim a task its environment cannot host.
+  claim a task its environment cannot host. The name is **checked against the repo's
+  labels before the drain** (step 1, exit `13`): routing is client-side, so a project
+  that does not exist yields a worker that hears nothing rather than an error.
 - `--once` (optional): drain the queue once and stop. Without it, an empty queue is
   not the end — step 4 arms a zero-token background watcher and this worker stays in
   ambush, waking whenever a startable task appears.
@@ -150,6 +152,12 @@ time:
      can't be read. The drain refused before claiming; the message names the
      fix — run `/kraken:init OWNER/tasks --upgrade` (or upgrade this worker's
      plugin) so both sides agree, then retry. Do not improvise around it.
+   - `13` — unknown project: the coordination repo carries no `project:<name>`
+     label, so this worker would filter every task out and read as an empty
+     queue forever. The message lists the projects that DO exist — either the
+     `--project` spelling is wrong, or the label was never created
+     (`/kraken:init OWNER/tasks --project <name>`). Fix it and re-run; never
+     fall back to draining unscoped.
    - `20` — gh/network failure, claim state unknown. Re-check the issue's real
      state before retrying; never move to another task while a claim of yours is
      ambiguous.
@@ -234,7 +242,11 @@ time:
    )
    ```
 
-   Pass `<name>` bare — the script prepends the `project:` prefix itself. It polls
+   Pass `<name>` bare — the script prepends the `project:` prefix itself. Before the
+   first poll it runs the same project check as step 1 and exits `13` rather than
+   arming a watcher on a label nobody uses (a silent no-op dressed as an ambush); a
+   label read that merely fails only warns, since the poll loop rides out transport
+   faults. It polls
    every 60s with a free `gh` call and prints one `kraken-queue:` line only when the
    queue snapshot changes and at least one task is startable (it delegates the filter
    to `kraken.py list-startable` — the same startable classification step 1's

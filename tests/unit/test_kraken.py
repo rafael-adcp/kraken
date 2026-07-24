@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from io import StringIO
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 
 # Import kraken.py from the plugin folder without installing anything.
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -539,15 +539,19 @@ class ClaimNextIterationTests(unittest.TestCase):
         self._orig_classify = kraken.classify_queue
         self._orig_claim_once = kraken._claim_once
         self._orig_verify = kraken.verify_protocol
-        # The protocol handshake is exercised by its own tests; here it always
-        # passes so only the iteration logic is under test.
+        self._orig_verify_project = kraken.verify_project
+        # The protocol handshake and the project preflight are exercised by their
+        # own tests; here they always pass so only the iteration logic is under
+        # test.
         kraken.verify_protocol = lambda repo: (True, "")
+        kraken.verify_project = lambda repo, project: (True, "")
         self.attempted = []
 
     def tearDown(self):
         kraken.classify_queue = self._orig_classify
         kraken._claim_once = self._orig_claim_once
         kraken.verify_protocol = self._orig_verify
+        kraken.verify_project = self._orig_verify_project
 
     def _run(self, rows, claim_results, json_mode=False):
         kraken.classify_queue = lambda repo, project, include_body=False: rows
@@ -643,6 +647,144 @@ class ClaimNextIterationTests(unittest.TestCase):
         payload = _json.loads(out.strip().splitlines()[-1])
         self.assertEqual(payload, {"issue": 7, "title": "the title",
                                    "body": "### Goal\ndo it"})
+
+
+class VerifyProjectTests(unittest.TestCase):
+    """The project preflight, isolated from transport: a worker pointed at a
+    `project:<name>` label the coordination repo does not carry is permanently
+    deaf — every task is filtered out client-side, so the queue reads as empty
+    forever. The check refuses on a genuinely absent label, and never declares a
+    project missing from a label read that merely failed."""
+
+    def setUp(self):
+        self._orig_list = kraken.list_projects
+
+    def tearDown(self):
+        kraken.list_projects = self._orig_list
+
+    def _verify(self, projects, project="app"):
+        kraken.list_projects = lambda repo: projects
+        return kraken.verify_project("OWNER/tasks", project)
+
+    def test_configured_project_passes(self):
+        ok, message = self._verify(["app", "docs"])
+        self.assertIs(ok, True)
+        self.assertEqual(message, "")
+
+    def test_unknown_project_refuses_and_names_the_configured_ones(self):
+        ok, message = self._verify(["app", "docs"], project="ap")
+        self.assertIs(ok, False)
+        self.assertIn("project:ap", message, "refusal did not name the missing label")
+        self.assertIn("app", message, "refusal did not list the configured projects")
+        self.assertIn("docs", message, "refusal did not list the configured projects")
+        self.assertIn("--project", message, "refusal did not name the fix")
+
+    def test_repo_without_any_project_label_refuses(self):
+        ok, message = self._verify([], project="app")
+        self.assertIs(ok, False)
+        self.assertIn("none configured", message)
+
+    def test_transport_failure_is_not_a_missing_project(self):
+        ok, message = self._verify(None)
+        self.assertIsNone(ok, "a failed label read must not read as a missing project")
+        self.assertIn("gh-failure", message)
+
+
+class ClaimNextProjectGateTests(unittest.TestCase):
+    """cmd_claim_next's project preflight: an unconfigured project refuses with
+    EXIT_UNKNOWN_PROJECT before the queue is read and before any write."""
+
+    def setUp(self):
+        self._orig_verify_project = kraken.verify_project
+        self._orig_verify = kraken.verify_protocol
+        self._orig_classify = kraken.classify_queue
+        kraken.verify_protocol = lambda repo: (True, "")
+        self.classified = []
+
+        def spy_classify(repo, project, include_body=False):
+            self.classified.append(project)
+            return []
+        kraken.classify_queue = spy_classify
+
+    def tearDown(self):
+        kraken.verify_project = self._orig_verify_project
+        kraken.verify_protocol = self._orig_verify
+        kraken.classify_queue = self._orig_classify
+
+    def _run(self, verdict):
+        kraken.verify_project = lambda repo, project: verdict
+        args = SimpleNamespace(repo="OWNER/tasks", project="app",
+                               worker="w-gate", json=False)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            rc = kraken.cmd_claim_next(args)
+        return rc, buf.getvalue()
+
+    def test_unknown_project_refuses_before_reading_the_queue(self):
+        rc, out = self._run((False, "unknown project: no project:app label"))
+        self.assertEqual(rc, kraken.EXIT_UNKNOWN_PROJECT)
+        self.assertEqual(self.classified, [], "a refused drain still read the queue")
+        self.assertIn("unknown project", out)
+
+    def test_transport_failure_during_the_check_is_twenty(self):
+        rc, out = self._run((None, "claim-next: gh-failure stage=project"))
+        self.assertEqual(rc, kraken.EXIT_TRANSPORT)
+        self.assertEqual(self.classified, [], "an unverified project still read the queue")
+        self.assertIn("gh-failure", out)
+
+    def test_configured_project_proceeds_to_the_queue(self):
+        rc, out = self._run((True, ""))
+        self.assertEqual(rc, kraken.EXIT_NONE)
+        self.assertEqual(self.classified, ["app"])
+
+
+class WatchProjectGateTests(unittest.TestCase):
+    """cmd_watch's startup preflight: a watcher armed on a project label that
+    does not exist would poll forever without ever waking anyone, so it refuses
+    before the first poll. A failed label read is NOT a refusal — the poll loop
+    already tolerates transport faults, so the watcher warns and arms anyway."""
+
+    def setUp(self):
+        self._orig_verify_project = kraken.verify_project
+        self._orig_snapshot = kraken.snapshot_state
+        self.polled = []
+
+        def spy_snapshot(repo, project):
+            # The poll loop is infinite; the first poll is all this needs to see.
+            self.polled.append(project)
+            raise KeyboardInterrupt
+        kraken.snapshot_state = spy_snapshot
+
+    def tearDown(self):
+        kraken.verify_project = self._orig_verify_project
+        kraken.snapshot_state = self._orig_snapshot
+
+    def _run(self, verdict):
+        kraken.verify_project = lambda repo, project: verdict
+        args = SimpleNamespace(repo="OWNER/tasks", project="app")
+        out, err = StringIO(), StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            try:
+                rc = kraken.cmd_watch(args)
+            except KeyboardInterrupt:
+                rc = "polled"
+        return rc, err.getvalue()
+
+    def test_unknown_project_refuses_to_arm(self):
+        rc, err = self._run((False, "unknown project: no project:app label"))
+        self.assertEqual(rc, kraken.EXIT_UNKNOWN_PROJECT)
+        self.assertEqual(self.polled, [], "a refused watcher still polled the queue")
+        self.assertIn("unknown project", err)
+
+    def test_configured_project_arms(self):
+        rc, err = self._run((True, ""))
+        self.assertEqual(rc, "polled")
+        self.assertEqual(self.polled, ["app"])
+
+    def test_transport_failure_warns_but_still_arms(self):
+        rc, err = self._run((None, "watch: gh-failure stage=project"))
+        self.assertEqual(rc, "polled", "a failed label read must not kill the watcher")
+        self.assertIn("gh-failure", err)
 
 
 class StatusHelperTests(unittest.TestCase):
