@@ -482,10 +482,23 @@ def claim_ref_owner(repo, issue):
     network failure already owns the task (PROTOCOL.md §5's re-check caveat).
     None (transport/absent) is treated by the caller as 'not mine', so an
     ambiguous read never turns a real loss into a false win."""
-    refs = claim_ref_list(repo)
-    if refs is None:
+    if not str(issue).lstrip("-").isdigit():
         return None
-    sha = refs.get(int(issue)) if str(issue).lstrip("-").isdigit() else None
+    # GET the single ref by exact name (git/ref/, singular) — one unpaginated
+    # call, not the git/matching-refs/ prefix scan of every live claim. A 404
+    # is the ref simply being absent (like swap_labels' remove); any OTHER
+    # non-2xx is a transport fault. Both yield None, so an ambiguous read never
+    # fabricates an owner and never turns a real CAS loss into a false win.
+    status, text = http_request(
+        "GET", f"/repos/{repo}/git/ref/kraken/claims/{int(issue)}"
+    )
+    if not 200 <= status < 300:
+        return None
+    try:
+        obj = json.loads(text)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    sha = ((obj.get("object") or {}).get("sha") or "") if isinstance(obj, dict) else ""
     if not sha:
         return None
     meta = resolve_commit_meta(repo, [sha])
