@@ -1060,6 +1060,105 @@ class WakeRetryDueTests(unittest.TestCase):
         self.assertTrue(kraken.wake_retry_due(1301.0, 1300.0, 300, 1600.0))
 
 
+class WatchFailureActionTests(unittest.TestCase):
+    """The watcher's fail-loud gate (watch_failure_action): a run of failed queue
+    reads must be audible on stderr — spaced, not one line per poll — and must
+    eventually kill the watcher instead of leaving it alive and deaf."""
+
+    def test_first_failure_speaks_immediately(self):
+        self.assertEqual(kraken.watch_failure_action(1, 10, 60), "warn")
+
+    def test_quiet_between_thresholds(self):
+        for failures in (2, 3, 9, 11):
+            self.assertIsNone(kraken.watch_failure_action(failures, 10, 60),
+                              "failure %d must not re-warn" % failures)
+
+    def test_warns_again_every_spacing(self):
+        self.assertEqual(kraken.watch_failure_action(10, 10, 60), "warn")
+        self.assertEqual(kraken.watch_failure_action(20, 10, 60), "warn")
+
+    def test_ceiling_gives_up(self):
+        self.assertEqual(kraken.watch_failure_action(60, 10, 60), "die")
+
+    def test_ceiling_wins_over_a_warn_on_the_same_count(self):
+        # 60 is both a multiple of the spacing and the ceiling: dying outranks
+        # warning, or the watcher would announce and then keep polling.
+        self.assertEqual(kraken.watch_failure_action(60, 10, 60), "die")
+        self.assertEqual(kraken.watch_failure_action(61, 10, 60), "die")
+
+    def test_zero_ceiling_disables_the_exit(self):
+        # Opt-out for an operator who prefers a watcher that rides out any
+        # outage: the warnings stay, the exit never comes.
+        self.assertEqual(kraken.watch_failure_action(9999, 10, 0), None)
+        self.assertEqual(kraken.watch_failure_action(10, 10, 0), "warn")
+
+    def test_no_failures_is_silent(self):
+        self.assertIsNone(kraken.watch_failure_action(0, 10, 60))
+
+
+class WatchFailureLoopTests(unittest.TestCase):
+    """cmd_watch's poll loop around that gate: a failed read is counted and
+    reported on stderr (never on stdout, which is the wake channel), the counter
+    resets on the first successful read, and the ceiling exits non-zero."""
+
+    def setUp(self):
+        orig_snapshot = kraken.snapshot_state
+        self.addCleanup(setattr, kraken, "snapshot_state", orig_snapshot)
+
+    def _setenv(self, name, value):
+        os.environ[name] = value
+        self.addCleanup(os.environ.pop, name, None)
+
+    def _run(self, snapshots, env=None):
+        """Drive the loop over a scripted snapshot_state sequence; the loop is
+        infinite, so an exhausted script interrupts it."""
+        pending = list(snapshots)
+
+        def scripted(repo, project):
+            if not pending:
+                raise KeyboardInterrupt
+            return pending.pop(0)
+        kraken.snapshot_state = scripted
+
+        self._setenv("KRAKEN_WATCH_POLL_SECONDS", "0")  # no real waiting
+        for name, value in (env or {}).items():
+            self._setenv(name, value)
+
+        args = SimpleNamespace(repo="OWNER/tasks", project="app")
+        out, err = StringIO(), StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            try:
+                rc = kraken.cmd_watch(args)
+            except KeyboardInterrupt:
+                rc = "polling"
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_failed_read_is_reported_on_stderr(self):
+        rc, out, err = self._run([None])
+        self.assertEqual(rc, "polling", "one failed read must not kill the watcher")
+        self.assertIn("kraken-watch:", err, "a failed queue read was swallowed")
+        self.assertNotIn("kraken-watch:", out,
+                         "the diagnostic must not ride the wake channel (stdout)")
+
+    def test_success_resets_the_counter(self):
+        # Two failures, a success, then a failure: the last one is failure #1
+        # again, so it warns — proving the run was reset rather than accumulated.
+        rc, out, err = self._run([None, None, "7:startable", None],
+                                 {"KRAKEN_WATCH_MAX_FAILURES": "3"})
+        self.assertEqual(rc, "polling", "the ceiling was reached across a reset")
+        self.assertEqual(err.count("kraken-watch:"), 2,
+                         "expected one warning per failure run, got: %r" % err)
+        self.assertIn("kraken-queue:", out, "the successful poll emitted no wake")
+
+    def test_ceiling_exits_transport(self):
+        rc, out, err = self._run([None, None, None],
+                                 {"KRAKEN_WATCH_MAX_FAILURES": "3"})
+        self.assertEqual(rc, kraken.EXIT_TRANSPORT,
+                         "a watcher that can never read the queue must die loudly")
+        self.assertIn("giving up", err)
+        self.assertIn("3", err, "the give-up line must name the failure count")
+
+
 class AssetClassifierTests(unittest.TestCase):
     """The pure asset classifier — the read side of `init --upgrade`, isolated
     from any network. The plugin's bundled bytes are the single source of truth,

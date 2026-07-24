@@ -254,7 +254,11 @@ time:
    invokes the model. One deliberate exception: when the bundled `StopFailure` hook
    records that a previous wake's turn died on a usage limit, the watcher re-emits
    the wake (default spacing 5 min), so a drain interrupted by a limit resumes on
-   its own once the window resets. Do not inline a rewritten
+   its own once the window resets. A queue read that *fails* is never silent: the
+   watcher counts consecutive failures, writes a spaced `kraken-watch:` line to
+   stderr from the first one, and exits `20` after 60 of them
+   (`KRAKEN_WATCH_MAX_FAILURES`, `0` to never exit) rather than pose as an idle
+   queue while nothing can reach the repo. Do not inline a rewritten
    script — the bundled one is versioned with the plugin. Cannot arm it (no Monitor
    tool, script missing)? Say so, offer `/loop /kraken:unleash ... --once` as the
    fallback, and end the turn as if `--once` — do not improvise a watcher.
