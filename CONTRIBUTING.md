@@ -12,7 +12,7 @@ have a strict hierarchy when they disagree:
 
 | Layer | Lives in | What it is |
 | --- | --- | --- |
-| **The spec** | [`PROTOCOL.md`](PROTOCOL.md) | The normative, agent-agnostic contract (`kraken-protocol/3`): task shape, the label state machine, the machine marker, the claim algorithm. **It wins on any disagreement.** |
+| **The spec** | [`PROTOCOL.md`](PROTOCOL.md) | The normative, agent-agnostic contract (`kraken-protocol/4`): task shape, the label state machine, the machine marker, the claim algorithm. **It wins on any disagreement.** |
 | **The skills** | `skills/*/SKILL.md` | Prompts — markdown interpreted at runtime by an LLM. Prose here is *executable*: a subtle wording change can silently change an agent's behavior. |
 | **The mechanics** | `skills/unleash/kraken.py`, `scripts/`, `tests/` | The deterministic parts — the bundled transition program (the reference implementation of the worker side, one stdlib-only module with a subcommand per transition), the linter, and the conformance suite. |
 
@@ -93,7 +93,7 @@ These are the conventions the history already follows — match them:
   same PR as — or before — the implementation. The spec is the source of truth:
   on any disagreement between spec, skills, scripts, and tests, **the spec
   wins**, and the fix brings the others back into line (never the reverse). A
-  backward-incompatible change bumps the integer (`kraken-protocol/3` and
+  backward-incompatible change bumps the integer (`kraken-protocol/4` and
   onward); clarifications and strictly additive rules amend `PROTOCOL.md` in
   place by PR. Keep every skill, script, and the README consistent with the
   spec in the same change — the linter cross-checks labels, machine markers,
@@ -131,5 +131,5 @@ without a merge:
 What changed between versions lives entirely in the GitHub Releases — there is
 no hand-maintained changelog file. Because release notes come from PR titles,
 write clear, descriptive PR titles, and call out protocol-affecting changes
-explicitly (e.g. "implements kraken-protocol/3") so the `kraken@<version>`
+explicitly (e.g. "implements kraken-protocol/4") so the `kraken@<version>`
 commit trailer stays traceable to a protocol revision.
