@@ -1076,18 +1076,72 @@ def wake_retry_due(flag_mtime, last_emit, retry_seconds, now):
     return flag_mtime > last_emit and now - last_emit >= retry_seconds
 
 
+# How many consecutive failed queue reads between stderr lines (after the first),
+# and how many before the watcher gives up. At the default 60s poll that is: a
+# line at once, another every ~10 min while the outage lasts, and death after
+# ~1h. Only the ceiling is an operator knob (KRAKEN_WATCH_MAX_FAILURES; 0 keeps
+# the watcher alive through any outage, warnings included).
+WATCH_WARN_EVERY = 10
+WATCH_MAX_FAILURES = 60
+
+
+def watch_failure_action(failures, warn_every, max_failures):
+    """What a run of `failures` consecutive failed queue reads owes the operator:
+    "die" once the ceiling is reached, "warn" on the first failure and every
+    `warn_every` after it, None in between.
+
+    A watcher whose reads fail is indistinguishable from an idle one — same
+    silence, same live process — so a transport fault has to be said out loud,
+    but spaced, or an outage would fill the log with one line per poll. Dying
+    outranks warning: past the ceiling the watcher is not listening, and a dead
+    process in the monitor is honest where a live deaf one is not."""
+    if max_failures > 0 and failures >= max_failures:
+        return "die"
+    if failures <= 0:
+        return None
+    if failures == 1 or (warn_every > 0 and failures % warn_every == 0):
+        return "warn"
+    return None
+
+
 def cmd_watch(args):
     repo, project = args.repo, args.project
     poll_seconds = int(os.environ.get("KRAKEN_WATCH_POLL_SECONDS", "60"))
     retry_seconds = int(os.environ.get("KRAKEN_WATCH_RETRY_SECONDS", "300"))
+    max_failures = int(
+        os.environ.get("KRAKEN_WATCH_MAX_FAILURES", str(WATCH_MAX_FAILURES))
+    )
 
     prev = None
     # Start at "now": retries are owed only for wakes THIS watcher emitted, so
     # a stale flag from an earlier session never triggers one.
     last_emit = time.time()
+    failures = 0
     while True:
         snapshot = snapshot_state(repo, project)
-        if snapshot is not None:
+        if snapshot is None:
+            # Fail loud. The read never landed, so `prev` stays untouched (the
+            # edge-triggered gate is not corrupted by an outage) — but silence
+            # here is exactly what an idle queue looks like, so say it.
+            failures += 1
+            action = watch_failure_action(failures, WATCH_WARN_EVERY, max_failures)
+            if action == "die":
+                print(
+                    f"kraken-watch: giving up after {failures} consecutive "
+                    f"failures reading the queue in {repo} — this watcher is "
+                    f"not listening; check the token and the network",
+                    file=sys.stderr, flush=True,
+                )
+                return EXIT_TRANSPORT
+            if action == "warn":
+                print(
+                    f"kraken-watch: {failures} consecutive failure(s) reading "
+                    f"the queue in {repo} — this worker may be offline or "
+                    f"unauthenticated, and wakes no one while it is",
+                    file=sys.stderr, flush=True,
+                )
+        else:
+            failures = 0
             startable = [
                 line for line in snapshot.split("\n") if line.endswith(":startable")
             ]

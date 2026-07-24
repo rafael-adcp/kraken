@@ -270,7 +270,11 @@ tool) polls the queue every 60s with a free `gh` call and wakes the worker
 Each wake is an ordinary drain: same one task at a time, same claim-ref CAS.
 Enqueue from anywhere (`gh issue create`, web UI, mobile app) and the worker
 picks it up within a minute; the watcher lives until the session closes or you
-say stop.
+say stop. A watcher that can no longer *read* the queue (expired token, dead
+network, revoked access) says so on stderr instead of impersonating an idle
+queue, and gives up with exit `20` after 60 consecutive failed reads
+(`KRAKEN_WATCH_MAX_FAILURES`) — a dead monitor entry you can see, rather than a
+live one that wakes nobody.
 
 Want a bounded run instead — a scheduled container, a one-off drain? Pass
 `--once`: drain and exit. Environments without the Monitor tool fall back to
