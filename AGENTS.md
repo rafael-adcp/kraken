@@ -79,3 +79,19 @@ when a task is actually startable, so an idle queue never spends a token. Pass `
 single bounded drain, or `--poll <seconds>` to change the 60s cadence. The bare
 `python3 skills/unleash/kraken.py list-startable OWNER/tasks <project>` check the loop uses is
 also runnable by hand to skip the model entirely when nothing is startable.
+
+## Self-healing: why the loop matters
+
+The bundled `hooks/` (SessionEnd, StopFailure) that auto-release an abandoned claim are
+**Claude Code hook events** — they never fire around a `copilot` process. The loop carries
+the Copilot-side equivalent instead: `kraken.py claim` records the open claim in
+`$KRAKEN_STATE_DIR/claim-<worker>.json` (default `~/.kraken/`) and every terminal transition
+removes it, so if the `copilot` process exits with that file still present (crash, kill,
+rate-limit abort) — or the loop itself is stopped mid-drain (Ctrl-C, SIGTERM) — the loop runs
+`kraken.py release` on the spot and the task requeues in seconds.
+
+A **bare** `copilot -p …` invocation outside the loop has no such supervisor: a death there
+leaves the claim squatting `in-progress` until the coordination repo's ~6h reconciler
+(PROTOCOL.md §6) reaps it. The protocol's "agent-agnostic" promise covers the wire contract
+(labels, claim-ref CAS, markers, disclaimer), **not** recovery latency — so for unattended
+drains, always run through `scripts/kraken-loop.sh`.

@@ -1,6 +1,7 @@
 # lib-release-claims.sh — the shared claim-release loop behind the lifecycle
-# hooks (session-end-release.sh, stop-failure-release.sh). Source it, then call
-# `release_all_claims "<reason>"`. Not a hook itself.
+# hooks (session-end-release.sh, stop-failure-release.sh) and the Copilot
+# ambush loop (scripts/kraken-loop.sh). Source it, then call
+# `release_all_claims "<reason>" [worker]`. Not a hook itself.
 #
 # Discovery: `kraken.py claim` writes $KRAKEN_STATE_DIR/claim-<worker>.json on a
 # won claim; deliver/escalate/release remove it. release_all_claims runs
@@ -25,11 +26,13 @@ kraken_json_field() { # $1 = file, $2 = field
   fi
 }
 
-# release_all_claims REASON — run `kraken.py release` for every open claim on
-# this machine. The released marker lands before in-progress drops and the claim
-# ref last — the ordering that frees the lock honestly (PROTOCOL.md §9).
+# release_all_claims REASON [WORKER] — run `kraken.py release` for every open
+# claim on this machine, or, with WORKER, only that worker's own claim (a loop
+# that knows its identity must never free a co-located worker's live claim).
+# The released marker lands before in-progress drops and the claim ref last —
+# the ordering that frees the lock honestly (PROTOCOL.md §9).
 release_all_claims() {
-  local reason="$1" f repo issue worker
+  local reason="$1" only="${2:-}" f repo issue worker
   [ -d "$KRAKEN_STATE" ] || return 0
   shopt -s nullglob 2>/dev/null || true
   for f in "$KRAKEN_STATE"/claim-*.json; do
@@ -39,6 +42,7 @@ release_all_claims() {
     worker="$(kraken_json_field "$f" worker)"
     # Skip a malformed/empty file we cannot act on, never guess.
     [ -n "$repo" ] && [ -n "$issue" ] && [ -n "$worker" ] || continue
+    [ -z "$only" ] || [ "$worker" = "$only" ] || continue
     python3 "$KRAKEN_BIN" release "$repo" "$issue" "$worker" "$reason" >/dev/null 2>&1 || true
   done
   return 0
