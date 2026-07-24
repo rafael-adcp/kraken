@@ -22,15 +22,19 @@ paginated re-read) existed only to compensate for writes that cannot fail on
 conflict; with the CAS it is gone, and labels/comments are projection and
 narrative, never the lock (see the claim-ref section below).
 
-Transport (phase 1): `gh` stays the transport. Every GitHub call shells out to
-`gh api` / `gh issue`, exactly like the scripts did, so the conformance stub
-(which intercepts `gh` on PATH) and the operator's existing auth keep working
-for free. A direct-REST phase 2 is possible later but out of scope here.
-list-startable's queue fetch is the one exception to "shell out per call": it
-batches labels, native blocked-by, and body into a single paginated
-`gh api graphql` walk (classify_queue/fetch_open_tasks below), plus one
-matching-refs read for the claim refs, so an idle watch poll costs O(pages),
-not one REST call per non-held task.
+Transport (phase 2): direct REST/GraphQL over stdlib `urllib.request` — no
+per-call `gh` subprocess. Every GitHub call is an HTTP request whose status
+code is a first-class integer, so the protocol's strongest guarantee (exactly
+one CAS winner, told apart by HTTP 422) is decided by `status == 422`, never by
+scraping an external binary's stderr. The API base comes from the
+GITHUB_API_URL env var (the variable GitHub Actions already sets; default
+https://api.github.com) — also the conformance suite's seam, which points it at
+a local stateful stub server. The token comes from GH_TOKEN / GITHUB_TOKEN,
+falling back to ONE memoized `gh auth token` spawn per process (startup cost,
+never per call). Queue reads stay batched: labels, native blocked-by, and body
+ride a single paginated GraphQL walk (classify_queue/fetch_open_tasks below),
+plus one paginated matching-refs read for the claim refs, so an idle watch poll
+costs O(pages), not one REST call per non-held task.
 
 Exit-code contract (PROTOCOL.md §12), preserved verbatim from the scripts:
     0   success
@@ -57,6 +61,9 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 # Exit codes — the agent branches on these; keep them identical to the scripts.
 EXIT_OK = 0
@@ -190,89 +197,138 @@ def compose_note(worker, prose):
 
 
 # --- transport ---------------------------------------------------------------
+# Direct HTTP over stdlib urllib. `http_request` is the ONE network touchpoint
+# (and the unit tests' patch seam); everything else builds on it. A non-2xx
+# answer is an integer status the caller branches on — HTTP 422 is the CAS-lost
+# signal on the claim surface, everything else non-2xx is the exit-20
+# transport-failure path.
 
-def run_gh_io(args, input_text=None):
-    """Run `gh <args>`; return (returncode, stdout, stderr). Never raises on
-    non-zero — the callers map a non-zero return to the exit-20 transport-failure
-    path themselves, exactly where the scripts did `|| exit 20`. `input_text`
-    feeds stdin (the `--input -` JSON body of the git-data writes); stderr is
-    captured because it is where `gh api` names the HTTP status — the one signal
-    that separates a lost claim CAS (HTTP 422) from a transport fault."""
+DEFAULT_API_URL = "https://api.github.com"
+HTTP_TIMEOUT_SECONDS = 30
+# Sentinel for "no HTTP answer at all" (DNS, refused, timeout). Not a real
+# status code, so every `status == N` decision reads it as a transport fault.
+STATUS_NETWORK_FAILURE = 0
+# GitHub caps per_page at 100; a page shorter than this is the last one.
+PER_PAGE = 100
+
+_TOKEN_CACHE = {"resolved": False, "token": ""}
+
+
+def api_base():
+    """The API root every request is made against. GITHUB_API_URL is both the
+    GitHub Actions convention (set on every runner, GHES included) and the
+    conformance seam (tests point it at a local stub server)."""
+    return (os.environ.get("GITHUB_API_URL") or DEFAULT_API_URL).rstrip("/")
+
+
+def github_token():
+    """The API token: GH_TOKEN, then GITHUB_TOKEN, then ONE `gh auth token`
+    spawn, memoized for the process lifetime — a startup cost, never a per-call
+    one. Empty when nothing yields a token (requests then go out
+    unauthenticated and surface as transport failures on a private repo)."""
+    if not _TOKEN_CACHE["resolved"]:
+        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+        if not token:
+            try:
+                proc = subprocess.run(
+                    ["gh", "auth", "token"],
+                    capture_output=True, text=True, encoding="utf-8",
+                )
+                if proc.returncode == 0:
+                    token = proc.stdout.strip()
+            except OSError:
+                token = ""
+        _TOKEN_CACHE["token"] = token
+        _TOKEN_CACHE["resolved"] = True
+    return _TOKEN_CACHE["token"]
+
+
+def http_request(method, path, body=None):
+    """One API call: return (status, text). `path` starts with "/"; a dict
+    `body` is sent as JSON. Never raises — a request that got no HTTP answer at
+    all comes back as (STATUS_NETWORK_FAILURE, ""), and a non-2xx answer keeps
+    its real integer status so the caller can tell a CAS-lost 422 from a fault."""
+    url = api_base() + path
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Accept", "application/vnd.github+json")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    token = github_token()
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
     try:
-        proc = subprocess.run(
-            ["gh", *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            input=input_text,
-        )
-    except FileNotFoundError:
-        return 127, "", ""
-    return proc.returncode, proc.stdout, proc.stderr
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+            return resp.getcode(), resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            text = exc.read().decode("utf-8", "replace")
+        except OSError:
+            text = ""
+        return exc.code, text
+    except (urllib.error.URLError, OSError, ValueError):
+        return STATUS_NETWORK_FAILURE, ""
 
 
-def run_gh(args):
-    """`run_gh_io` for the many callers that need only (returncode, stdout)."""
-    rc, out, _err = run_gh_io(args)
-    return rc, out
-
-
-def gh_json(args):
-    """Run a `gh` call expected to emit JSON on stdout. Returns the parsed
-    object, or None on any transport / decode failure (mapped to exit 20)."""
-    rc, out = run_gh(args)
-    if rc != 0:
+def http_json(method, path, body=None):
+    """Parsed JSON from a 2xx response, or None on any failure (non-2xx,
+    network fault, undecodable body) — the exit-20 mapping for plain reads."""
+    status, text = http_request(method, path, body)
+    if not 200 <= status < 300:
         return None
     try:
-        return json.loads(out)
+        return json.loads(text)
     except (ValueError, json.JSONDecodeError):
         return None
 
 
+def http_paginated(path):
+    """Every element of a paginated list endpoint, concatenated across
+    per_page/page requests (a page shorter than PER_PAGE is the last).
+    Returns a list, or None on transport failure."""
+    sep = "&" if "?" in path else "?"
+    items = []
+    page = 1
+    while True:
+        chunk = http_json("GET", f"{path}{sep}per_page={PER_PAGE}&page={page}")
+        if not isinstance(chunk, list):
+            return None
+        items.extend(chunk)
+        if len(chunk) < PER_PAGE:
+            return items
+        page += 1
+
+
+def quote_path(segment):
+    """URL-quote one path segment (a label name, a contents path component)."""
+    return urllib.parse.quote(segment, safe="")
+
+
 def graphql(query):
-    """Run a `gh api graphql` call; return the parsed {"data": ...} envelope,
-    or None on transport / decode failure."""
-    return gh_json(["api", "graphql", "-f", f"query={query}"])
+    """POST a GraphQL query; return the parsed {"data": ...} envelope, or None
+    on transport / decode / GraphQL-error failure."""
+    resp = http_json("POST", "/graphql", {"query": query})
+    if not isinstance(resp, dict) or resp.get("errors"):
+        return None
+    if not isinstance(resp.get("data"), dict):
+        return None
+    return resp
 
 
 def comment_records(repo, issue):
     """Every comment as a {"body", "createdAt"} record, in server order —
-    paginated past 100 via the REST comments endpoint (`gh issue view --json
-    comments` silently caps at 100: it does not page the nested GraphQL
-    connection, so a long thread would read truncated). `status` and the
-    validator's debounce read through here so no consumer ever sees a
-    truncated history.
-
-    Returns a list of dicts, or None on transport failure. `gh --jq` emits one
-    compact JSON object per comment (interior newlines escaped), so a per-line
-    decode is exact."""
-    rc, out = run_gh([
-        "api",
-        f"repos/{repo}/issues/{issue}/comments",
-        "--paginate",
-        "--jq", ".[] | {body, createdAt}",
-    ])
-    if rc != 0:
+    paginated past 100 via the REST comments endpoint (a single-page read
+    would silently truncate a long thread). `status` and the validator's
+    debounce read through here so no consumer ever sees a truncated history.
+    REST spells the timestamp `created_at`; it is mapped to the createdAt
+    shape every consumer reads. Returns a list, or None on transport failure."""
+    items = http_paginated(f"/repos/{repo}/issues/{issue}/comments")
+    if items is None:
         return None
-    records = []
-    decoder = json.JSONDecoder()
-    idx = 0
-    length = len(out)
-    while idx < length:
-        # Skip inter-object whitespace: a pretty-printing jq spreads each object
-        # across lines, so decode object-by-object, not line-by-line.
-        while idx < length and out[idx] in " \t\r\n":
-            idx += 1
-        if idx >= length:
-            break
-        try:
-            obj, end = decoder.raw_decode(out, idx)
-        except (ValueError, json.JSONDecodeError):
-            break
-        if isinstance(obj, dict):
-            records.append(obj)
-        idx = end
-    return records
+    return [
+        {"body": c.get("body") or "", "createdAt": c.get("created_at") or ""}
+        for c in items if isinstance(c, dict)
+    ]
 
 
 # --- claim refs: the protocol/4 CAS ------------------------------------------
@@ -295,17 +351,10 @@ def claim_ref(issue):
     return CLAIM_REF_PREFIX + str(issue)
 
 
-def _is_http_422(err):
-    """Whether a failed `gh api` call was an HTTP 422 — the CAS-lost signal on
-    ref creation ("Reference already exists"), and the already-gone signal on
-    ref deletion. gh prints the status on stderr as `... (HTTP 422)`."""
-    return "(HTTP 422)" in (err or "")
-
-
 def _head_tree_sha(repo):
     """The default branch's tree SHA — the fallback tree for hosts that reject
     the well-known empty-tree object. None on transport failure."""
-    obj = gh_json(["api", f"repos/{repo}/commits/HEAD"])
+    obj = http_json("GET", f"/repos/{repo}/commits/HEAD")
     if obj is None:
         return None
     tree = (obj.get("commit") or {}).get("tree") or {}
@@ -322,21 +371,17 @@ def create_claim_commit(repo, payload):
             tree = _head_tree_sha(repo)
             if tree is None:
                 return None
-        body = json.dumps(
-            {"message": make_marker(payload), "tree": tree, "parents": []}
+        status, text = http_request(
+            "POST", f"/repos/{repo}/git/commits",
+            {"message": make_marker(payload), "tree": tree, "parents": []},
         )
-        rc, out, err = run_gh_io(
-            ["api", f"repos/{repo}/git/commits", "--method", "POST",
-             "--input", "-"],
-            input_text=body,
-        )
-        if rc == 0:
+        if 200 <= status < 300:
             try:
-                sha = json.loads(out).get("sha")
+                sha = json.loads(text).get("sha")
             except (ValueError, json.JSONDecodeError):
                 return None
             return sha if isinstance(sha, str) and sha else None
-        if not _is_http_422(err):
+        if status != 422:
             return None
         # 422 on the empty tree: this host wants a reachable tree — fall back.
     return None
@@ -345,15 +390,15 @@ def create_claim_commit(repo, payload):
 def claim_ref_create(repo, issue, sha):
     """The CAS itself. Returns "won" (ref created — this worker owns the task),
     "lost" (HTTP 422: another worker's ref already exists), or "fail"
-    (transport — state unknown)."""
-    body = json.dumps({"ref": claim_ref(issue), "sha": sha})
-    rc, _out, err = run_gh_io(
-        ["api", f"repos/{repo}/git/refs", "--method", "POST", "--input", "-"],
-        input_text=body,
+    (transport — state unknown). The verdict is the integer status code,
+    nothing else."""
+    status, _text = http_request(
+        "POST", f"/repos/{repo}/git/refs",
+        {"ref": claim_ref(issue), "sha": sha},
     )
-    if rc == 0:
+    if 200 <= status < 300:
         return "won"
-    if _is_http_422(err):
+    if status == 422:
         return "lost"
     return "fail"
 
@@ -361,42 +406,39 @@ def claim_ref_create(repo, issue, sha):
 def claim_ref_update(repo, issue, sha):
     """Force-move the claim ref to a fresh commit — the heartbeat. True on
     success."""
-    body = json.dumps({"sha": sha, "force": True})
-    rc, _out, _err = run_gh_io(
-        ["api", f"repos/{repo}/git/{claim_ref(issue)}", "--method", "PATCH",
-         "--input", "-"],
-        input_text=body,
+    status, _text = http_request(
+        "PATCH", f"/repos/{repo}/git/{claim_ref(issue)}",
+        {"sha": sha, "force": True},
     )
-    return rc == 0
+    return 200 <= status < 300
 
 
 def claim_ref_delete(repo, issue):
     """Delete the claim ref — the lock release on every terminal transition.
     An already-missing ref (HTTP 422) counts as success: the lock is gone
     either way, and the delete stays idempotent under retries."""
-    rc, _out, err = run_gh_io(
-        ["api", f"repos/{repo}/git/{claim_ref(issue)}", "--method", "DELETE"],
+    status, _text = http_request(
+        "DELETE", f"/repos/{repo}/git/{claim_ref(issue)}"
     )
-    return rc == 0 or _is_http_422(err)
+    return 200 <= status < 300 or status == 422
 
 
 def claim_ref_list(repo):
     """Every live claim ref as {issue_number: commit_sha}, in one paginated
     matching-refs read. Returns a dict (empty when none), or None on transport
     failure."""
-    rc, out = run_gh([
-        "api", f"repos/{repo}/git/matching-refs/kraken/claims/", "--paginate",
-        "--jq", r'.[] | "\(.ref)\t\(.object.sha)"',
-    ])
-    if rc != 0:
+    items = http_paginated(f"/repos/{repo}/git/matching-refs/kraken/claims/")
+    if items is None:
         return None
     refs = {}
-    for line in out.split("\n"):
-        line = line.strip()
-        if not line or "\t" not in line:
+    for item in items:
+        if not isinstance(item, dict):
             continue
-        ref, sha = line.split("\t", 1)
+        ref = item.get("ref") or ""
+        sha = (item.get("object") or {}).get("sha") or ""
         tail = ref.rsplit("/", 1)[-1]
+        if not sha:
+            continue
         try:
             refs[int(tail)] = sha
         except ValueError:
@@ -549,25 +591,44 @@ def wake_retry_mtime():
 # --- comment composition -----------------------------------------------------
 
 def post_comment(repo, issue, body):
-    rc, _ = run_gh(["-R", repo, "issue", "comment", str(issue), "--body", body])
-    return rc == 0
+    status, _text = http_request(
+        "POST", f"/repos/{repo}/issues/{issue}/comments", {"body": body}
+    )
+    return 200 <= status < 300
 
 
 def swap_labels(repo, issue, remove=None, add=None):
-    args = ["-R", repo, "issue", "edit", str(issue)]
+    """Remove and/or add one label on an issue. A remove of a label the issue
+    no longer carries (HTTP 404) counts as success, so the swap stays
+    idempotent under retries and reaper races — the same tolerance `gh issue
+    edit --remove-label` had."""
     if remove:
-        args += ["--remove-label", remove]
+        status, _text = http_request(
+            "DELETE",
+            f"/repos/{repo}/issues/{issue}/labels/{quote_path(remove)}",
+        )
+        if not (200 <= status < 300 or status == 404):
+            return False
     if add:
-        args += ["--add-label", add]
-    rc, _ = run_gh(args)
-    return rc == 0
+        status, _text = http_request(
+            "POST", f"/repos/{repo}/issues/{issue}/labels", {"labels": [add]}
+        )
+        if not 200 <= status < 300:
+            return False
+    return True
+
+
+def issue_detail(repo, issue):
+    """The live issue object (labels, body, state, ...), or None on transport
+    failure — one GET serves both the label and body readers."""
+    return http_json("GET", f"/repos/{repo}/issues/{issue}")
 
 
 def issue_label_names(repo, issue):
     """The label names currently on an issue, live. Returns a list, or None on
     transport failure — the coordination workflows read labels off the live
     issue (a labeled/edited event may have just changed them)."""
-    obj = gh_json(["-R", repo, "issue", "view", str(issue), "--json", "labels"])
+    obj = issue_detail(repo, issue)
     if obj is None:
         return None
     return [lbl.get("name", "") for lbl in obj.get("labels", [])]
@@ -576,7 +637,7 @@ def issue_label_names(repo, issue):
 def issue_body(repo, issue):
     """The issue's body text, live. Returns a string ("" when the body is empty
     or null), or None on transport failure."""
-    obj = gh_json(["-R", repo, "issue", "view", str(issue), "--json", "body"])
+    obj = issue_detail(repo, issue)
     if obj is None:
         return None
     return obj.get("body") or ""
@@ -584,21 +645,20 @@ def issue_body(repo, issue):
 
 def open_issue_numbers(repo, label):
     """Every OPEN issue number carrying `label`, as a list of ints (empty when
-    none), or None on transport failure. The reaper's few in-progress issues."""
-    rc, out = run_gh([
-        "-R", repo, "issue", "list", "--label", label, "--state", "open",
-        "--json", "number", "--jq", ".[].number",
-    ])
-    if rc != 0:
+    none), or None on transport failure. The reaper's few in-progress issues.
+    The REST issues listing includes pull requests; they are skipped."""
+    items = http_paginated(
+        f"/repos/{repo}/issues?labels={quote_path(label)}&state=open"
+    )
+    if items is None:
         return None
     nums = []
-    for line in out.split("\n"):
-        line = line.strip()
-        if line:
-            try:
-                nums.append(int(line))
-            except ValueError:
-                pass
+    for item in items:
+        if not isinstance(item, dict) or "pull_request" in item:
+            continue
+        number = item.get("number")
+        if isinstance(number, int):
+            nums.append(number)
     return nums
 
 
@@ -747,11 +807,10 @@ def _claim_once(repo, issue, worker):
     drift."""
 
     # 1. Guard — re-fetch labels; a held task is skipped with zero writes.
-    labels_obj = gh_json(["-R", repo, "issue", "view", str(issue), "--json", "labels"])
-    if labels_obj is None:
+    label_names = issue_label_names(repo, issue)
+    if label_names is None:
         print(f"claim: gh-failure issue={issue} stage=guard")
         return EXIT_TRANSPORT
-    label_names = [lbl.get("name", "") for lbl in labels_obj.get("labels", [])]
     for held in HELD_LABELS:
         if held in label_names:
             print(f"claim: held issue={issue} label={held}")
@@ -1122,28 +1181,38 @@ def parse_pr_url(records):
     return from_marker or fallback
 
 
+_PR_PARTS_RE = re.compile(r"/([^/]+)/([^/]+)/pull/(\d+)")
+
+
 def pr_is_merged(pr_url):
     """Whether a delivery PR is already merged — the orphan heuristic's only
-    signal. Returns True/False, or None on transport failure (a flag is never
-    guessed from a failed read)."""
-    data = gh_json(["pr", "view", pr_url, "--json", "state,mergedAt"])
+    signal. Returns True/False, or None on transport failure or an unparseable
+    URL (a flag is never guessed from a failed read). The web `…/pull/N` URL
+    recorded in the delivery marker maps to the REST `pulls/N` endpoint, whose
+    `merged`/`merged_at` fields are the authoritative merge signal."""
+    m = _PR_PARTS_RE.search(pr_url or "")
+    if m is None:
+        return None
+    owner, name, number = m.group(1), m.group(2), m.group(3)
+    data = http_json("GET", f"/repos/{owner}/{name}/pulls/{number}")
     if data is None:
         return None
-    return bool(data.get("mergedAt")) or str(data.get("state", "")).upper() == "MERGED"
+    return (bool(data.get("merged_at")) or bool(data.get("merged"))
+            or str(data.get("state", "")).upper() == "MERGED")
 
 
 def list_projects(repo):
     """Every project:<name> label configured in the repo, sorted, prefix
-    stripped — the launch recon points a worker at each. Read from `gh label
-    list` (not the open-task walk) so a project with no open task still gets a
-    launch line. Returns a sorted name list, or None on transport failure."""
-    data = gh_json(["-R", repo, "label", "list", "--limit", "200", "--json", "name"])
-    if data is None:
+    stripped — the launch recon points a worker at each. Read from the repo's
+    label set (not the open-task walk) so a project with no open task still gets
+    a launch line. Returns a sorted name list, or None on transport failure."""
+    items = http_paginated(f"/repos/{repo}/labels")
+    if items is None:
         return None
     return sorted(
         n["name"][len("project:"):]
-        for n in data
-        if str(n.get("name", "")).startswith("project:")
+        for n in items
+        if isinstance(n, dict) and str(n.get("name", "")).startswith("project:")
     )
 
 
@@ -1446,18 +1515,18 @@ PROJECT_LABEL_DESC = (
 
 
 def gh_repo_exists(repo):
-    """True iff the coordination repo already exists (a clean `repo view`)."""
-    rc, _ = run_gh(
-        ["repo", "view", repo, "--json", "nameWithOwner", "--jq", ".nameWithOwner"]
-    )
-    return rc == 0
+    """True iff the coordination repo already exists (a 2xx from the repo GET)."""
+    status, _ = http_request("GET", f"/repos/{repo}")
+    return 200 <= status < 300
 
 
 def gh_repo_create_private(repo):
     """Create the coordination repo PRIVATE — never public: the queue is
-    instructions that run in a worker's environment with its credentials."""
-    rc, _ = run_gh(["repo", "create", repo, "--private"])
-    return rc == 0
+    instructions that run in a worker's environment with its credentials. Created
+    under the authenticated user (the coordination repo is personal by design)."""
+    name = repo.split("/", 1)[1] if "/" in repo else repo
+    status, _ = http_request("POST", "/user/repos", {"name": name, "private": True})
+    return 200 <= status < 300
 
 
 def gh_get_content(repo, path):
@@ -1474,12 +1543,8 @@ def gh_get_content_meta(repo, path):
     contents API requires to *update* an existing file — a create never sends
     one. The caller cannot tell 404 from a transport fault here and, like the
     skill, treats 'no readable file' as absent."""
-    rc, out = run_gh(["api", f"/repos/{repo}/contents/{path}"])
-    if rc != 0:
-        return (None, None)
-    try:
-        obj = json.loads(out)
-    except (ValueError, json.JSONDecodeError):
+    obj = http_json("GET", f"/repos/{repo}/contents/{path}")
+    if not isinstance(obj, dict):
         return (None, None)
     encoded = obj.get("content")
     if not isinstance(encoded, str):
@@ -1497,25 +1562,26 @@ def gh_put_content(repo, path, data, message, sha=None):
     this creates the file (callers reach here only when the file was reported
     absent); passing the current blob `sha` UPDATES the existing file — GitHub
     rejects an overwrite that omits it, so `init --upgrade` always supplies it."""
-    b64 = base64.b64encode(data).decode("ascii")
-    api_args = [
-        "api", f"/repos/{repo}/contents/{path}", "-X", "PUT",
-        "-f", f"message={message}", "-f", f"content={b64}",
-    ]
+    body = {"message": message, "content": base64.b64encode(data).decode("ascii")}
     if sha is not None:
-        api_args += ["-f", f"sha={sha}"]
-    rc, _ = run_gh(api_args)
-    return rc == 0
+        body["sha"] = sha
+    status, _ = http_request("PUT", f"/repos/{repo}/contents/{path}", body)
+    return 200 <= status < 300
 
 
 def gh_label_upsert(repo, name, color, description):
-    """Upsert a label with its canonical color/description via `--force` — a
-    no-op create on a fresh repo, an in-place re-canonicalize on a re-run."""
-    rc, _ = run_gh([
-        "-R", repo, "label", "create", name, "--force",
-        "--color", color, "--description", description,
-    ])
-    return rc == 0
+    """Upsert a label with its canonical color/description — a create on a fresh
+    repo (POST /labels), an in-place re-canonicalize on a re-run (PATCH the
+    existing label when the create answers 422 'already_exists'). This is the
+    `gh label create --force` behaviour over the REST label surface."""
+    body = {"name": name, "color": color, "description": description}
+    status, _ = http_request("POST", f"/repos/{repo}/labels", body)
+    if status == 422:
+        status, _ = http_request(
+            "PATCH", f"/repos/{repo}/labels/{quote_path(name)}",
+            {"new_name": name, "color": color, "description": description},
+        )
+    return 200 <= status < 300
 
 
 def cmd_init(args):

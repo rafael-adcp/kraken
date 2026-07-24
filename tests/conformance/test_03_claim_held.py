@@ -21,7 +21,7 @@ class ClaimHeldTests(KrakenConformanceTest):
             self.assertEqual(self.comment_count(n), 0, "no comment written on %s" % held)
             self.assertFalse(self.claim_ref_exists(n),
                              "guard created a claim ref despite %s" % held)
-            wrote = any(re.search(r"issue (edit|comment) %d " % n, l) for l in self.log_lines())
+            wrote = any(re.search(r"/issues/%d/(comments|labels)" % n, l) for l in self.log_lines())
             self.assertFalse(wrote, "guard wrote to issue %d despite %s" % (n, held))
             cas = any("git/" in l for l in self.log_lines())
             self.assertFalse(cas, "guard reached the git-data API despite %s" % held)

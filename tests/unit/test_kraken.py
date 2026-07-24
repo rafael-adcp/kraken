@@ -8,6 +8,7 @@ Stdlib only (unittest), no network, no gh. Run: python3 tests/unit/test_kraken.p
 """
 
 import os
+import re
 import sys
 import json
 import tempfile
@@ -110,20 +111,12 @@ class RefCasTests(unittest.TestCase):
     result-parsing are under test."""
 
     def setUp(self):
-        self._orig_io = kraken.run_gh_io
-        self._orig_run = kraken.run_gh
+        self._orig_request = kraken.http_request
         self._orig_graphql = kraken.graphql
 
     def tearDown(self):
-        kraken.run_gh_io = self._orig_io
-        kraken.run_gh = self._orig_run
+        kraken.http_request = self._orig_request
         kraken.graphql = self._orig_graphql
-
-    def test_is_http_422(self):
-        self.assertTrue(kraken._is_http_422("gh: Reference already exists (HTTP 422)"))
-        self.assertFalse(kraken._is_http_422("gh: Not Found (HTTP 404)"))
-        self.assertFalse(kraken._is_http_422(""))
-        self.assertFalse(kraken._is_http_422(None))
 
     def test_claim_ref_name(self):
         self.assertEqual(kraken.claim_ref(42), "refs/kraken/claims/42")
@@ -132,17 +125,18 @@ class RefCasTests(unittest.TestCase):
     def test_create_claim_commit_is_an_orphan_marker_commit(self):
         captured = {}
 
-        def fake_io(args, input_text=None):
-            captured["args"] = args
-            captured["body"] = input_text
-            return 0, json.dumps({"sha": "abc123"}), ""
-        kraken.run_gh_io = fake_io
+        def fake_request(method, path, body=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["body"] = body
+            return 201, json.dumps({"sha": "abc123"})
+        kraken.http_request = fake_request
 
         sha = kraken.create_claim_commit("o/tasks", {"type": "claim", "worker": "w1"})
         self.assertEqual(sha, "abc123")
-        self.assertIn("repos/o/tasks/git/commits", captured["args"])
-        self.assertIn("--input", captured["args"])
-        payload = json.loads(captured["body"])
+        self.assertEqual(captured["method"], "POST")
+        self.assertIn("repos/o/tasks/git/commits", captured["path"])
+        payload = captured["body"]  # the JSON body is a dict now, not a string
         self.assertEqual(payload["parents"], [], "claim commit must be an orphan")
         self.assertEqual(payload["tree"], kraken.EMPTY_TREE_SHA, "claim commit must use the empty tree")
         self.assertEqual(kraken.parse_marker(payload["message"]),
@@ -152,16 +146,14 @@ class RefCasTests(unittest.TestCase):
     def test_create_claim_commit_falls_back_to_head_tree_on_422(self):
         trees = []
 
-        def fake_io(args, input_text=None):
-            joined = " ".join(args)
-            if joined.endswith("commits/HEAD"):  # gh_json HEAD read (via run_gh)
-                return 0, json.dumps({"commit": {"tree": {"sha": "headtree"}}}), ""
-            body = json.loads(input_text)
+        def fake_request(method, path, body=None):
+            if method == "GET" and path.endswith("commits/HEAD"):
+                return 200, json.dumps({"commit": {"tree": {"sha": "headtree"}}})
             trees.append(body["tree"])
             if body["tree"] == kraken.EMPTY_TREE_SHA:
-                return 1, "", "gh: unprocessable (HTTP 422)"
-            return 0, json.dumps({"sha": "def456"}), ""
-        kraken.run_gh_io = fake_io
+                return 422, ""
+            return 201, json.dumps({"sha": "def456"})
+        kraken.http_request = fake_request
 
         sha = kraken.create_claim_commit("o/tasks", {"type": "claim", "worker": "w1"})
         self.assertEqual(sha, "def456")
@@ -169,45 +161,47 @@ class RefCasTests(unittest.TestCase):
                          "must retry with the HEAD tree after the empty-tree 422")
 
     def test_create_claim_commit_returns_none_on_transport_fault(self):
-        kraken.run_gh_io = lambda a, input_text=None: (1, "", "gh: network down")
+        kraken.http_request = lambda m, p, body=None: (kraken.STATUS_NETWORK_FAILURE, "")
         self.assertIsNone(kraken.create_claim_commit("o/t", {"type": "claim", "worker": "w"}))
 
     def test_claim_ref_create_maps_the_cas_outcomes(self):
-        kraken.run_gh_io = lambda a, input_text=None: (0, "{}", "")
+        kraken.http_request = lambda m, p, body=None: (201, "{}")
         self.assertEqual(kraken.claim_ref_create("o/t", 7, "sha"), "won")
 
-        kraken.run_gh_io = lambda a, input_text=None: (
-            1, "", "gh: Reference already exists (HTTP 422)")
+        # HTTP 422 IS the CAS-lost signal — an integer status, not a stderr scrape.
+        kraken.http_request = lambda m, p, body=None: (422, "")
         self.assertEqual(kraken.claim_ref_create("o/t", 7, "sha"), "lost")
 
-        kraken.run_gh_io = lambda a, input_text=None: (1, "", "gh: 500 server error")
+        kraken.http_request = lambda m, p, body=None: (500, "")
         self.assertEqual(kraken.claim_ref_create("o/t", 7, "sha"), "fail")
 
     def test_claim_ref_delete_tolerates_a_missing_ref(self):
-        kraken.run_gh_io = lambda a, input_text=None: (0, "", "")
+        kraken.http_request = lambda m, p, body=None: (204, "")
         self.assertTrue(kraken.claim_ref_delete("o/t", 7))
         # Already gone (422) is success — the delete is idempotent.
-        kraken.run_gh_io = lambda a, input_text=None: (
-            1, "", "gh: Reference does not exist (HTTP 422)")
+        kraken.http_request = lambda m, p, body=None: (422, "")
         self.assertTrue(kraken.claim_ref_delete("o/t", 7))
         # A real transport fault is not tolerated.
-        kraken.run_gh_io = lambda a, input_text=None: (1, "", "gh: network down")
+        kraken.http_request = lambda m, p, body=None: (kraken.STATUS_NETWORK_FAILURE, "")
         self.assertFalse(kraken.claim_ref_delete("o/t", 7))
 
     def test_claim_ref_list_parses_matching_refs(self):
-        kraken.run_gh = lambda args: (
-            0, "refs/kraken/claims/7\tsha7\nrefs/kraken/claims/12\tsha12\n")
+        kraken.http_request = lambda m, p, body=None: (200, json.dumps([
+            {"ref": "refs/kraken/claims/7", "object": {"sha": "sha7"}},
+            {"ref": "refs/kraken/claims/12", "object": {"sha": "sha12"}},
+        ]))
         self.assertEqual(kraken.claim_ref_list("o/t"), {7: "sha7", 12: "sha12"})
 
     def test_claim_ref_list_transport_failure_is_none(self):
-        kraken.run_gh = lambda args: (1, "")
+        kraken.http_request = lambda m, p, body=None: (500, "")
         self.assertIsNone(kraken.claim_ref_list("o/t"))
 
     def test_claim_ref_owner_names_the_ref_holder(self):
         # The §5 re-check discriminator: a 422 is a real loss only when the ref
         # belongs to another worker. claim_ref_owner reads the ref's commit
         # marker to name the current holder.
-        kraken.run_gh = lambda args: (0, "refs/kraken/claims/7\tsha7\n")
+        kraken.http_request = lambda m, p, body=None: (200, json.dumps([
+            {"ref": "refs/kraken/claims/7", "object": {"sha": "sha7"}}]))
         kraken.graphql = lambda q: {"data": {"repository": {
             "c0": {"committedDate": "t", "message": clm("w1")}}}}
         self.assertEqual(kraken.claim_ref_owner("o/t", 7), "w1")
@@ -215,7 +209,7 @@ class RefCasTests(unittest.TestCase):
         # Absent ref → None (treated as not-ours by the caller).
         self.assertIsNone(kraken.claim_ref_owner("o/t", 9))
         # Transport failure → None, never a guessed owner.
-        kraken.run_gh = lambda args: (1, "")
+        kraken.http_request = lambda m, p, body=None: (500, "")
         self.assertIsNone(kraken.claim_ref_owner("o/t", 7))
 
     def test_resolve_commit_meta_batches_and_parses(self):
@@ -477,49 +471,61 @@ class CommentRecordsPaginationTests(unittest.TestCase):
     read would miss a delivered marker or an earlier validation comment."""
 
     def setUp(self):
-        self._orig_run_gh = kraken.run_gh
+        self._orig_request = kraken.http_request
 
     def tearDown(self):
-        kraken.run_gh = self._orig_run_gh
+        kraken.http_request = self._orig_request
+
+    @staticmethod
+    def _paged(recs):
+        """A fake http_request that serves `recs` as REST comment pages, keyed on
+        the per_page/page query http_paginated walks."""
+        def fake(method, path, body=None):
+            page = int(re.search(r"[?&]page=(\d+)", path).group(1))
+            per = kraken.PER_PAGE
+            chunk = recs[(page - 1) * per: page * per]
+            return 200, json.dumps(chunk)
+        return fake
 
     def test_uses_paginated_rest_endpoint(self):
         calls = []
 
-        def fake_run_gh(args):
-            calls.append(args)
-            return 0, ""
-        kraken.run_gh = fake_run_gh
+        def fake(method, path, body=None):
+            calls.append((method, path))
+            return 200, json.dumps([])
+        kraken.http_request = fake
         kraken.comment_records("OWNER/tasks", "42")
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0], "api")
-        self.assertIn("repos/OWNER/tasks/issues/42/comments", calls[0])
-        self.assertIn("--paginate", calls[0])
+        self.assertEqual(calls[0][0], "GET")
+        self.assertIn("repos/OWNER/tasks/issues/42/comments", calls[0][1])
+        self.assertIn("per_page=", calls[0][1])
+        self.assertIn("page=", calls[0][1])
 
     def test_returns_records_past_one_hundred(self):
-        recs = [{"body": f"c {i}", "createdAt": f"2026-07-01T00:{i % 60:02d}:00Z"}
+        # REST spells the timestamp created_at; comment_records maps it.
+        recs = [{"body": f"c {i}", "created_at": f"2026-07-01T00:{i % 60:02d}:00Z"}
                 for i in range(150)]
-        recs[129] = {"body": dlv("w", pr="https://x/pull/9"), "createdAt": "2026-07-09T00:00:00Z"}
-        out = "\n".join(kraken.json.dumps(r) for r in recs)
-        kraken.run_gh = lambda args: (0, out)
+        recs[129] = {"body": dlv("w", pr="https://x/pull/9"), "created_at": "2026-07-09T00:00:00Z"}
+        kraken.http_request = self._paged(recs)
         result = kraken.comment_records("OWNER/tasks", "42")
         self.assertEqual(len(result), 150)
         # The delivered marker past comment 100 is found — invisible under a
         # 100-comment truncation.
         self.assertEqual(kraken.parse_pr_url(result), "https://x/pull/9")
 
-    def test_parses_pretty_printed_stream(self):
+    def test_maps_created_at_to_createdat(self):
         recs = [
-            {"body": dlv("w1", pr="https://x/pull/1"), "createdAt": "2026-07-01T00:00:00Z"},
-            {"body": "just prose", "createdAt": "2026-07-01T05:00:00Z"},
+            {"body": dlv("w1", pr="https://x/pull/1"), "created_at": "2026-07-01T00:00:00Z"},
+            {"body": "just prose", "created_at": "2026-07-01T05:00:00Z"},
         ]
-        pretty = "".join(kraken.json.dumps(r, indent=2) + "\n" for r in recs)
-        kraken.run_gh = lambda args: (0, pretty)
+        kraken.http_request = self._paged(recs)
         result = kraken.comment_records("OWNER/tasks", "42")
         self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["createdAt"], "2026-07-01T00:00:00Z")
         self.assertEqual(kraken.parse_pr_url(result), "https://x/pull/1")
 
     def test_transport_failure_returns_none(self):
-        kraken.run_gh = lambda args: (1, "")
+        kraken.http_request = lambda m, p, body=None: (500, "")
         self.assertIsNone(kraken.comment_records("OWNER/tasks", "42"))
 
 

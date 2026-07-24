@@ -99,7 +99,7 @@ class InitUpgradeTests(KrakenConformanceTest):
         self._seed_drift()
         self.truncate_log()
         r = self.kraken("init", "OWNER/tasks", "--upgrade",
-                        fail=r"contents/\.github/workflows/reclaim-stale\.yml -X PUT")
+                        fail=r"PUT \S*contents/\.github/workflows/reclaim-stale\.yml")
         self.assertEqual(r.rc, 20, "a failed asset write must exit 20 (transport)")
         self.assertIn("stage=asset path=.github/workflows/reclaim-stale.yml", r.err,
                       "the failed asset was not named")
@@ -134,7 +134,7 @@ class InitUpgradeTests(KrakenConformanceTest):
                              "%s was overwritten by a plain (create-only) init" % dst)
 
         # Nothing at all is written: no create (all six exist), no upgrade.
-        self.assertNotIn("-X PUT", self.log_text(),
+        self.assertNotIn("PUT ", self.log_text(),
                          "plain init wrote an asset (a PUT) when it must only report")
         self.assertIn("assets_drifted=2", r.out)
         self.assertIn("assets_upgraded=0", r.out)

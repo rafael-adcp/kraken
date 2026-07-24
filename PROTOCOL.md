@@ -442,8 +442,12 @@ The **reference implementation** of the worker side is
 with a subcommand per transition (`list-startable`, `claim`, `heartbeat`,
 `escalate`, `deliver`, `release`, `watch`), driven by a Claude Code skill
 ([`skills/unleash/SKILL.md`](skills/unleash/SKILL.md)) that supplies the
-judgment between transitions. `gh` remains the transport, so it runs against any
-authenticated `gh`. It also ships a `claim-next OWNER/tasks <project> <worker>`
+judgment between transitions. The transport is direct HTTP over the stdlib
+(`urllib`) against the GitHub REST + GraphQL API — the base URL comes from
+`GITHUB_API_URL` (default `https://api.github.com`) and the token from
+`GH_TOKEN`/`GITHUB_TOKEN`, falling back to one `gh auth token` spawn at startup —
+so it runs against any authenticated host without shelling out to `gh` per call.
+It also ships a `claim-next OWNER/tasks <project> <worker>`
 convenience that composes `list-startable` + `claim` into the whole
 deterministic claim loop (list, guard, CAS, skip-on-loss, try the next
 candidate) behind one invocation — a worker-side ergonomic detail, not part of

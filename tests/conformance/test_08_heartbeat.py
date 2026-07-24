@@ -4,6 +4,7 @@ progress text — NO timeline comment, no label change — and the task stays
 locked afterwards (a worker heartbeating must never free its own claim)."""
 import json
 import os
+import re
 import unittest
 
 from harness import KrakenConformanceTest
@@ -33,8 +34,8 @@ class HeartbeatTests(KrakenConformanceTest):
         # No timeline noise, no label change.
         self.assertEqual(self.comment_count(7), 0, "heartbeat posted a comment")
         self.assertTrue(self.has_label(7, "in-progress"), "heartbeat touched the labels")
-        self.assertFalse(any("issue edit" in l for l in self.log_lines()),
-                         "heartbeat ran an issue edit")
+        self.assertFalse(any(re.search(r"/issues/\d+/labels", l) for l in self.log_lines()),
+                         "heartbeat ran a label edit")
 
         # Lock invariant: the task is still held after its own heartbeat, even
         # if the label projection is lost out of band.
