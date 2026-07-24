@@ -169,10 +169,49 @@ has_marker_field() {
     | grep -Eq "<!--[[:space:]]*kraken[[:space:]]+\{[^}]*\"type\":\"$2\"[^}]*\"$3\":\"[^\"]+\"[^}]*\}[[:space:]]*-->"
 }
 
+# The attribution disclaimer's format is single-sourced in kraken.py (SKILL.md
+# "Conventions"); ask the program for the line instead of pinning a second copy here.
+worker_disclaimer() { python3 "$SCRIPTS/kraken.py" contract disclaimer --worker "${1:-$WORKER}"; }
+
+# Every `gh` invocation the run made — the stub logs one per line.
+stub_log() { cat "$GH_STUB_STATE/log" 2>/dev/null; }
+
 assert_label()    { has_label "$1" "$2" || fail "issue $1: expected label '$2' (have: $(labels_of "$1" | tr '\n' ' '))"; }
 assert_no_label() { no_label  "$1" "$2" || fail "issue $1: label '$2' must NOT be present (have: $(labels_of "$1" | tr '\n' ' '))"; }
 assert_marker() { has_marker "$1" "$2" || fail "issue $1: expected hidden kraken marker of type '$2' in comment stream (§4)"; }
 assert_marker_field() { has_marker_field "$1" "$2" "$3" || fail "issue $1: expected '$2' marker carrying field '$3' in comment stream"; }
+
+# A worker authenticates as the human, so every comment it leaves on the
+# coordination repo must open with the attribution disclaimer (SKILL.md
+# "Conventions"). Requires at least one comment: a run that left none proves nothing.
+assert_comments_disclaimed() {
+  local issue="$1" line n=0 f
+  line="$(worker_disclaimer)"
+  for f in "$GH_STUB_STATE/issues/$issue/comments"/*.md; do
+    [ -f "$f" ] || continue
+    n=$((n + 1))
+    head -n1 "$f" | grep -qF -- "$line" \
+      || fail "issue $issue: comment $(basename "$f") does not open with the attribution disclaimer (first line: $(head -n1 "$f"))"
+  done
+  [ "$n" -gt 0 ] || fail "issue $issue: no comment from the worker at all — nothing to check the disclaimer on"
+}
+
+# Merging is always the human's and a worker never closes a task (Authorization
+# boundaries): not "it failed", but never attempted.
+assert_no_merge_attempted() {
+  if stub_log | grep -Eq 'pr +merge|/pulls/[0-9]+/merge|/merges'; then
+    fail "the worker attempted a merge: $(stub_log | grep -E 'pr +merge|/pulls/[0-9]+/merge|/merges' | head -n1)"
+  fi
+}
+assert_task_open() {
+  local state
+  state="$(cat "$GH_STUB_STATE/issues/$1/state" 2>/dev/null)"
+  [ "$state" = "open" ] \
+    || fail "issue $1: expected still open (a worker delivers for review, it never closes), got '$state'"
+  if stub_log | grep -Eq "issue +close|--state +closed"; then
+    fail "the worker attempted to close the task: $(stub_log | grep -E 'issue +close|--state +closed' | head -n1)"
+  fi
+}
 
 # Work-repo git state.
 pushed_branches() { git --git-dir="$WORK_BARE" for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null; }
