@@ -50,12 +50,15 @@ check_label "kraken-task"    "$SKILL" "$INIT" "$README" "$PROTOCOL" "$TEMPLATE" 
 check_label "in-progress"    "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER"
 check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$ESCALATE"
 check_label "awaiting-merge" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$DELIVER"
+# priority:high is a scheduling preference, not a state: init upserts it, the
+# lister honors it in the startable ordering, and the docs describe that ordering.
+check_label "priority:high"  "$INIT" "$README" "$PROTOCOL" "$LISTER"
 # common typo class: labels use hyphens, never underscores
 for bad in kraken_task in_progress needs_decision awaiting_merge; do
   grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$TEMPLATE" "$REAPER" "$WATCHER" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER" "$HEARTBEAT" 2>/dev/null \
     && err "underscore variant '$bad' found (labels use hyphens)"
 done
-[ "$fail" -eq 0 ] && note "4 canonical labels aligned across files"
+[ "$fail" -eq 0 ] && note "4 canonical labels + priority:high aligned across files"
 
 # --- 1b–1c. Contract vocabulary is single-sourced in kraken.py ---------------
 # kraken.py OWNS the disclaimer format and marker vocabulary (its DISCLAIMER and

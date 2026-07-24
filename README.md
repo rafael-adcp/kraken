@@ -185,6 +185,7 @@ worker reuses that same skill with the harness deltas in [`AGENTS.md`](AGENTS.md
    gh -R OWNER/tasks label create in-progress
    gh -R OWNER/tasks label create needs-decision
    gh -R OWNER/tasks label create awaiting-merge
+   gh -R OWNER/tasks label create priority:high                    # optional — jumps the startable queue
    gh -R OWNER/tasks label create "project:YOUR_PROJECT_NAME"      # one per project you'll queue
    ```
 
@@ -194,6 +195,9 @@ worker reuses that same skill with the harness deltas in [`AGENTS.md`](AGENTS.md
    gets a **`project:<name>` label** (workers are scoped to one project — an
    unlabeled task is invisible to all of them) and dependencies via
    `gh issue edit <n> --add-label "project:YOUR_PROJECT_NAME" --add-blocked-by <m>`.
+   Add the optional **`priority:high`** label to jump a task to the front of the
+   startable queue — workers claim high-priority tasks before older normal ones,
+   with `createdAt` FIFO still ordering each tier.
 
 3. **Prepare the worker environments** — one per worker: a machine, container,
    or just a separate clone where that worker will live, with the project's

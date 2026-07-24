@@ -134,6 +134,10 @@ so the GitHub UI is the dashboard and the issue timeline is the log.
 | `awaiting-merge` | delivered as a draft PR, waiting for review + merge | `0E8A16` green |
 
 `project:<name>` (suggested `5319E7` purple) is routing identity, not state.
+`priority:high` (suggested `B60205` red) is a scheduling preference, not state:
+a startable task carrying it is offered ahead of normal ones (§5), but honoring
+it is optional — a worker that ignores it simply drains in pure `createdAt` FIFO,
+so the label is not a coordination invariant and needs no `PROTOCOL_VERSION` bump.
 Colors and label descriptions are SHOULD (they make every kraken queue read
 the same — see `skills/init/SKILL.md`); the label *names* are MUST.
 
@@ -274,8 +278,9 @@ server-stamped committer date is the liveness clock the reconciler reads (§6).
 
 The sequence is fixed:
 
-1. **List** startable candidates (§3), oldest first by `createdAt`. Label
-   filtering SHOULD be done client-side for determinism.
+1. **List** startable candidates (§3), `priority:high` first and then oldest
+   first by `createdAt`, a stable order that keeps `createdAt` FIFO within each
+   priority tier. Label filtering SHOULD be done client-side for determinism.
 2. **Dependency check**: skip any candidate whose blocked-by issues are not
    all closed.
 3. **Guard**: re-fetch the issue's current labels. If it is now held, the

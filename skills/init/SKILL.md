@@ -84,8 +84,8 @@ plugin upgrade to pull a coordination repo's vendored assets forward.
    `reclaim-stale`, `cleanup-closed`, `requeue-on-reply`, `validate-task`
    workflows) via the contents API, and
    upsert the canonical state-machine labels (`kraken-task`, `in-progress`,
-   `needs-decision`, `awaiting-merge`) with their canonical colors and
-   descriptions:
+   `needs-decision`, `awaiting-merge`) plus the `priority:high` scheduling label
+   with their canonical colors and descriptions:
 
    ```
    python3 "<this skill's folder>/../unleash/kraken.py" init OWNER/tasks [--project <name>] [--upgrade]

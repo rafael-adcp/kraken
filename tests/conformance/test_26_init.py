@@ -42,7 +42,8 @@ class InitTests(KrakenConformanceTest):
                             "asset %s not installed byte-identical to bundled %s" % (dst, src_name))
             self.assertIn("init: asset %s (created)" % dst, r.out, "asset %s not reported created" % dst)
 
-        for lbl in ("kraken-task", "in-progress", "needs-decision", "awaiting-merge", "project:app"):
+        for lbl in ("kraken-task", "in-progress", "needs-decision", "awaiting-merge",
+                    "priority:high", "project:app"):
             self.assertTrue(os.path.isfile(os.path.join(self.state, "labels-meta", lbl)),
                             "label %s not upserted" % lbl)
         with open(os.path.join(self.state, "labels-meta", "kraken-task"), encoding="utf-8") as f:
