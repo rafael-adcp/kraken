@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Tripwire `gh` for the conformance suite. Phase-2 transport (issue #53) makes
+kraken.py talk pure HTTP; nothing on the tested paths may shell out to `gh`. The
+harness sets GH_TOKEN (so no `gh auth token` startup spawn) and prepends this
+directory to PATH, so any surviving `gh` invocation lands here and fails loudly
+instead of silently reaching the real binary."""
+import sys
+
+sys.stderr.write(
+    "no-gh tripwire: kraken.py spawned `gh` during a conformance run "
+    "(args: %s) — the transport must be pure HTTP over GITHUB_API_URL\n"
+    % " ".join(sys.argv[1:])
+)
+sys.exit(97)

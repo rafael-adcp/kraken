@@ -7,6 +7,7 @@ the other exits 10 having written NOTHING (no comment, no label change) — and
 the surviving ref names the winner."""
 import json
 import os
+import re
 import unittest
 
 from harness import KrakenConformanceTest
@@ -43,7 +44,7 @@ class ClaimRaceTests(KrakenConformanceTest):
                          "exactly one claim comment (the CAS loser writes nothing)")
         self.assertIn('"worker":"%s"' % winner, self.last_comment(7),
                       "the one claim comment must be the winner's")
-        self.assertFalse(any("remove-label" in l for l in self.log_lines()),
+        self.assertFalse(any(re.search(r"DELETE \S*/labels/", l) for l in self.log_lines()),
                          "a racer removed a label while backing off")
 
 

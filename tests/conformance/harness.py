@@ -1,21 +1,21 @@
 """Shared harness for the Python conformance suite (tests/conformance/test_*.py).
 
-This is the Python port of the old bash `tests/lib.sh` + `tests/t/*.sh` drivers.
-It reuses the already-Python `gh` stub (tests/gh-stub/gh) unchanged: each test
-gets a fresh stub state directory, the stub dir is prepended to PATH so the
-program under test (skills/unleash/kraken.py) calls the stub and never the real
-`gh`, and the test drives `python3 kraken.py <subcommand>` as a subprocess and
-asserts on the resulting stub state (labels, comments, log).
+Phase-2 transport (issue #53) makes kraken.py talk pure HTTP over stdlib urllib,
+so the conformance seam is the API base, not a `gh` binary on PATH: each test
+gets a fresh state directory and an in-process HTTP stub (tests/gh-stub/server.py)
+serving GitHub's REST + GraphQL surface over that state; the harness points the
+program under test (skills/unleash/kraken.py) at it via `GITHUB_API_URL`, sets a
+stub `GH_TOKEN` so no `gh auth token` spawn is needed, and prepends a tripwire
+`gh` to PATH that fails loudly — proving the transport never shells out to `gh`.
+The test drives `python3 kraken.py <subcommand>` as a subprocess and asserts on
+the resulting stub state (labels, comments, refs, log).
 
-The suite's defining property is preserved from the bash original: the scripts'
-own `--jq` expressions are still evaluated by the *real* `jq` inside the stub, so
-the filters under test are the shipped ones. jq/python3 are therefore required;
-`setUp` skips the whole suite cleanly (via `skipTest`) when jq is absent, so
-`python3 -m unittest discover -s tests/conformance` stays green on minimal
-machines.
+The stub serves the SAME on-disk state layout the retired `gh` CLI stub used, so
+every `mk_*` seeding helper is unchanged. It needs no `jq`: kraken.py parses JSON
+itself now, so there are no `--jq` filters crossing the transport.
 
-A test subclasses `KrakenConformanceTest`. `setUp` creates the scratch state and
-env; the `mk_*` methods seed the stub the way `lib.sh`'s helpers did; `kraken()`
+A test subclasses `KrakenConformanceTest`. `setUp` creates the scratch state,
+starts the stub, and builds the env; the `mk_*` methods seed the stub; `kraken()`
 invokes a kraken.py subcommand; and the `assert_*`/inspection helpers replace
 `lib.sh`'s shell assertions.
 """
@@ -24,6 +24,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -33,6 +34,10 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SCRIPTS = os.path.join(ROOT, "skills", "unleash")
 KRAKEN = os.path.join(SCRIPTS, "kraken.py")
 GH_STUB_DIR = os.path.join(ROOT, "tests", "gh-stub")
+TRIPWIRE_DIR = os.path.join(GH_STUB_DIR, "no-gh")
+
+sys.path.insert(0, GH_STUB_DIR)
+import server as stub_server  # noqa: E402  (path set above)
 
 
 def utcnow():
@@ -73,27 +78,36 @@ class RunResult:
 
 class KrakenConformanceTest(unittest.TestCase):
     def setUp(self):
-        # jq is required by the conformance stub (the scripts' own --jq filters are
-        # evaluated by the real jq). When it is absent the whole suite skips cleanly
-        # so `python3 -m unittest` stays green on minimal machines; CI always has jq.
-        if shutil.which("jq") is None:
-            self.skipTest("jq not found — conformance stub requires it")
         self.state = tempfile.mkdtemp(prefix="kraken-conf-")
         self.addCleanup(shutil.rmtree, self.state, ignore_errors=True)
+        os.makedirs(os.path.join(self.state, "issues"), exist_ok=True)
+        open(os.path.join(self.state, "log"), "w").close()
+        # The in-process HTTP stub — the transport seam. Torn down after the test.
+        self.httpd, self.api_url, self.knobs = stub_server.start(self.state)
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
         # Isolate the claim state dir into this test's scratch so kraken.py never
         # reads or writes the real ~/.kraken (the one-task-at-a-time guard reads
         # it). Tests may reassign self.kraken_state_dir before a run.
         self.kraken_state_dir = os.path.join(self.state, "kraken")
-        os.makedirs(os.path.join(self.state, "issues"), exist_ok=True)
-        open(os.path.join(self.state, "log"), "w").close()
 
     # --- environment ---------------------------------------------------------
 
+    def _apply_knobs(self, mapping):
+        """Route the test's injection knobs to the in-process stub. GH_STUB_FAIL
+        and GH_STUB_BARRIER are no longer subprocess env vars the stub reads —
+        the stub shares this process, so they are set on `self.knobs` here."""
+        self.knobs.set_fail(mapping.get("GH_STUB_FAIL"))
+        self.knobs.set_barrier(mapping.get("GH_STUB_BARRIER") or 0)
+
     def base_env(self, extra=None):
         env = dict(os.environ)
-        env["GH_STUB_STATE"] = self.state
+        env["GITHUB_API_URL"] = self.api_url
+        # A token from the env means kraken.py never spawns `gh auth token`.
+        env["GH_TOKEN"] = "stub-token"
         env["KRAKEN_STATE_DIR"] = self.kraken_state_dir
-        env["PATH"] = GH_STUB_DIR + os.pathsep + env.get("PATH", "")
+        # A tripwire `gh` first on PATH: any surviving `gh` spawn fails loudly.
+        env["PATH"] = TRIPWIRE_DIR + os.pathsep + env.get("PATH", "")
         if extra:
             env.update({k: v for k, v in extra.items() if v is not None})
         return env
@@ -103,12 +117,14 @@ class KrakenConformanceTest(unittest.TestCase):
     def kraken(self, *args, env=None, fail=None, stdin=None):
         """Run `python3 kraken.py <args>`; return a RunResult.
 
-        `fail` sets GH_STUB_FAIL (the stub's injected-failure regex). `env`
-        merges extra environment variables for this call only.
+        `fail` sets the stub's injected-failure regex (matched against
+        "METHOD path [graphql-query]"). `env` merges extra environment variables
+        for this call only.
         """
         extra = dict(env or {})
         if fail is not None:
             extra["GH_STUB_FAIL"] = fail
+        self._apply_knobs(extra)
         proc = subprocess.run(
             ["python3", KRAKEN, *[str(a) for a in args]],
             cwd=ROOT,
@@ -125,6 +141,7 @@ class KrakenConformanceTest(unittest.TestCase):
         `argsets` is a list of arg tuples. Returns a list of RunResult in the
         same order. All share the given `env` (e.g. GH_STUB_BARRIER).
         """
+        self._apply_knobs(dict(env or {}))
         results = [None] * len(argsets)
 
         def worker(i, args):
@@ -146,6 +163,7 @@ class KrakenConformanceTest(unittest.TestCase):
 
     def run_hook(self, hook_rel, stdin, env=None):
         """Run a bundled bash hook (hooks/*.sh) with a JSON event on stdin."""
+        self._apply_knobs(dict(env or {}))
         proc = subprocess.run(
             ["bash", os.path.join(ROOT, hook_rel)],
             cwd=ROOT,

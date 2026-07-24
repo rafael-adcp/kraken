@@ -25,8 +25,11 @@ class ClaimIgnoresCommentsTests(KrakenConformanceTest):
         self.assertEqual(r.out, "claim: claimed issue=50 worker=w1", "machine line")
         self.assertTrue(self.claim_ref_exists(50), "claim ref missing after the claim")
 
-        # The whole point: not one comment read on the claim path.
-        read_comments = [l for l in self.log_lines() if "issues/50/comments" in l]
+        # The whole point: not one comment READ on the claim path (the single
+        # POST that writes the claim comment is expected; a GET of the thread is
+        # the O(N) arbitration cost the ref CAS retired).
+        read_comments = [l for l in self.log_lines()
+                         if "issues/50/comments" in l and l.startswith("GET")]
         self.assertEqual(read_comments, [],
                          "claim read the comment thread: %s" % read_comments)
 

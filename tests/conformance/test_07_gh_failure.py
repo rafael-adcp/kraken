@@ -24,7 +24,7 @@ class GhFailureTests(KrakenConformanceTest):
         self.assertEqual(r.rc, 20, "list-startable exit on depends-on fallback gh graphql failure")
 
         # claim: failure at the guard read — nothing written, no CAS attempted.
-        r = self.kraken("claim", "OWNER/tasks", 7, "w1", fail="issue view")
+        r = self.kraken("claim", "OWNER/tasks", 7, "w1", fail=r"issues/7$")
         self.assertEqual(r.rc, 20, "claim exit on guard failure")
         self.assertEqual(r.out, "claim: gh-failure issue=7 stage=guard", "guard failure machine line")
         self.assertEqual(self.comment_count(7), 0, "no comment after guard failure")
@@ -38,7 +38,7 @@ class GhFailureTests(KrakenConformanceTest):
 
         # claim: the CAS won but the projection comment fails — the claim is HELD
         # (the ref exists), state honestly ambiguous (20).
-        r = self.kraken("claim", "OWNER/tasks", 7, "w1", fail="issue comment")
+        r = self.kraken("claim", "OWNER/tasks", 7, "w1", fail=r"POST \S*/comments")
         self.assertEqual(r.rc, 20, "claim exit on projection-comment failure")
         self.assertEqual(r.out, "claim: gh-failure issue=7 stage=comment (claim held)",
                          "comment failure machine line")
@@ -49,7 +49,7 @@ class GhFailureTests(KrakenConformanceTest):
         # been removed and the ref must NOT have been deleted.
         self.mk_issue(8, "held task", "kraken-task", "project:app", "in-progress")
         self.mk_claim_ref(8, "w1")
-        r = self.kraken("release", "OWNER/tasks", 8, "w1", fail="issue comment")
+        r = self.kraken("release", "OWNER/tasks", 8, "w1", fail=r"POST \S*/comments")
         self.assertEqual(r.rc, 20, "release exit on comment failure")
         self.assertTrue(self.has_label(8, "in-progress"),
                         "release removed the label before the released comment landed")

@@ -1,7 +1,7 @@
 # Kraken developer tasks — a thin front-end over the checks in tests/ and
-# scripts/. Requires `python3` + `jq`. `test-agent` additionally needs a
-# logged-in `claude` CLI and spends tokens, so it is never run automatically (no
-# hook, no CI) — invoke it by hand. See CONTRIBUTING.md.
+# scripts/. Requires `python3` (stdlib only — no `jq`, no `gh`). `test-agent`
+# additionally needs a logged-in `claude` CLI and spends tokens, so it is never
+# run automatically (no hook, no CI) — invoke it by hand. See CONTRIBUTING.md.
 SHELL := bash
 
 .PHONY: help check test lint test-agent
@@ -12,7 +12,7 @@ help: ## Show this help
 
 check: test lint ## Run every token-free check (what CI runs on each PR)
 
-test: ## Test suite — conformance + unit, mechanical, token-free (needs jq)
+test: ## Test suite — conformance + unit, mechanical, token-free (stdlib only)
 	python3 -m unittest discover -s tests/unit -p 'test_*.py'
 	python3 -m unittest discover -s tests/conformance -p 'test_*.py'
 

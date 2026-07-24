@@ -4,6 +4,7 @@ the coordination repo PRIVATE, install the bundled assets via the contents API
 (create / skip-unchanged / flag-drifted), and upsert the canonical labels —
 proven against the gh stub with no LLM."""
 import filecmp
+import json
 import os
 import unittest
 
@@ -30,8 +31,10 @@ class InitTests(KrakenConformanceTest):
         self.truncate_log()
         r = self.kraken("init", "OWNER/tasks", "--project", "app")
         self.assertEqual(r.rc, 0, "fresh init exit")
-        self.assertIn("repo create OWNER/tasks --private", self.log_text(),
-                      "fresh init did not create the repo PRIVATE")
+        self.assertIn("POST /user/repos", self.log_text(),
+                      "fresh init did not create the repo")
+        with open(os.path.join(self.state, "repo", "create.json"), encoding="utf-8") as f:
+            self.assertTrue(json.load(f)["private"], "repo was not created PRIVATE")
 
         for src_name, dst in zip(ASSET_SRCS, ASSET_DSTS):
             src = os.path.join(SCRIPTS, src_name)
@@ -51,8 +54,8 @@ class InitTests(KrakenConformanceTest):
         self.truncate_log()
         r = self.kraken("init", "OWNER/tasks", "--project", "app")
         self.assertEqual(r.rc, 0, "idempotent re-run exit")
-        self.assertNotIn("repo create", self.log_text(), "re-run wrongly re-created the repo")
-        self.assertNotIn("-X PUT", self.log_text(), "re-run wrongly re-wrote an asset (PUT on unchanged file)")
+        self.assertNotIn("POST /user/repos", self.log_text(), "re-run wrongly re-created the repo")
+        self.assertNotIn("PUT ", self.log_text(), "re-run wrongly re-wrote an asset (PUT on unchanged file)")
         self.assertIn("init: asset %s (unchanged)" % ASSET_DSTS[0], r.out,
                       "re-run did not report the task template as unchanged")
 
@@ -68,7 +71,7 @@ class InitTests(KrakenConformanceTest):
                       "drifted asset not flagged")
         self.assertTrue(filecmp.cmp(self._contents(".github/workflows/reclaim-stale.yml"), custom, shallow=False),
                         "plain init overwrote a drifted asset — create-only violated")
-        self.assertNotIn("-X PUT", self.log_text(),
+        self.assertNotIn("PUT ", self.log_text(),
                          "a PUT was issued during a plain run where every asset already exists")
 
 

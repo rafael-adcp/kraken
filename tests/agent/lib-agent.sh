@@ -41,8 +41,22 @@ trap 'rm -rf "$SCRATCH"' EXIT
 mkdir -p "$GH_STUB_STATE/contents/.github"
 cp "$SCRIPTS/kraken.py" "$GH_STUB_STATE/contents/.github/kraken.py"
 
-# The gh-stub must win over the real gh for BOTH repos in this run.
+# The gh-stub CLI must win over the real gh for the MODEL's own commands (the
+# work-repo `gh pr create`, etc.) in this run.
 export PATH="$GH_STUB:$PATH"
+
+# kraken.py's own transitions talk pure HTTP now (issue #53), not `gh` — so the
+# skill's transition calls resolve against the in-process HTTP stub of GitHub's
+# REST + GraphQL API, serving the SAME $GH_STUB_STATE the CLI stub reads. Start it
+# on an ephemeral port, point kraken.py at it via GITHUB_API_URL, and supply a
+# token so no `gh auth token` spawn is attempted. The model's `gh` commands still
+# resolve to the CLI stub on PATH above.
+python3 "$GH_STUB/server.py" "$GH_STUB_STATE" > "$SCRATCH/api-url" 2>/dev/null &
+STUB_PID=$!
+trap 'kill "$STUB_PID" 2>/dev/null; rm -rf "$SCRATCH"' EXIT
+for _i in $(seq 1 50); do [ -s "$SCRATCH/api-url" ] && break; sleep 0.1; done
+export GITHUB_API_URL="$(head -n1 "$SCRATCH/api-url")"
+export GH_TOKEN="${GH_TOKEN:-stub-token}"
 
 # --- coordination queue seeding (mirrors tests/lib.sh, standalone on purpose) --
 # mk_task N TITLE [LABEL...] — a queued task. createdAt derives from N.

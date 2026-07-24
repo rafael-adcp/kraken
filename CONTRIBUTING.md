@@ -27,19 +27,20 @@ checks. These two are token-free (no model calls, no network) and run in CI on
 every PR:
 
 ```bash
-make test    # conformance + unit suites (native `python3 -m unittest`) — conformance needs jq
+make test    # conformance + unit suites (native `python3 -m unittest`) — stdlib only
 make lint    # deterministic skill lint (bash scripts/lint-skills.sh)
 make check   # both of the above
 ```
 
 - **`make test`** runs the native stdlib runner — two `python3 -m unittest
   discover` passes over `tests/unit/` and `tests/conformance/`. The conformance
-  suite drives the bundled transition program against a stateful `gh` stub,
+  suite drives the bundled transition program against an in-process HTTP stub of
+  GitHub's REST + GraphQL API (`tests/gh-stub/server.py`), reached over
+  `GITHUB_API_URL` — the same transport seam kraken.py uses in production —
   proving the queue protocol mechanically (the claim-ref CAS race, thread
-  independence, the reconciler, honest release, …); the `tests/unit/` pass covers the `kraken.py`
-  units. The conformance suite **requires `jq`**; without it those cases skip
-  cleanly (`harness.setUp`), so it's safe on a minimal machine, but install `jq`
-  to actually exercise them.
+  independence, the reconciler, honest release, …); the `tests/unit/` pass covers
+  the `kraken.py` units. Both suites are **stdlib only** (no `jq`, no `gh`), so
+  they run on a minimal machine.
 - **`make lint`** is the deterministic guard against the silent breakage a prose
   skill is exposed to: label drift across files, orphan "step N" references,
   task-template field drift, broken relative links/images, and unparseable
