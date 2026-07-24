@@ -322,6 +322,13 @@ delivered, the result with the acceptance check executed, and the close:
 
 ## Why not just use X?
 
+| Alternative | Coordination primitive | Infra required | Agent-agnostic | Prefer it when |
+| --- | --- | --- | --- | --- |
+| **GitHub Copilot coding agent** | Issue assignment (native GitHub) | Hosted sandbox; nothing beyond GitHub Actions | No | Code is on GitHub and the task needs nothing the platform doesn't already give it |
+| **Claude Code cloud / scheduled agents** | A schedule waking a managed sandbox | Zero — the sandbox is managed for you | No | You want scheduled runs with no environment to keep and the sandbox suits the work |
+| **`claude-code-action` in CI** | An event trigger (push / PR / label) | Ephemeral, disposable CI runner | No | Automation is CI-shaped and a fresh runner is the correct environment |
+| **Kraken** | An issue queue drained via [`kraken-protocol/4`](PROTOCOL.md) | Your prepared, long-lived environment | Yes | The environment is the point — work must run where your services, data, and credentials already live, with named, audited workers |
+
 By 2026 the obvious reflex is "doesn't this already exist?" — assigning an issue
 to an agent is native GitHub, Claude Code runs scheduled agents in the cloud, and
 `claude-code-action` runs it in CI. It does exist, and for a single repo living
@@ -477,6 +484,33 @@ so the **reaper stays the backstop** for hard death. Headless drivers (system cr
 are the natural next step for surviving the terminal entirely — see the
 alternatives table in
 [#32](https://github.com/rafael-adcp/kraken/issues/32).
+
+</details>
+
+<details>
+<summary><b>Is the Copilot CLI worker as self-healing as the Claude Code one?</b></summary>
+
+At the protocol layer, yes — **"agent-agnostic"** in [PROTOCOL.md](PROTOCOL.md)
+means the **wire contract**: the labels, the claim-ref CAS, the hidden markers,
+and the attribution disclaimer are identical for every harness. It does **not**
+promise identical failure-recovery latency, because the recovery machinery is
+harness-specific: the bundled `SessionEnd`/`StopFailure` hooks are **Claude Code
+hook events** and never fire around a `copilot` process.
+
+The Copilot harness gets its equivalent from
+[`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) itself: `kraken.py claim`
+records the open claim in `~/.kraken/claim-<worker>.json` and every terminal
+transition (deliver/escalate/release) removes it, so when the `copilot` process
+exits with that file still present the drain provably died holding the claim —
+crash, kill, or a rate-limit abort — and the loop runs `kraken.py release` on
+the spot. Its exit/Ctrl-C trap does the same when the loop itself is stopped
+mid-drain. The release is scoped to the loop's own `--worker-name`, so a
+co-located worker's live claim is never touched.
+
+The asymmetry that remains: a **bare** `copilot -p …` invocation outside the
+loop has no supervisor, so a death there waits for the ~6h reconciler — just
+like a hard kill / power loss does on either harness. If you drain with
+Copilot, run it through the loop.
 
 </details>
 

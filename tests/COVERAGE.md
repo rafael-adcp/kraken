@@ -98,7 +98,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| L338–340 | A worker abandoning a claim **MUST** release honestly: post the `released` marker, remove `in-progress`, **then** delete the claim ref (deleting the ref is what frees the task) — comment first, ref last | ✅ pinned | `tests/conformance/test_06_release.py` (marker + label dropped + ref deleted; re-claimable after); `tests/conformance/test_11_write_transition_failures.py` (ordering under gh failure); `tests/conformance/test_16_session_end_release.py` (SessionEnd auto-release runs `kraken.py release`); `tests/conformance/test_27_stop_failure_release.py` (StopFailure usage-limit auto-release runs `kraken.py release`). |
+| L338–340 | A worker abandoning a claim **MUST** release honestly: post the `released` marker, remove `in-progress`, **then** delete the claim ref (deleting the ref is what frees the task) — comment first, ref last | ✅ pinned | `tests/conformance/test_06_release.py` (marker + label dropped + ref deleted; re-claimable after); `tests/conformance/test_11_write_transition_failures.py` (ordering under gh failure); `tests/conformance/test_16_session_end_release.py` (SessionEnd auto-release runs `kraken.py release`); `tests/conformance/test_27_stop_failure_release.py` (StopFailure usage-limit auto-release runs `kraken.py release`); `tests/conformance/test_32_loop_fast_release.py` (the Copilot ambush loop's fast release — mid-drain death and SIGINT both run `kraken.py release`, scoped to the loop's own worker). |
 
 ## §10 Close and cleanup
 
