@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Deterministic lint for the kraken skill sources — no tokens, no network.
 # Guards the silent-breakage classes that a prose skill is exposed to:
-#   label drift across files, orphan "step N" references, task-template field
-#   drift, broken relative links/images, and invalid shell/YAML/JSON snippets.
+#   label drift across files, protocol-version drift, orphan "step N"
+#   references, task-template field drift, broken relative links/images, and
+#   invalid shell/YAML/JSON snippets.
 # Runs as a CI gate (.github/workflows/lint.yml) and locally (e.g. a pre-push hook).
 set -uo pipefail
 
@@ -89,9 +90,9 @@ if command -v python3 >/dev/null 2>&1; then
     && note "docs quote the attribution disclaimer illustratively"
 
   # [1d] plugin.json's declared protocol version tracks kraken.py's
-  # PROTOCOL_VERSION — the drift class that let plugin.json advertise
-  # kraken-protocol/3 long after the protocol/4 bump. Executed, not diffed:
-  # the constant is the single source, and the declaration must equal it.
+  # PROTOCOL_VERSION — the drift class that let plugin.json advertise a retired
+  # protocol revision long after the bump. Executed, not diffed: the constant
+  # is the single source, and the declaration must equal it.
   echo "[1d] protocol version (plugin.json vs kraken.py PROTOCOL_VERSION)"
   fail_before=$fail
   pv="$(kcontract protocol-version)"
@@ -106,6 +107,34 @@ if command -v python3 >/dev/null 2>&1; then
 else
   note "python3 unavailable — skipping contract-derived checks (1b–1d)"
 fi
+
+# --- 1e. Protocol version is single-sourced in PROTOCOL.md ------------------
+# The spec wins on any disagreement (CONTRIBUTING.md), so PROTOCOL.md's own
+# "**Version:**" header is the canonical declaration and every other
+# kraken-protocol/<n> in the tree must name that same revision. Guards the drift
+# class where AGENTS.md and CONTRIBUTING.md kept pointing contributors — and
+# agents, which read AGENTS.md at runtime — at a contract the code no longer
+# implements. The one legitimate exception is PROTOCOL.md's own version history,
+# whose "What changed in ..." paragraphs name retired revisions on purpose.
+echo "[1e] protocol version (repo-wide vs $PROTOCOL)"
+fail_before=$fail
+canon="$(grep -m1 -oE '^\*\*Version: `kraken-protocol/[0-9]+`' "$PROTOCOL" | grep -oE '[0-9]+')"
+if [ -z "$canon" ]; then
+  err "$PROTOCOL declares no '**Version: \`kraken-protocol/<n>\`**' header"
+else
+  # grep -I skips binaries; -no gives one "file:line:kraken-protocol/<n>" per hit
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    v="${hit##*:}"
+    [ "$v" = "kraken-protocol/$canon" ] && continue
+    where="${hit%:*}"; f="${where%:*}"; n="${where##*:}"
+    [ "$f" = "./$PROTOCOL" ] \
+      && sed -n "${n}p" "$PROTOCOL" | grep -qF 'What changed in' && continue
+    err "${f#./}:$n says '$v' but $PROTOCOL declares kraken-protocol/$canon"
+  done < <(grep -rInoE 'kraken-protocol/[0-9]+' . --exclude-dir=.git)
+fi
+[ "$fail" -eq "$fail_before" ] \
+  && note "every kraken-protocol/<n> in the tree matches PROTOCOL.md ($canon)"
 
 # --- 2. Every "step N" reference points at a step that exists ---------------
 echo "[2] step references (in $SKILL)"

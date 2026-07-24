@@ -7,6 +7,12 @@ on:
     paths:
       - "skills/**"
       - "README.md"
+      # the lint cross-checks these against the spec (labels, protocol version),
+      # so a PR touching only one of them still has to run it
+      - "PROTOCOL.md"
+      - "AGENTS.md"
+      - "CONTRIBUTING.md"
+      - ".claude-plugin/plugin.json"
       - "scripts/**"
       - ".github/workflows/lint.yml"
   push:
