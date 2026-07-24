@@ -70,6 +70,7 @@ EXIT_OK = 0
 EXIT_LOST = 10
 EXIT_NOT_CLEAR = 11
 EXIT_PROTOCOL_MISMATCH = 12  # drain refused: vendored assets drifted from the bundled copy
+EXIT_UNKNOWN_PROJECT = 13  # drain refused: the repo has no project:<name> label
 EXIT_TRANSPORT = 20
 EXIT_NONE = 3  # claim-next: nothing startable to claim (not empty-vs-error ambiguous)
 EXIT_USAGE = 2
@@ -890,6 +891,30 @@ def cmd_claim(args):
 
 # --- subcommand: claim-next --------------------------------------------------
 
+def verify_project(repo, project):
+    """Check that the coordination repo actually carries the `project:<name>`
+    label this worker was pointed at. Returns (ok, message): True when the label
+    exists, False (with a message naming the configured projects and the fix)
+    when it does not, and None when the label read itself failed — a project is
+    never declared missing from a read that never landed.
+
+    Routing is entirely client-side (§3): a worker scoped to a label nobody uses
+    filters every task out and reads as an empty queue forever, so a typo'd or
+    never-created project silently produces a worker that hears nothing. Cheap to
+    check once, so check it before the drain rather than never."""
+    names = list_projects(repo)
+    if names is None:
+        return (None, "project check: gh-failure stage=labels")
+    if project in names:
+        return (True, "")
+    configured = ", ".join(names) if names else "(none configured)"
+    return (False,
+            "unknown project: %s has no `project:%s` label, so this worker would "
+            "never see a task. Configured projects: %s. Fix the --project "
+            "spelling, or create the label with `kraken.py init %s --project %s`."
+            % (repo, project, configured, repo, project))
+
+
 def cmd_claim_next(args):
     """Collapse the deterministic claim loop into one invocation: list startable
     candidates oldest-first, then guard + CAS each in turn, stopping at the first
@@ -904,11 +929,24 @@ def cmd_claim_next(args):
 
     # Drift handshake (PROTOCOL.md drift guard): before the first claim, refuse to
     # drain if the coordination repo's vendored .github/kraken.py differs from this
-    # worker's bundled copy, or that file cannot be read (fail closed).
+    # worker's bundled copy, or that file cannot be read (fail closed). It stays
+    # the FIRST alarm — a drifted sentinel means nothing else read here is
+    # trustworthy, so no other diagnostic may mask it.
     ok, message = verify_protocol(repo)
     if not ok:
         print(message)
         return EXIT_PROTOCOL_MISMATCH
+
+    # Project preflight: still before the queue is read and before any write,
+    # because a worker scoped to a project label the repo does not carry is deaf,
+    # not idle — it would report an honest-looking empty queue forever.
+    ok, message = verify_project(repo, project)
+    if ok is None:
+        print(message)
+        return EXIT_TRANSPORT
+    if not ok:
+        print(message)
+        return EXIT_UNKNOWN_PROJECT
 
     rows = classify_queue(repo, project, include_body=True)
     if rows is None:
@@ -1109,6 +1147,18 @@ def cmd_watch(args):
     repo, project = args.repo, args.project
     poll_seconds = int(os.environ.get("KRAKEN_WATCH_POLL_SECONDS", "60"))
     retry_seconds = int(os.environ.get("KRAKEN_WATCH_RETRY_SECONDS", "300"))
+
+    # Same preflight as the drain, once, before the first poll: a watcher armed
+    # on a project label the repo does not carry can never emit a wake, so it is
+    # a silent no-op dressed as an ambush. A label read that merely FAILED is not
+    # a refusal — the poll loop already rides out transport faults, so warn and
+    # arm rather than killing the watcher over a startup blip.
+    ok, message = verify_project(repo, project)
+    if ok is False:
+        print(message, file=sys.stderr)
+        return EXIT_UNKNOWN_PROJECT
+    if ok is None:
+        print(message + " — arming anyway", file=sys.stderr)
 
     prev = None
     # Start at "now": retries are owed only for wakes THIS watcher emitted, so
