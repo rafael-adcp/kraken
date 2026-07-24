@@ -78,6 +78,12 @@ EXIT_USAGE = 2
 # projection of the claim ref; the other two are operator-facing states.
 HELD_LABELS = ("in-progress", "needs-decision", "awaiting-merge")
 
+# A scheduling preference, not a state: a startable task carrying this label is
+# offered ahead of normal ones (createdAt FIFO still breaks ties within each
+# tier). Not a coordination invariant — an old worker that ignores it simply
+# falls back to pure FIFO, so honoring it needs no PROTOCOL_VERSION bump.
+PRIORITY_LABEL = "priority:high"
+
 # The wire contract this program speaks (PROTOCOL.md): protocol/4 arbitrates the
 # claim on a git-ref CAS and anchors liveness to the claim ref's commit date.
 PROTOCOL_VERSION = 4
@@ -718,8 +724,10 @@ def resolve_depends_on(repo, targets):
 def classify_queue(repo, project, include_body=False):
     """The shared startable/held classification list-startable and watch's
     snapshot both read — one code path so the filter can't drift between them.
-    Returns a list of (number, title, createdAt, "startable"|"held") sorted
-    oldest-first, or None on transport failure. With include_body=True each row
+    Returns a list of (number, title, createdAt, "startable"|"held") ordered
+    priority:high-first then oldest-first by createdAt within each tier (a stable
+    sort — see PRIORITY_LABEL), or None on transport failure. With
+    include_body=True each row
     gains a fifth element, the issue body, so claim-next can brief a subagent
     from the win without a second fetch (the GraphQL walk already has it).
 
@@ -738,7 +746,15 @@ def classify_queue(repo, project, include_body=False):
         n for n in nodes
         if project_label in {l.get("name", "") for l in n.get("labels", {}).get("nodes", [])}
     ]
-    nodes.sort(key=lambda n: n.get("createdAt", ""))
+    # priority:high tasks lead; createdAt breaks ties FIFO within each tier. The
+    # key sorts on (not-high, createdAt) so the boolean puts the high tier first
+    # and the timestamp keeps the older task ahead inside a tier — a scheduling
+    # preference layered on top of pure FIFO (see PRIORITY_LABEL).
+    def _is_high(node):
+        return PRIORITY_LABEL in {
+            l.get("name", "") for l in node.get("labels", {}).get("nodes", [])
+        }
+    nodes.sort(key=lambda n: (not _is_high(n), n.get("createdAt", "")))
 
     rows = []            # [number, title, createdAt, state-or-None, body]
     fallback_targets = []  # (row_index, dep_number) needing the depends-on batch
@@ -792,7 +808,7 @@ def cmd_list_startable(args):
         for number, _, _, state in sorted(rows, key=lambda r: r[0]):
             print(f"{number}:{state}")
     else:
-        for number, title, _, state in rows:  # already createdAt-sorted
+        for number, title, _, state in rows:  # priority-first, then createdAt FIFO
             if state == "startable":
                 print(f"{number}\t{title}")
     return EXIT_OK
@@ -886,7 +902,7 @@ def cmd_claim_next(args):
         print("claim-next: gh-failure stage=list")
         return EXIT_TRANSPORT
 
-    for number, title, _created, state, body in rows:  # already oldest-first
+    for number, title, _created, state, body in rows:  # priority-first, then FIFO
         if state != "startable":
             continue
         rc = _claim_once(repo, number, worker)
@@ -1507,6 +1523,8 @@ CANONICAL_LABELS = (
      "Blocked on your decision — answer, then remove the label to requeue"),
     ("awaiting-merge", "0E8A16",
      "Delivered as a draft PR — waiting for your review and merge"),
+    ("priority:high", "B60205",
+     "Claimed ahead of normal tasks — a scheduling preference, not a state"),
 )
 PROJECT_LABEL_COLOR = "5319E7"
 PROJECT_LABEL_DESC = (
