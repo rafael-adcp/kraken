@@ -157,17 +157,32 @@ time:
    the heavy part — reading and writing many files — and ~90% of it stops mattering the
    moment the task ships. Run it in a **new subagent**: a context born empty and
    discarded when it returns, so the driver's window stays ~O(1) per task no matter how
-   long the drain runs. Brief it in full — the task pointer `{issue, repo, project,
-   worker-name}` **and** the rules it must honor (steps a–d below, *Conventions* —
-   including the attribution disclaimer — *Bundled transition program*, *Delivering
-   the work*, *Authorization boundaries*); my global rules carry over too. "Compact" is what the
-   *driver* keeps, not how the subagent runs: it works under the whole skill and returns
-   only a **compact result** — task number, final label (`awaiting-merge` /
-   `needs-decision` / `failed`), PR URL, and one line. Still **one task at a time**
-   — the subagent is for context isolation, never for parallelism. If it errors out,
-   leave the task labeled honestly — either keep it `in-progress` for triage or hand
-   it back with `kraken.py release` (which posts the `released` marker and deletes
-   the claim ref — never just strip the label) — and continue the loop.
+   long the drain runs. Brief it **by pointer, not by restatement**: re-emitting these
+   rules into every prompt writes them back into the driver's window once per task —
+   the exact leak the subagent exists to plug — and a runtime second copy drifts from
+   this file the way any duplicated source does. The prompt carries three things:
+
+   - the **task pointer** — `{issue, repo, project, worker-name}` plus the task body
+     step 1 already printed (goal / acceptance / notes), so it needs no second fetch;
+   - **the rules by reference**: tell it to read `<this skill's folder>/SKILL.md` —
+     sections *Conventions*, *Bundled transition program*, *Delivering the work*, and
+     steps a–d below — and to work under them. Interpolate the real folder path, the
+     same one every `kraken.py` invocation here already uses;
+   - ***Authorization boundaries*, inline and verbatim** — the one deliberate
+     exception, for the reason that section itself gives: they must be visible without
+     reading another file. A subagent that ends up rule-less *and* holds push access is
+     precisely the case not worth risking on a file read.
+
+   **That read is not optional.** A subagent that cannot read the pointed file (wrong
+   path, unreadable file) **aborts the task and says so** — it never proceeds on partial
+   rules. My global rules carry over too. "Compact" is what the *driver* keeps, not how
+   the subagent runs: it works under the whole skill and returns only a **compact
+   result** — task number, final label (`awaiting-merge` / `needs-decision` / `failed`),
+   PR URL, and one line. Still **one task at a time** — the subagent is for context
+   isolation, never for parallelism. If it errors out — an aborted read included — leave
+   the task labeled honestly (either keep it `in-progress` for triage or hand it back
+   with `kraken.py release`, which posts the `released` marker and deletes the claim
+   ref — never just strip the label) and continue the loop.
 
    Inside the subagent:
    a. **Assumptions.** Restate the goal and post your **Assumptions** (my global rule)
