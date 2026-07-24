@@ -480,10 +480,13 @@ so the task is back on the queue in seconds instead of waiting ~6h for the
 reaper. That covers a graceful end only; a usage-limit pause never fires
 `SessionEnd` either, but its own `StopFailure` hook releases the claim there
 (see the limit FAQ above). A hard kill / crash / power loss fires neither hook,
-so the **reaper stays the backstop** for hard death. Headless drivers (system cron, GitHub Actions)
-are the natural next step for surviving the terminal entirely — see the
-alternatives table in
-[#32](https://github.com/rafael-adcp/kraken/issues/32).
+so the **reaper stays the backstop** for hard death. And the watcher is no
+escape hatch: it is **step 4 of `unleash`**, armed inside the same session — not
+a command of its own — so it dies with it. Moving the poll out of the model is
+what [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) already does, though it
+still needs a live shell to run in; a genuinely headless driver (system cron,
+GitHub Actions) is open work —
+[#57](https://github.com/rafael-adcp/kraken/issues/57).
 
 </details>
 
