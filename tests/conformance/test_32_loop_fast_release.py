@@ -112,9 +112,16 @@ class LoopFastReleaseTests(KrakenConformanceTest):
         # Ctrl-C story: the polling loop (no --once) is interrupted while the
         # copilot process holds the claim; the trap must release before exit.
         self.mk_issue(7, "interrupted task", "kraken-task", "project:app")
+        # The stub announces itself only once `claim` has RETURNED. Interrupting
+        # on the claim state file instead would race: kraken.py writes it before
+        # the label/comment writes, so the SIGINT could land on the still-running
+        # python3 — which exits on KeyboardInterrupt with an ordinary status, and
+        # a bash script whose foreground child was not itself killed by SIGINT
+        # carries on to the next command (`sleep 60`), stalling the loop.
+        ready = os.path.join(self.state, "copilot-ready")
         bin_dir = self.write_copilot_stub(
-            'python3 "%s" claim "%s" 7 w1 >/dev/null\nsleep 60\n'
-            % (os.path.join(ROOT, "skills", "unleash", "kraken.py"), TASKS)
+            'python3 "%s" claim "%s" 7 w1 >/dev/null\ntouch "%s"\nsleep 60\n'
+            % (os.path.join(ROOT, "skills", "unleash", "kraken.py"), TASKS, ready)
         )
 
         proc = subprocess.Popen(
@@ -127,14 +134,16 @@ class LoopFastReleaseTests(KrakenConformanceTest):
         )
         try:
             # Deterministic ordering: only interrupt once the claim provably
-            # exists (the stub wrote the state file).
+            # completed (the stub touched its sentinel after `claim` returned).
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
-                if os.path.isfile(self.claim_state_file("w1")):
+                if os.path.isfile(ready):
                     break
                 time.sleep(0.1)
             else:
-                self.fail("copilot stub never claimed (state file missing)")
+                self.fail("copilot stub never finished its claim (sentinel missing)")
+            self.assertTrue(os.path.isfile(self.claim_state_file("w1")),
+                            "setup: stub claim did not write the state file")
             os.killpg(os.getpgid(proc.pid), signal.SIGINT)
             proc.wait(timeout=30)
         finally:
