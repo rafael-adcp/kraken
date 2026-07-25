@@ -6,16 +6,10 @@ high-priority work at the front of the queue without any protocol change — an 
 worker that ignores the label simply falls back to pure FIFO."""
 import unittest
 
-from harness import KrakenConformanceTest, KRAKEN
+from harness import KrakenConformanceTest
 
 
 class PriorityOrderingTests(KrakenConformanceTest):
-    def setUp(self):
-        super().setUp()
-        # claim-next runs the protocol handshake before its first claim: seed a
-        # matching vendored copy so the version check passes.
-        self.mk_content(".github/kraken.py", KRAKEN)
-
     def test_priority_high_claimed_before_older_normal(self):
         # #7 is older (lower number => earlier createdAt), #9 is younger but
         # carries priority:high. Pure FIFO would claim #7; priority ordering must

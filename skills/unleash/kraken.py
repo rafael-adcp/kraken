@@ -41,10 +41,6 @@ Exit-code contract (PROTOCOL.md §12), preserved verbatim from the scripts:
     10  lost the claim CAS — another worker holds the claim ref; back off
         (writing nothing) and pick the next candidate
     11  no longer clear — a held label appeared since listing; skip the task
-    12  claim-next only: drift handshake failed — the coordination repo's
-        vendored .github/kraken.py differs from this worker's bundled copy, or
-        that file can't be read (fail closed). The drain refused before
-        claiming; run `init --upgrade` (or upgrade the plugin)
     20  gh / network transport failure — state unknown, re-check before retry
     3   claim-next only: no candidate was startable — the queue is empty, or
         every candidate turned out held/lost as it iterated (nothing to claim,
@@ -69,7 +65,6 @@ import urllib.request
 EXIT_OK = 0
 EXIT_LOST = 10
 EXIT_NOT_CLEAR = 11
-EXIT_PROTOCOL_MISMATCH = 12  # drain refused: vendored assets drifted from the bundled copy
 EXIT_UNKNOWN_PROJECT = 13  # drain refused: the repo has no project:<name> label
 EXIT_TRANSPORT = 20
 EXIT_NONE = 3  # claim-next: nothing startable to claim (not empty-vs-error ambiguous)
@@ -1075,17 +1070,7 @@ def cmd_claim_next(args):
     if refused is not None:
         return refused
 
-    # Drift handshake (PROTOCOL.md drift guard): before the first claim, refuse to
-    # drain if the coordination repo's vendored .github/kraken.py differs from this
-    # worker's bundled copy, or that file cannot be read (fail closed). It stays
-    # the FIRST alarm — a drifted sentinel means nothing else read here is
-    # trustworthy, so no other diagnostic may mask it.
-    ok, message = verify_protocol(repo)
-    if not ok:
-        print(message)
-        return EXIT_PROTOCOL_MISMATCH
-
-    # Project preflight: still before the queue is read and before any write,
+    # Project preflight: before the queue is read and before any write,
     # because a worker scoped to a project label the repo does not carry is deaf,
     # not idle — it would report an honest-looking empty queue forever.
     ok, message = verify_project(repo, project)
@@ -1810,86 +1795,20 @@ def cmd_status(args):
 # The bootstrap `init`, single-sourced here so the skill and the program never
 # disagree on the asset set or the label canon.
 
-# --- asset drift: the bundled bytes are the single source of truth -----------
-# Every bundled asset is meant to be vendored VERBATIM into the coordination repo
-# (under `.github/…`), so drift is simply "the vendored copy no longer matches the
-# copy this plugin ships". There is no manifest of past release hashes to keep in
-# sync — the *current* bundled bytes ARE the reference, compared live, so nothing
-# can fall out of date. This covers EVERY installed asset, not just kraken.py:
-# cleanup-closed.yml flipped `permissions: contents: read` -> `write` between
-# protocol/3 and protocol/4, so a stale workflow is as dangerous as a stale
-# parser.
-
-
 def bundled_asset(name):
-    """The raw bytes of a bundled asset shipped in this skill's folder — the
-    reference every drift decision compares against."""
+    """The raw bytes of a bundled asset shipped in this skill's folder — what
+    `init` commits into the coordination repo."""
     with open(os.path.join(SKILL_DIR, name), "rb") as fh:
         return fh.read()
 
 
-def classify_asset(current, bundled):
-    """Classify a vendored asset against the plugin's bundled copy (a pure
-    decision, so it is unit-testable without any network):
-
-      - ``"absent"``    — nothing vendored yet (``current is None``)
-      - ``"unchanged"`` — byte-identical to the bundled copy (in sync)
-      - ``"drifted"``   — differs from the bundled copy (stale or hand-edited);
-                          `init --upgrade` re-syncs it to the bundled bytes
-    """
-    if current is None:
-        return "absent"
-    if current == bundled:
-        return "unchanged"
-    return "drifted"
-
-
-# --- drift handshake ---------------------------------------------------------
-# Before draining, a worker reads the coordination repo's vendored
-# `.github/kraken.py` and compares it byte-for-byte with its OWN bundled copy.
-# They are meant to be identical — `init` vendors the plugin's copy verbatim — so
-# any difference means the plugin and the coordination repo have drifted apart: a
-# stale parser (and, by implication, stale workflows) that silently mis-handle the
-# protocol. This turns that silent drift into a loud, actionable refusal. One
-# cheap contents read, fail closed: an unreadable vendored file refuses rather
-# than guessing.
-VENDORED_KRAKEN_PATH = ".github/kraken.py"
-
-
-def verify_protocol(repo):
-    """Compare the coordination repo's vendored `.github/kraken.py` with this
-    worker's bundled copy. Returns (ok, message): ok is True only when the
-    vendored file is readable and byte-identical to the bundled one. A drifted
-    file — or an unreadable/absent one (fail closed) — refuses, with a message
-    pointing at `init --upgrade`."""
-    vendored = gh_get_content(repo, VENDORED_KRAKEN_PATH)
-    if vendored is None:
-        return (False,
-                "drift handshake: cannot verify the coordination repo's vendored "
-                "assets — %s is missing or unreadable. Refusing to drain (fail "
-                "closed). Run `kraken.py init --upgrade %s` to reinstall the "
-                "vendored assets." % (VENDORED_KRAKEN_PATH, repo))
-    if vendored != bundled_asset("kraken.py"):
-        return (False,
-                "drift handshake: %s differs from this worker's bundled kraken.py "
-                "(plugin %s) — the coordination repo's vendored assets are stale. "
-                "Refusing to drain. Run `kraken.py init --upgrade %s` (or upgrade "
-                "this worker's plugin) so both sides agree." % (
-                    VENDORED_KRAKEN_PATH, plugin_version(), repo))
-    return (True, "")
-
-
 # Each bundled asset init commits: (bundled filename, destination path in the
-# coordination repo, create commit message). ORDER MATTERS: kraken.py is the
-# drift-handshake sentinel (verify_protocol reads only it), so it MUST be
-# written LAST — init/upgrade aborts on the first failed write, so a partial run
-# can never leave the sentinel in sync while a workflow is still stale. Written
-# last, an in-sync sentinel proves the whole set synced.
+# coordination repo, create commit message). Under protocol/5 the coordination
+# repo executes nothing, so this is a single file: the issue form that shapes a
+# task on the way in.
 INIT_ASSETS = (
     ("task-template.yml", ".github/ISSUE_TEMPLATE/task.yml",
      "chore: add kraken task template"),
-    ("kraken.py", ".github/kraken.py",
-     "chore: add kraken transition program"),
 )
 
 # Assets an earlier kraken release installed and this protocol revision retired.
@@ -1904,6 +1823,7 @@ OBSOLETE_ASSETS = (
     (".github/workflows/requeue-on-reply.yml", b"for kraken. Installed by"),
     (".github/workflows/cleanup-closed.yml", b"for kraken. Installed by"),
     (".github/workflows/validate-task.yml", b"for kraken. Installed by"),
+    (".github/kraken.py", b"kraken.py \xe2\x80\x94 the bundled worker-side transitions"),
 )
 
 # The canonical state-machine labels — (name, color, description). The labels UI
@@ -1941,14 +1861,6 @@ def gh_repo_create_private(repo):
     return 200 <= status < 300
 
 
-def gh_get_content(repo, path):
-    """The file's current bytes on the repo via the contents API, or None when it
-    is absent (404) OR unreadable — a thin wrapper over gh_get_content_meta for
-    callers that only need the bytes (e.g. the protocol handshake)."""
-    content, _sha = gh_get_content_meta(repo, path)
-    return content
-
-
 def gh_get_content_meta(repo, path):
     """(bytes, blob_sha) for `path` on the repo via the contents API, or
     (None, None) when it is absent (404) OR unreadable. The blob sha is what the
@@ -1969,14 +1881,11 @@ def gh_get_content_meta(repo, path):
     return (content, sha if isinstance(sha, str) else None)
 
 
-def gh_put_content(repo, path, data, message, sha=None):
-    """Write `path` on the repo with `data` via the contents API. With no `sha`
-    this creates the file (callers reach here only when the file was reported
-    absent); passing the current blob `sha` UPDATES the existing file — GitHub
-    rejects an overwrite that omits it, so `init --upgrade` always supplies it."""
+def gh_put_content(repo, path, data, message):
+    """CREATE `path` on the repo with `data` via the contents API. Callers reach
+    here only when the file was reported absent — an overwrite would need the
+    current blob sha, and init never overwrites."""
     body = {"message": message, "content": base64.b64encode(data).decode("ascii")}
-    if sha is not None:
-        body["sha"] = sha
     status, _ = http_request("PUT", f"/repos/{repo}/contents/{path}", body)
     return 200 <= status < 300
 
@@ -2009,18 +1918,17 @@ def gh_label_upsert(repo, name, color, description):
 def cmd_init(args):
     """Stand up (or repair) a coordination repo: verify-or-create it private,
     install the bundled assets, prune the retired ones, and upsert the canonical
-    labels. Plain init is create-only and never overwrites an existing asset — it
-    merely REPORTS one as `unchanged` or `drifted` (differs from the bundled
-    copy). `--upgrade` additionally re-syncs every `drifted` asset to the bundled
-    copy. Re-running init on an older coordination repo is also its MIGRATION:
-    assets this protocol revision retired are deleted (OBSOLETE_ASSETS).
-    Idempotent; touches no issues. Exit 0 on success, 20 on any gh/transport
-    failure."""
-    repo, project, upgrade = args.repo, args.project, args.upgrade
+    labels. Create-only: an asset that already exists is left exactly as it is,
+    hand edits included — nothing in the coordination repo is executed any more
+    (protocol/5), so a file that differs from the bundled copy is the operator's
+    business, not a hazard to police. Re-running init on an older coordination
+    repo is also its MIGRATION: assets this protocol revision retired are deleted
+    (OBSOLETE_ASSETS). Idempotent; touches no issues. Exit 0 on success, 20 on
+    any gh/transport failure."""
+    repo, project = args.repo, args.project
     report = {
         "repo": repo,
         "repo_status": "exists",
-        "upgrade": bool(upgrade),
         "assets": [],
         "labels": [],
         "project": project or None,
@@ -2033,30 +1941,22 @@ def cmd_init(args):
             return EXIT_TRANSPORT
         report["repo_status"] = "created"
 
-    # 2. Install/repair the bundled assets. A create-only pass by default; with
-    #    --upgrade, every asset that has drifted from the bundled copy is re-synced.
+    # 2. Install the bundled assets, create-only — an existing file is reported
+    #    and left alone.
     for name, dest, message in INIT_ASSETS:
         try:
             bundled = bundled_asset(name)
         except OSError:
             print(f"init: missing bundled asset {name}", file=sys.stderr)
             return EXIT_USAGE
-        current, sha = gh_get_content_meta(repo, dest)
-        kind = classify_asset(current, bundled)
-        if kind == "absent":
+        current, _sha = gh_get_content_meta(repo, dest)
+        if current is None:
             if not gh_put_content(repo, dest, bundled, message):
                 print(f"init: gh-failure stage=asset path={dest}", file=sys.stderr)
                 return EXIT_TRANSPORT
             status = "created"
-        elif kind == "drifted" and upgrade:
-            if not gh_put_content(repo, dest, bundled,
-                                  f"chore: upgrade kraken asset {dest}", sha=sha):
-                print(f"init: gh-failure stage=asset path={dest}", file=sys.stderr)
-                return EXIT_TRANSPORT
-            status = "upgraded"
         else:
-            # unchanged / drifted (no --upgrade) — write nothing.
-            status = kind
+            status = "present"
         report["assets"].append({"path": dest, "status": status})
 
     # 3. Prune the assets an earlier release installed and this revision retired,
@@ -2098,19 +1998,11 @@ def render_init(report):
     for name in report["labels"]:
         lines.append(f"init: label {name} (upserted)")
     count = lambda s: sum(1 for a in report["assets"] if a["status"] == s)
-    created, unchanged = count("created"), count("unchanged")
-    drifted, upgraded, removed = count("drifted"), count("upgraded"), count("removed")
     lines.append(
         f"init: done repo={report['repo']} repo_status={report['repo_status']} "
-        f"assets_created={created} assets_unchanged={unchanged} "
-        f"assets_drifted={drifted} assets_upgraded={upgraded} "
-        f"assets_removed={removed} labels={len(report['labels'])}"
+        f"assets_created={count('created')} assets_present={count('present')} "
+        f"assets_removed={count('removed')} labels={len(report['labels'])}"
     )
-    # Actionable hint: a plain init only reports drift — point at the repair path.
-    if drifted and not report.get("upgrade"):
-        lines.append(
-            f"init: hint {drifted} asset(s) drifted from the bundled copy — re-run "
-            f"`init --upgrade {report['repo']}` to re-sync them")
     return "\n".join(lines)
 
 
@@ -2682,9 +2574,6 @@ def build_parser():
     p.add_argument("repo")
     p.add_argument("--project", default="",
                    help="also upsert the project:<name> routing label")
-    p.add_argument("--upgrade", action="store_true",
-                   help="re-sync every vendored asset that has drifted from the "
-                        "bundled copy (the repair path after a plugin upgrade)")
     p.add_argument("--json", action="store_true",
                    help="emit the machine-readable init report")
     p.set_defaults(func=cmd_init)

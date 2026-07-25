@@ -136,12 +136,11 @@ time:
    whole deterministic list/guard/CAS loop is the script's job, executed
    identically every time (semantics: `PROTOCOL.md` §5): a lost CAS (another
    worker already holds the ref) or a task that turned held since listing is
-   skipped and the next candidate tried, writing nothing behind. Before its first
-   claim it also runs a **drift handshake** — one cheap read of the coordination
-   repo's vendored `.github/kraken.py` compared byte-for-byte with this worker's
-   bundled copy — and refuses to drain if they differ or the file is unreadable
-   (fail closed), so stale vendored assets surface as a loud error, not silent
-   corruption. Yours is only the exit code:
+   skipped and the next candidate tried, writing nothing behind. Before it picks
+   a candidate it also **reconciles** the queue (`PROTOCOL.md` §6) — reclaiming
+   claims that have gone silent, releasing orphan locks — on the read it was
+   making anyway; nothing runs in the coordination repo to do that for you.
+   Yours is only the exit code:
 
    - `0` — claimed. The won task (number, title, and body — its goal /
      acceptance / notes) is printed, so you can brief the subagent without a
@@ -153,13 +152,6 @@ time:
      `claim-<worker>.json` state file is still there), and a worker works **one
      task at a time** (`PROTOCOL.md` §5). Nothing was written. Resolve the open
      claim first — deliver, escalate, or `kraken.py release` it — then re-run.
-   - `12` — drift handshake failed: the coordination repo's vendored
-     `.github/kraken.py` differs from this worker's bundled copy, or that file
-     can't be read. The drain refused before claiming; the message names the
-     fix — run `/kraken:init OWNER/tasks --upgrade` (outside Claude Code, the
-     same repair is `python3 "<this skill's folder>/kraken.py" init OWNER/tasks
-     --upgrade`) or upgrade this worker's plugin so both sides agree, then
-     retry. Do not improvise around it.
    - `13` — unknown project: the coordination repo carries no `project:<name>`
      label, so this worker would filter every task out and read as an empty
      queue forever. The message lists the projects that DO exist — either the

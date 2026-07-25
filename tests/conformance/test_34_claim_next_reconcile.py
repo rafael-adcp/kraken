@@ -3,7 +3,7 @@
 read it was going to perform anyway — no cron, no server-side job — and the cost
 of doing so is O(1) in the number of live claims, not O(N).
 
-Two things are under test, both against the real gh stub:
+Three things are under test, all against the real gh stub:
 
   1. **The four rules fire from the claim path.** `claim-next` alone (never
      `reap`) reclaims a dead worker's claim, drops an orphan lock, heals a
@@ -12,19 +12,19 @@ Two things are under test, both against the real gh stub:
   2. **The reconcile costs one batched read.** Growing the number of live claim
      refs from 1 to 20 must not grow the call count: the ref dates resolve
      through a single aliased GraphQL query, the way `resolve_depends_on` does.
+  3. **The drain got no more expensive.** The whole point of moving the reconcile
+     onto the reader is that the queue read was already being paid for. The added
+     commit-date read is covered by the drift handshake's contents read, which
+     protocol/5 retired along with the vendoring — so the call count per drain is
+     no higher than protocol/4's, and lower on an idle queue.
 """
+import re
 import unittest
 
-from harness import KrakenConformanceTest, KRAKEN
+from harness import KrakenConformanceTest
 
 
 class ClaimNextReconcileTests(KrakenConformanceTest):
-    def setUp(self):
-        super().setUp()
-        # The drain still performs the drift handshake before its first claim;
-        # seed a matching vendored copy so the reconcile is what is under test.
-        self.mk_content(".github/kraken.py", KRAKEN)
-
     def test_the_claim_path_runs_the_four_rules(self):
         # #1 DEAD — an 8h-old claim ref. Rule 2: reclaim to needs-decision.
         self.mk_issue(1, "dead worker", "kraken-task", "project:app", "in-progress")
@@ -132,6 +132,75 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         self.assertEqual(one, twenty,
                          "the reconcile is O(N) in live claims: %d call(s) for 1 "
                          "claim, %d for 20 — %s" % (one, twenty, self.log_text()))
+
+    def _preamble(self):
+        """The requests a drain makes BEFORE it starts guarding a candidate — its
+        preflight and queue read. That is the phase the reconcile changed; the
+        guard/CAS/projection that follows is identical to protocol/4's and is
+        pinned elsewhere. The guard's single-issue GET is the boundary."""
+        out = []
+        for line in self.log_lines():
+            if re.match(r"GET /repos/[^/]+/[^/]+/issues/[0-9]+$", line):
+                break
+            out.append(line)
+        return out
+
+    def test_a_drain_costs_no_more_than_it_did_before(self):
+        """The issue's acceptance: count the API calls a drain makes, before and
+        after. It is a net-zero SWAP, not a literal zero — one read out, one read
+        in — so this pins the budget per case rather than asserting a zero the
+        code does not achieve:
+
+            case                        protocol/4   protocol/5
+            idle queue, no live claim       4            3
+            queue with live claims          4            4
+
+        protocol/4's preamble: the handshake contents GET, the project-label
+        read, the GraphQL queue walk, the matching-refs read. protocol/5's: the
+        project-label read, the GraphQL queue walk, the matching-refs read, and —
+        only when a lock is live — one batched commit-date read.
+        """
+        self.mk_issue(1, "queued", "kraken-task", "project:app")
+
+        self.truncate_log()
+        r = self.kraken("claim-next", "OWNER/tasks", "app", "w1")
+        self.assertEqual(r.rc, 0, "claim-next exit: %s%s" % (r.out, r.err))
+        idle = self._preamble()
+        self.assertEqual(len(idle), 3,
+                         "an idle drain should cost 3 reads (protocol/4 spent 4), "
+                         "got %d: %s" % (len(idle), "\n".join(idle)))
+        self.assertFalse([l for l in idle if "object(oid:" in l or "graphql" in l][1:],
+                         "more than one GraphQL call in an idle preamble: %s"
+                         % "\n".join(idle))
+
+        # With a live claim the commit-date read appears — landing exactly on
+        # protocol/4's budget, because the handshake read is gone.
+        self.mk_issue(2, "running", "kraken-task", "project:app", "in-progress")
+        self.mk_claim_ref(2, "live-worker", age_hours=0)
+        self.mk_issue(3, "queued", "kraken-task", "project:app")
+
+        self.truncate_log()
+        r = self.kraken("claim-next", "OWNER/tasks", "app", "w2")
+        self.assertEqual(r.rc, 0, "claim-next exit: %s%s" % (r.out, r.err))
+        live = self._preamble()
+        self.assertEqual(len(live), 4,
+                         "a drain over live claims should cost 4 reads — exactly "
+                         "protocol/4's budget — got %d: %s"
+                         % (len(live), "\n".join(live)))
+        self.assertEqual(len(live) - len(idle), 1,
+                         "the reconcile's marginal cost is not exactly one read")
+
+    def test_the_drain_no_longer_reads_the_vendored_program(self):
+        """The handshake is gone with the vendoring: a drain must not read
+        .github/kraken.py at all, and must not refuse when it is absent."""
+        self.mk_issue(1, "queued", "kraken-task", "project:app")
+        self.truncate_log()
+        r = self.kraken("claim-next", "OWNER/tasks", "app", "w1")
+        self.assertEqual(r.rc, 0,
+                         "a drain refused against a repo with no vendored copy: %s%s"
+                         % (r.out, r.err))
+        self.assertNotIn("contents/.github/kraken.py", self.log_text(),
+                         "the drain still reads the retired vendored program")
 
     def test_no_claim_refs_means_no_commit_read_at_all(self):
         """With no lock live there is nothing to reconcile, so the batched

@@ -521,25 +521,29 @@ judgment between transitions. The transport is direct HTTP over the stdlib
 so it runs against any authenticated host without shelling out to `gh` per call.
 It also ships a `claim-next OWNER/tasks <project> <worker>`
 convenience that composes `list-startable` + `claim` into the whole
-deterministic claim loop (list, guard, CAS, skip-on-loss, try the next
-candidate) behind one invocation — a worker-side ergonomic detail, not part of
-the wire contract; it exits `0` holding a won claim (printing the task's number,
-title, and body), a distinct `3` when nothing is claimable, and `20` on
+deterministic claim loop (reconcile, list, guard, CAS, skip-on-loss, try the
+next candidate) behind one invocation — a worker-side ergonomic detail, not part
+of the wire contract; it exits `0` holding a won claim (printing the task's
+number, title, and body), a distinct `3` when nothing is claimable, and `20` on
 transport failure with the same state-unknown semantics. Before it claims, it
 also refuses — writing nothing — when this worker already holds an open claim
-(`11`, the §5 one-task-at-a-time rule, tracked in a local claim-state file), when
-the coordination repo's vendored copy of the program has drifted from the
-worker's bundled one (`12`, fail closed), or when the repo carries no
-`project:<name>` label so the worker would be deaf rather than idle (`13`). All
-four are reference-implementation ergonomics, not wire contract.
+(`11`, the §5 one-task-at-a-time rule, tracked in a local claim-state file) or
+when the repo carries no `project:<name>` label, so the worker would be deaf
+rather than idle (`13`). Both are reference-implementation ergonomics, not wire
+contract.
+
+Nothing is installed into the coordination repo for any of this to work. The
+reference `init` commits one file — the issue-form template — and creates the
+labels; there is no vendored copy of the program and therefore no version
+handshake between the two sides, because there is no second copy to drift.
 
 A read-only `status OWNER/tasks [--project <name>] [--json]` subcommand
 (operator-side, driven by [`skills/status/SKILL.md`](skills/status/SKILL.md))
 computes the console — the review queue (`awaiting-merge` + parsed PR link), the
 decision queue (`needs-decision`), in-flight tasks with the worker and heartbeat
 age read from the claim ref's commit (the same anchor the reconciler uses, §6),
-the merged-PR-but-open-issue orphan heuristic (flag-only, never acting), and the
-`project:` launch recon — over the same batched queue walk `list-startable`
+the merged-PR-but-open-issue orphan heuristic (flag-only, never acting), the
+queue-entry hygiene report (§2.1), and the `project:` launch recon — over the same batched queue walk `list-startable`
 uses, with the awaiting-merge PR-link history read through the paginated comment
 path so it is never truncated past 100 comments. It performs no writes; `--json`
 emits a stable schema for downstream tooling. Like `claim-next`, it is a

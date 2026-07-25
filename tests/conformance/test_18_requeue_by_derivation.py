@@ -12,14 +12,10 @@ having been rewritten by something.
 import json
 import unittest
 
-from harness import KrakenConformanceTest, KRAKEN
+from harness import KrakenConformanceTest
 
 
 class RequeueByDerivationTests(KrakenConformanceTest):
-    def setUp(self):
-        super().setUp()
-        self.mk_content(".github/kraken.py", KRAKEN)
-
     def startable(self):
         r = self.kraken("list-startable", "OWNER/tasks", "app")
         self.assertEqual(r.rc, 0, "list-startable exit: %s" % r.err)

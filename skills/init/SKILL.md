@@ -1,23 +1,23 @@
 ---
 name: init
-description: Stand up a kraken coordination repo end to end — verify or create the private repo, install the bundled task template and transition program, remove the coordination workflows this protocol revision retired, and create the canonical labels. Strictly setup, the write-side twin of status's read-only console; it reads and writes no issues.
+description: Stand up a kraken coordination repo end to end — verify or create the private repo, install the bundled task template, remove everything an earlier release installed to be executed server-side, and create the canonical labels. Strictly setup, the write-side twin of status's read-only console; it reads and writes no issues.
 ---
 
 # Kraken — raise the head
 
 You are the setup step for kraken: given a coordination-repo slug, you make that repo
-ready to receive tasks — the private repo exists, the task template and the
-transition program are committed, every coordination workflow this protocol
-revision retired is deleted, and the state-machine labels are created. Under
-`kraken-protocol/5` the coordination repo runs nothing of its own, so it needs no
-GitHub Actions. This is the symmetric partner
+ready to receive tasks — the private repo exists, the task template is committed,
+everything an earlier release installed to be executed there is deleted, and the
+state-machine labels are created. Under `kraken-protocol/5` the coordination repo
+runs nothing of its own, so it needs no GitHub Actions and carries no copy of the
+transition program. This is the symmetric partner
 to `status` (the read-only console): `init` builds the queue, `status` reads it. You
 touch no issues — none read, none written.
 
 ## Invocation
 
 ```
-/kraken:init OWNER/tasks [--project <name>] [--upgrade]
+/kraken:init OWNER/tasks [--project <name>]
 ```
 
 The `OWNER/tasks` argument is REQUIRED — the coordination repo to stand up. Missing? Do
@@ -29,10 +29,9 @@ placeholder — substitute your real `owner/repo` and re-run.
 `--project <name>` is optional. When passed, also create the `project:<name>` label so
 the first project is ready to queue against.
 
-`--upgrade` is optional. Plain `init` is create-only and never overwrites an installed
-asset; `--upgrade` is the **repair path** — it re-syncs every vendored asset that has
-**drifted** from the plugin's bundled copy back to that bundled copy. Use it after a
-plugin upgrade to pull a coordination repo's vendored assets forward.
+There is no repair flag, and no version handshake between the plugin and the
+coordination repo: under `kraken-protocol/5` the repo holds no copy of the transition
+program, so there is no second copy to fall out of date.
 
 ## Design decisions
 
@@ -44,64 +43,52 @@ plugin upgrade to pull a coordination repo's vendored assets forward.
   only invokes it, renders its report, and prints the settings reminder. Same
   rule that produced `claim-next` and `status`.
 - **Assets ship in the plugin, never fetched from the network.**
-  `task-template.yml` and `kraken.py` live in this plugin's
-  `skills/unleash/` folder — `kraken.py init` reads them from there and commits
-  them via the GitHub contents API. The bundled
+  `task-template.yml` lives in this plugin's `skills/unleash/` folder —
+  `kraken.py init` reads it from there and commits it via the GitHub contents
+  API. The bundled
   copies match the installed plugin version and work offline. Never `curl` from
   `raw.githubusercontent.com`.
 - **Idempotent and non-destructive by construction.** `kraken.py init` creates
   the repo only if absent, creates each asset only if absent, and upserts the
-  labels with their canonical color/description. An existing file that differs
-  from the plugin's bundled copy is classified `drifted` and never overwritten by
-  a plain run — only reported. Re-running is safe.
-- **`--upgrade` repairs drift by re-syncing to the bundled copy.** The plugin's
-  bundled bytes are the single source of truth — there is no manifest of past
-  release hashes to keep in step, so nothing can fall out of date. `--upgrade`
-  re-syncs every `drifted` asset to the bundled copy; it is opt-in and deliberate,
-  the fix the drain points at when its drift handshake finds a repo running stale
-  vendored assets.
-- **Vendored assets are verbatim copies — not a customization point.** The
-  contract is that every vendored asset stays byte-identical to the plugin's
-  bundled copy; hand-editing one is unsupported. `drifted` therefore covers
-  both a stale asset and a hand-edited one — there is no way (and no attempt)
-  to tell them apart — and `--upgrade` overwrites either with the bundled
-  bytes, discarding hand edits. Behavior that needs changing belongs in the
-  plugin (and a release), never in the vendored copy.
-- **`kraken.py` is installed last, as the commit marker.** The drain's drift
-  handshake reads only the vendored `.github/kraken.py`, so init writes it
-  after every other asset and aborts on the first failed write — a partial run
-  can never leave that sentinel in sync while a workflow is still stale. An
-  in-sync sentinel therefore proves the whole set synced; re-running after a
-  partial failure resumes safely.
+  labels with their canonical color/description. An existing file is reported
+  `present` and left exactly as it is. Re-running is safe.
+- **Nothing installed is executed, so nothing has to stay in sync.** The one
+  asset is an issue form — it shapes a task on the way in and runs no code.
+  A template the operator tuned is their business, not drift to police, which is
+  why there is no `--upgrade`, no byte comparison and no refusal path.
+- **Re-running init is the migration.** A coordination repo stood up by an older
+  release still carries the workflows and the vendored program that release
+  installed; a cron left running against retired semantics keeps mutating labels
+  behind every worker's back. So init DELETES them — gated on kraken's own file
+  header, so something the operator wrote at one of those paths is never
+  destroyed by a bootstrap command.
 
 ## Protocol
 
 1. **Run the bootstrap.** `kraken.py init` does the whole deterministic gesture —
-   verify-or-create the repo **private**, install the two bundled assets
-   (the `task.yml` issue-form template and the vendored `kraken.py` transition
-   program) via the contents API, delete the coordination workflows this protocol
-   revision retired, and upsert the canonical state-machine labels (`kraken-task`, `in-progress`,
+   verify-or-create the repo **private**, install the bundled `task.yml`
+   issue-form template via the contents API, delete everything an earlier release
+   installed to be executed server-side, and upsert the canonical state-machine
+   labels (`kraken-task`, `in-progress`,
    `needs-decision`, `awaiting-merge`) plus the `priority:high` scheduling label
    with their canonical colors and descriptions:
 
    ```
-   python3 "<this skill's folder>/../unleash/kraken.py" init OWNER/tasks [--project <name>] [--upgrade]
+   python3 "<this skill's folder>/../unleash/kraken.py" init OWNER/tasks [--project <name>]
    ```
 
    Pass `--project <name>` to also upsert the `project:<name>` routing label a
-   worker's `--project` filters on. Pass `--upgrade` to additionally re-sync any
-   vendored asset that has drifted from the bundled copy — the repair path after a
-   plugin upgrade. Branch on the exit
+   worker's `--project` filters on. Branch on the exit
    code: `0` — bootstrapped (render its report); `20` — a gh/network failure,
    state may be partial, re-run after checking (init is idempotent, so a re-run
    resumes safely).
 
 2. **Render the report.** `kraken.py init` prints one line per repo/asset/label
-   decision (`created` / `unchanged` / `drifted` / `upgraded` / `upserted`) and a
-   summary line. Relay it, and call out any asset reported **drifted** — a
-   vendored file that differs from the plugin's bundled copy (stale after a plugin
-   upgrade, or hand-edited), which a re-run with `--upgrade` re-syncs to the
-   bundled copy.
+   decision (`created` / `present` / `removed` / `upserted`) and a summary line.
+   Relay it. Call out anything reported **removed** — that is a workflow (or the
+   vendored program) an earlier release installed and this protocol revision
+   retired, deleted so it stops running against semantics the workers no longer
+   implement.
 
 3. **Print the settings reminder.** Do NOT write, create, or touch any
    `settings.json` — clobbering an existing one is a real footgun, and the
@@ -119,23 +106,20 @@ plugin upgrade to pull a coordination repo's vendored assets forward.
 
 - Invoking this skill is my authorization to, on the coordination repo only:
   (a) **create the repo private** if it does not exist;
-  (b) **commit the two bundled files** (`task.yml`, `kraken.py`) via the
-  contents API, creating them only — never overwriting a file that already
-  differs — **except** that a `--upgrade` run re-syncs a drifted asset to the
-  bundled copy (hand edits included: drifted content is overwritten regardless
-  of how it got that way);
-  (b2) **delete every coordination workflow this protocol revision retired**
+  (b) **commit the bundled `task.yml` template** via the contents API, creating
+  it only — never overwriting a file that already exists;
+  (b2) **delete everything an earlier release installed to run server-side**
   (`reclaim-stale.yml`, `requeue-on-reply.yml`, `cleanup-closed.yml`,
-  `validate-task.yml` — their jobs are now derived by the reader on the queue
-  read it already performs, PROTOCOL.md §2.1 and §6), and only when the file
-  still carries kraken's own header, so a workflow I wrote at that path is never
-  touched;
+  `validate-task.yml`, and the vendored `.github/kraken.py` they exec'd — their
+  jobs are now derived by the reader on the queue read it already performs,
+  PROTOCOL.md §2.1 and §6), and only when the file still carries kraken's own
+  header, so something I wrote at that path is never touched;
   (c) **upsert the canonical labels** (and the `project:<name>` label when
   `--project` is passed).
 - It is NOT authorization to read or write issues, modify `settings.json`, delete
   anything, change repo visibility on an existing repo, or launch a worker.
-- A plain (create-only) run never overwrites an existing file: a drifted asset is
-  flagged for me, and only an explicit `--upgrade` re-syncs it — `kraken.py init`
-  enforces this, it is not left to judgment.
+- init never overwrites an existing file, and never deletes one that does not
+  carry kraken's own header — `kraken.py init` enforces both, it is not left to
+  judgment.
 
 Coordination repo / flags / extra context: $ARGUMENTS

@@ -423,7 +423,6 @@ class InitConstantsTests(unittest.TestCase):
         dests = {dest for _, dest, _ in kraken.INIT_ASSETS}
         self.assertEqual(dests, {
             ".github/ISSUE_TEMPLATE/task.yml",
-            ".github/kraken.py",
         })
 
     def test_retired_assets_are_pruned_not_installed(self):
@@ -441,9 +440,14 @@ class InitConstantsTests(unittest.TestCase):
             self.assertTrue(dest.startswith(".github/"))
             self.assertTrue(sentinel, f"{dest} has no authorship sentinel")
 
-    def test_kraken_py_is_vendored_as_an_asset(self):
+    def test_the_transition_program_is_no_longer_vendored(self):
+        """protocol/5 runs nothing in the coordination repo, so there is nothing
+        for a vendored copy of this program to execute — and no drift to police."""
         dests = {dest for _, dest, _ in kraken.INIT_ASSETS}
-        self.assertIn(".github/kraken.py", dests)
+        pruned = {dest for dest, _ in kraken.OBSOLETE_ASSETS}
+        self.assertNotIn(".github/kraken.py", dests)
+        self.assertIn(".github/kraken.py", pruned,
+                      "a repo set up by an older release keeps a stale copy forever")
 
     def test_canonical_labels_are_six_hex_colors(self):
         for name, color, desc in kraken.CANONICAL_LABELS:
@@ -457,8 +461,6 @@ class InitConstantsTests(unittest.TestCase):
             "repo": "acme/tasks", "repo_status": "created",
             "assets": [
                 {"path": ".github/ISSUE_TEMPLATE/task.yml", "status": "created"},
-                {"path": ".github/kraken.py", "status": "unchanged"},
-                {"path": ".github/workflows/validate-task.yml", "status": "drifted"},
                 {"path": ".github/workflows/reclaim-stale.yml", "status": "removed"},
             ],
             "labels": ["kraken-task", "project:app"],
@@ -469,12 +471,7 @@ class InitConstantsTests(unittest.TestCase):
         self.assertIn("init: asset .github/ISSUE_TEMPLATE/task.yml (created)", out)
         self.assertIn("init: label project:app (upserted)", out)
         self.assertIn("init: asset .github/workflows/reclaim-stale.yml (removed)", out)
-        self.assertIn(
-            "assets_created=1 assets_unchanged=1 assets_drifted=1 "
-            "assets_upgraded=0 assets_removed=1 labels=2", out)
-        # a drifted asset under a plain init is surfaced as an actionable hint
-        self.assertIn("drifted", out)
-        self.assertIn("init --upgrade", out)
+        self.assertIn("assets_created=1 assets_present=0 assets_removed=1 labels=2", out)
 
 
 class CommentRecordsPaginationTests(unittest.TestCase):
@@ -550,14 +547,12 @@ class ClaimNextIterationTests(unittest.TestCase):
     def setUp(self):
         self._orig_classify = kraken.classify_queue
         self._orig_claim_once = kraken._claim_once
-        self._orig_verify = kraken.verify_protocol
         self._orig_verify_project = kraken.verify_project
         self._orig_read_queue = kraken.read_queue
         self._orig_commit_meta = kraken.resolve_commit_meta
-        # The protocol handshake, the project preflight and the §6 reconcile are
-        # exercised by their own tests; here they always pass over an empty queue
-        # read, so only the iteration logic is under test.
-        kraken.verify_protocol = lambda repo: (True, "")
+        # The project preflight and the §6 reconcile are exercised by their own
+        # tests; here they pass over an empty queue read, so only the iteration
+        # logic is under test.
         kraken.verify_project = lambda repo, project: (True, "")
         kraken.read_queue = lambda repo: ([], {})
         kraken.resolve_commit_meta = lambda repo, shas: {}
@@ -566,7 +561,6 @@ class ClaimNextIterationTests(unittest.TestCase):
     def tearDown(self):
         kraken.classify_queue = self._orig_classify
         kraken._claim_once = self._orig_claim_once
-        kraken.verify_protocol = self._orig_verify
         kraken.verify_project = self._orig_verify_project
         kraken.read_queue = self._orig_read_queue
         kraken.resolve_commit_meta = self._orig_commit_meta
@@ -724,11 +718,9 @@ class ClaimNextProjectGateTests(unittest.TestCase):
 
     def setUp(self):
         self._orig_verify_project = kraken.verify_project
-        self._orig_verify = kraken.verify_protocol
         self._orig_classify = kraken.classify_queue
         self._orig_read_queue = kraken.read_queue
         self._orig_commit_meta = kraken.resolve_commit_meta
-        kraken.verify_protocol = lambda repo: (True, "")
         kraken.read_queue = lambda repo: ([], {})
         kraken.resolve_commit_meta = lambda repo, shas: {}
         self.classified = []
@@ -740,7 +732,6 @@ class ClaimNextProjectGateTests(unittest.TestCase):
 
     def tearDown(self):
         kraken.verify_project = self._orig_verify_project
-        kraken.verify_protocol = self._orig_verify
         kraken.classify_queue = self._orig_classify
         kraken.read_queue = self._orig_read_queue
         kraken.resolve_commit_meta = self._orig_commit_meta
@@ -1380,73 +1371,13 @@ class WatchFailureLoopTests(unittest.TestCase):
         self.assertIn("3", err, "the give-up line must name the failure count")
 
 
-class AssetClassifierTests(unittest.TestCase):
-    """The pure asset classifier — the read side of `init --upgrade`, isolated
-    from any network. The plugin's bundled bytes are the single source of truth,
-    so there is no manifest to keep in sync: an asset is either in sync with the
-    bundled copy or drifted from it."""
+class BundledAssetTests(unittest.TestCase):
+    """Every asset init installs must actually ship next to the module."""
 
     def test_bundled_asset_covers_every_init_asset(self):
-        # A stale workflow is as harmful as a stale parser (the reaper's
-        # permissions flipped between protocol/3 and /4), so every one of the six
-        # init assets must be readable as a bundled reference, not just kraken.py.
         for name, _dest, _msg in kraken.INIT_ASSETS:
             self.assertTrue(kraken.bundled_asset(name),
-                            "%s has no bundled bytes to compare against" % name)
-
-    def test_classify_asset_absent(self):
-        self.assertEqual(kraken.classify_asset(None, b"bundled"), "absent")
-
-    def test_classify_asset_unchanged(self):
-        self.assertEqual(kraken.classify_asset(b"same", b"same"), "unchanged")
-
-    def test_classify_asset_drifted(self):
-        self.assertEqual(kraken.classify_asset(b"hand edit", b"bundled"), "drifted")
-
-    def test_handshake_sentinel_is_installed_last(self):
-        # The drift handshake reads ONLY the vendored kraken.py, and init aborts
-        # on the first failed write — so the sentinel must come last, or a
-        # partial init/upgrade could leave it in sync over still-stale workflows
-        # and the handshake would wave a drifted repo through.
-        self.assertEqual(kraken.INIT_ASSETS[-1][0], "kraken.py",
-                         "kraken.py must be the LAST init asset: it is the drift "
-                         "sentinel and only proves the set synced if written last")
-
-
-class ProtocolHandshakeTests(unittest.TestCase):
-    """The drift handshake's pure logic, with the one contents read mocked: the
-    vendored `.github/kraken.py` is compared byte-for-byte with this worker's
-    bundled copy, and the match / drift / fail-closed decision gates a drain."""
-
-    def setUp(self):
-        self._orig_get = kraken.gh_get_content
-
-    def tearDown(self):
-        kraken.gh_get_content = self._orig_get
-
-    def _vendored(self, raw):
-        kraken.gh_get_content = lambda repo, path: raw
-
-    def test_matching_content_is_ok(self):
-        # The coordination repo vendors the exact bundled kraken.py -> in sync.
-        self._vendored(kraken.bundled_asset("kraken.py"))
-        ok, msg = kraken.verify_protocol("o/tasks")
-        self.assertTrue(ok)
-        self.assertEqual(msg, "")
-
-    def test_drift_refuses_and_names_upgrade(self):
-        self._vendored(b"# a stale, drifted kraken.py\n")
-        ok, msg = kraken.verify_protocol("o/tasks")
-        self.assertFalse(ok)
-        self.assertIn("differs", msg)
-        self.assertIn("init --upgrade", msg)
-
-    def test_unreadable_vendored_file_fails_closed(self):
-        self._vendored(None)  # 404 / transport fault both surface as None
-        ok, msg = kraken.verify_protocol("o/tasks")
-        self.assertFalse(ok)
-        self.assertIn("cannot verify", msg)
-        self.assertIn("init --upgrade", msg)
+                            "%s has no bundled bytes to install" % name)
 
 
 if __name__ == "__main__":
