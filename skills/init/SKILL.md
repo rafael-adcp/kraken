@@ -1,15 +1,16 @@
 ---
 name: init
-description: Stand up a kraken coordination repo end to end — verify or create the private repo, install the bundled task template and coordination workflows (closed-issue cleanup, queue-entry validator), remove the ones this protocol revision retired, and create the canonical labels. Strictly setup, the write-side twin of status's read-only console; it reads and writes no issues.
+description: Stand up a kraken coordination repo end to end — verify or create the private repo, install the bundled task template and transition program, remove the coordination workflows this protocol revision retired, and create the canonical labels. Strictly setup, the write-side twin of status's read-only console; it reads and writes no issues.
 ---
 
 # Kraken — raise the head
 
 You are the setup step for kraken: given a coordination-repo slug, you make that repo
-ready to receive tasks — the private repo exists, the task template and coordination
-workflows (closed-issue cleanup, queue-entry validator) are
-committed, any workflow this protocol revision retired is deleted, and the
-state-machine labels are created. This is the symmetric partner
+ready to receive tasks — the private repo exists, the task template and the
+transition program are committed, every coordination workflow this protocol
+revision retired is deleted, and the state-machine labels are created. Under
+`kraken-protocol/5` the coordination repo runs nothing of its own, so it needs no
+GitHub Actions. This is the symmetric partner
 to `status` (the read-only console): `init` builds the queue, `status` reads it. You
 touch no issues — none read, none written.
 
@@ -43,12 +44,9 @@ plugin upgrade to pull a coordination repo's vendored assets forward.
   only invokes it, renders its report, and prints the settings reminder. Same
   rule that produced `claim-next` and `status`.
 - **Assets ship in the plugin, never fetched from the network.**
-  `task-template.yml`, `kraken.py`, `cleanup-closed.yml`, and
-  `validate-task.yml` live in this plugin's
+  `task-template.yml` and `kraken.py` live in this plugin's
   `skills/unleash/` folder — `kraken.py init` reads them from there and commits
-  them via the GitHub contents API. `kraken.py` itself is vendored as a second
-  asset (`.github/kraken.py`) so the coordination workflows exec one parser
-  instead of re-implementing the protocol parse in jq/grep/awk. The bundled
+  them via the GitHub contents API. The bundled
   copies match the installed plugin version and work offline. Never `curl` from
   `raw.githubusercontent.com`.
 - **Idempotent and non-destructive by construction.** `kraken.py init` creates
@@ -79,11 +77,10 @@ plugin upgrade to pull a coordination repo's vendored assets forward.
 ## Protocol
 
 1. **Run the bootstrap.** `kraken.py init` does the whole deterministic gesture —
-   verify-or-create the repo **private**, install the four bundled assets
-   (`task.yml` template + the vendored `kraken.py` transition program + the
-   `cleanup-closed` and `validate-task` workflows) via the
-   contents API, delete the workflows this protocol revision retired, and
-   upsert the canonical state-machine labels (`kraken-task`, `in-progress`,
+   verify-or-create the repo **private**, install the two bundled assets
+   (the `task.yml` issue-form template and the vendored `kraken.py` transition
+   program) via the contents API, delete the coordination workflows this protocol
+   revision retired, and upsert the canonical state-machine labels (`kraken-task`, `in-progress`,
    `needs-decision`, `awaiting-merge`) plus the `priority:high` scheduling label
    with their canonical colors and descriptions:
 
@@ -122,16 +119,17 @@ plugin upgrade to pull a coordination repo's vendored assets forward.
 
 - Invoking this skill is my authorization to, on the coordination repo only:
   (a) **create the repo private** if it does not exist;
-  (b) **commit the four bundled template files** (`task.yml`, `kraken.py`,
-  `cleanup-closed.yml`, `validate-task.yml`) via the
+  (b) **commit the two bundled files** (`task.yml`, `kraken.py`) via the
   contents API, creating them only — never overwriting a file that already
   differs — **except** that a `--upgrade` run re-syncs a drifted asset to the
   bundled copy (hand edits included: drifted content is overwritten regardless
   of how it got that way);
-  (b2) **delete the workflows this protocol revision retired**
-  (`reclaim-stale.yml` and `requeue-on-reply.yml`, whose jobs the worker now does
-  on its own queue read — PROTOCOL.md §6), and only when the file still carries
-  kraken's own header, so a workflow I wrote at that path is never touched;
+  (b2) **delete every coordination workflow this protocol revision retired**
+  (`reclaim-stale.yml`, `requeue-on-reply.yml`, `cleanup-closed.yml`,
+  `validate-task.yml` — their jobs are now derived by the reader on the queue
+  read it already performs, PROTOCOL.md §2.1 and §6), and only when the file
+  still carries kraken's own header, so a workflow I wrote at that path is never
+  touched;
   (c) **upsert the canonical labels** (and the `project:<name>` label when
   `--project` is passed).
 - It is NOT authorization to read or write issues, modify `settings.json`, delete

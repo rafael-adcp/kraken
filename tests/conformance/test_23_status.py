@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """kraken.py status: the read-only operator console, mechanized. Pins the
 review/decision/in-flight queues, the heartbeat-age anchored to the claim ref's
-commit date, the merged-PR-but-open-issue orphan heuristic (flag, never act),
-the launch recon — plus the hard guarantee that the whole thing is read-only."""
+commit date, the silent-claim flag, the merged-PR-but-open-issue orphan heuristic
+(flag, never act), the queue-hygiene report, the launch recon — plus the hard
+guarantee that the whole thing is read-only."""
 import json
 import os
 import re
@@ -96,6 +97,56 @@ class StatusTests(KrakenConformanceTest):
         self.assertEqual(scoped["decision_queue"], [], "--project web should have empty decision queue")
         self.assertEqual(scoped["in_flight"], [], "--project web should have empty in_flight")
         self.assertEqual(scoped["project"], "web", "--project not reflected in json")
+
+    def test_silent_claim_is_flagged(self):
+        """With no scheduled reconciler, a dead worker looks exactly like a slow
+        one until someone claims. The console has to say which it is."""
+        self.mk_issue(1, "silent", "kraken-task", "project:app", "in-progress")
+        self.mk_claim_ref(1, "dead-worker", age_hours=8)
+        self.mk_issue(2, "alive", "kraken-task", "project:app", "in-progress")
+        self.mk_claim_ref(2, "live-worker", age_hours=0, mtype="heartbeat", msg="going")
+
+        r = self.kraken("status", "OWNER/tasks", "--project", "app")
+        self.assertEqual(r.rc, 0, "status exit: %s" % r.err)
+        self.assertRegex(r.out, r"#1 .*silent — the next drain reclaims it")
+        self.assertNotRegex(r.out, r"#2 .*silent —",
+                            "a live worker was flagged silent")
+
+        js = json.loads(self.kraken("status", "OWNER/tasks", "--project", "app",
+                                    "--json").out)
+        flags = {d["number"]: d["stale"] for d in js["in_flight"]}
+        self.assertEqual(flags, {1: True, 2: False})
+
+    def test_queue_hygiene_reports_what_a_worker_cannot_start(self):
+        """The read-side twin of the arrival-time validator: same three checks,
+        computed off the walk status already performed."""
+        good = "### Goal\n\nShip it.\n\n### Acceptance\n\n`npm test` passes.\n"
+        self.mk_issue(1, "fine", "kraken-task", "project:app")
+        self.mk_body(1, good)
+        self.mk_issue(2, "no project label", "kraken-task")
+        self.mk_body(2, good)
+        self.mk_issue(3, "no sections", "kraken-task", "project:app")
+        self.mk_body(3, "just some prose")
+
+        r = self.kraken("status", "OWNER/tasks", "--project", "app")
+        self.assertEqual(r.rc, 0, "status exit: %s" % r.err)
+        self.assertIn("Queue hygiene", r.out)
+
+        js = json.loads(self.kraken("status", "OWNER/tasks", "--project", "app",
+                                    "--json").out)
+        reported = {d["number"]: d["missing"] for d in js["queue_hygiene"]}
+        self.assertEqual(reported, {2: ["project label"], 3: ["Goal", "Acceptance"]},
+                         "hygiene report wrong: %s" % reported)
+
+        # A compliant queue says nothing at all — no noise on the happy path.
+        js = json.loads(self.kraken("status", "OWNER/tasks", "--json").out)
+        self.mk_body(2, good)
+        self.mk_body(3, good)
+        self.set_labels(2, ["kraken-task", "project:app"])
+        js = json.loads(self.kraken("status", "OWNER/tasks", "--json").out)
+        self.assertEqual(js["queue_hygiene"], [])
+        self.assertNotIn("Queue hygiene",
+                         self.kraken("status", "OWNER/tasks").out)
 
 
 if __name__ == "__main__":

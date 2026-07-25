@@ -424,8 +424,6 @@ class InitConstantsTests(unittest.TestCase):
         self.assertEqual(dests, {
             ".github/ISSUE_TEMPLATE/task.yml",
             ".github/kraken.py",
-            ".github/workflows/cleanup-closed.yml",
-            ".github/workflows/validate-task.yml",
         })
 
     def test_retired_assets_are_pruned_not_installed(self):
@@ -435,6 +433,8 @@ class InitConstantsTests(unittest.TestCase):
         pruned = {dest for dest, _ in kraken.OBSOLETE_ASSETS}
         self.assertIn(".github/workflows/reclaim-stale.yml", pruned)
         self.assertIn(".github/workflows/requeue-on-reply.yml", pruned)
+        self.assertIn(".github/workflows/cleanup-closed.yml", pruned)
+        self.assertIn(".github/workflows/validate-task.yml", pruned)
         self.assertEqual(dests & pruned, set(),
                          "an asset cannot be both installed and pruned")
         for dest, sentinel in kraken.OBSOLETE_ASSETS:
@@ -457,7 +457,7 @@ class InitConstantsTests(unittest.TestCase):
             "repo": "acme/tasks", "repo_status": "created",
             "assets": [
                 {"path": ".github/ISSUE_TEMPLATE/task.yml", "status": "created"},
-                {"path": ".github/workflows/cleanup-closed.yml", "status": "unchanged"},
+                {"path": ".github/kraken.py", "status": "unchanged"},
                 {"path": ".github/workflows/validate-task.yml", "status": "drifted"},
                 {"path": ".github/workflows/reclaim-stale.yml", "status": "removed"},
             ],
@@ -1063,6 +1063,55 @@ class StatusComputeTests(unittest.TestCase):
             pr_merged=lambda u: None,  # transport failure
             project_lister=lambda r: [])
         self.assertIsNone(report)
+
+
+class QueueHygieneTests(unittest.TestCase):
+    """The read-side twin of the arrival-time validator (PROTOCOL.md §2.1): the
+    same three checks — project label, Goal, Acceptance — decided from the bodies
+    the queue walk already carries, so the console reports them for the whole
+    queue at once and nothing has to run in the coordination repo."""
+
+    GOOD = "### Goal\n\nShip it.\n\n### Acceptance\n\n`npm test` passes.\n"
+
+    def _node(self, number, labels, body, created="2026-07-01T00:00:00Z"):
+        return {"number": number, "title": "t%d" % number, "createdAt": created,
+                "body": body, "labels": {"nodes": [{"name": l} for l in labels]}}
+
+    def test_a_compliant_task_is_not_reported(self):
+        node = self._node(1, ["kraken-task", "project:app"], self.GOOD)
+        self.assertEqual(kraken.queue_hygiene([node]), [])
+
+    def test_missing_project_label(self):
+        node = self._node(1, ["kraken-task"], self.GOOD)
+        self.assertEqual(kraken.queue_hygiene([node]),
+                         [{"number": 1, "title": "t1", "missing": ["project label"]}])
+
+    def test_missing_goal_and_acceptance(self):
+        node = self._node(1, ["kraken-task", "project:app"], "no headings at all")
+        self.assertEqual(kraken.queue_hygiene([node])[0]["missing"],
+                         ["Goal", "Acceptance"])
+
+    def test_blank_issue_form_field_counts_as_missing(self):
+        body = "### Goal\n\nShip it.\n\n### Acceptance\n\n_No response_\n"
+        node = self._node(1, ["kraken-task", "project:app"], body)
+        self.assertEqual(kraken.queue_hygiene([node])[0]["missing"], ["Acceptance"])
+
+    def test_a_project_scope_never_hides_a_task_with_no_project(self):
+        """The load-bearing case: a task carrying no project label is invisible to
+        every worker, and a project scope would bury it too. It is reported under
+        any scope."""
+        orphan = self._node(1, ["kraken-task"], self.GOOD)
+        other = self._node(2, ["kraken-task", "project:web"], "empty")
+        mine = self._node(3, ["kraken-task", "project:app"], "empty")
+        reported = [i["number"] for i in kraken.queue_hygiene([orphan, other, mine],
+                                                              project="app")]
+        self.assertEqual(reported, [1, 3],
+                         "the other project's task leaked in, or the orphan was hidden")
+
+    def test_oldest_first(self):
+        a = self._node(9, ["kraken-task"], self.GOOD, created="2026-07-02T00:00:00Z")
+        b = self._node(4, ["kraken-task"], self.GOOD, created="2026-07-01T00:00:00Z")
+        self.assertEqual([i["number"] for i in kraken.queue_hygiene([a, b])], [4, 9])
 
 
 def _task_node(number, labels):

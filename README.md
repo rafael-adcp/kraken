@@ -27,7 +27,7 @@ AI coding agents made each change cheap — but you are still the bus between th
 | Dependencies       | Native `blocked-by` relationships — closing a task unblocks |
 | Parallelism        | Capacity = how many workers you launch; 1 task per worker   |
 | Dead workers       | Ref-anchored heartbeats; the next worker to read the queue reclaims the dead claim |
-| Bad tasks          | A queue-entry validator flags a missing label/Goal/Acceptance |
+| Bad tasks          | The issue form requires Goal + Acceptance; `status` reports what a worker still cannot start |
 | Dashboard          | The GitHub UI — filters, notifications, mobile app          |
 | Audit trail        | The issue timeline: who, when, why, validated how           |
 
@@ -165,22 +165,19 @@ worker reuses that same skill with the harness deltas in [`AGENTS.md`](AGENTS.md
    <details>
    <summary>Not running the plugin? The same setup by hand</summary>
 
-   The four assets land at `.github/ISSUE_TEMPLATE/task.yml`, the vendored
-   transition program `.github/kraken.py` (which the coordination workflows
-   exec), and the two `.github/workflows/` files (`cleanup-closed.yml`,
-   `validate-task.yml`). There are **no** reconciler and requeue workflows:
-   under `kraken-protocol/5` the worker reconciles stale claims — and derives an
-   answered task's requeue — on the queue read it performs before every claim
-   (PROTOCOL.md §6).
+   Two files: the issue-form template and the transition program.
+   **`kraken-protocol/5` installs no workflows at all** — the coordination repo
+   runs nothing. Stale claims, an answered task's requeue and queue-entry
+   validation are all derived by the reader, on the queue read a worker or
+   `status` performs anyway (PROTOCOL.md §2.1, §6). You do not need GitHub
+   Actions enabled on this repo.
 
    ```bash
    gh repo create OWNER/tasks --private --clone && cd tasks
    mkdir -p .github/ISSUE_TEMPLATE .github/workflows
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/task-template.yml -o .github/ISSUE_TEMPLATE/task.yml
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/kraken.py -o .github/kraken.py
-   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/cleanup-closed.yml -o .github/workflows/cleanup-closed.yml
-   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/validate-task.yml -o .github/workflows/validate-task.yml
-   git add -A && git commit -m "chore: kraken task template, transition program, cleanup, and validator" && git push
+   git add -A && git commit -m "chore: kraken task template and transition program" && git push
 
    gh -R OWNER/tasks label create kraken-task
    gh -R OWNER/tasks label create in-progress
@@ -416,15 +413,19 @@ discussion in hand.
 </details>
 
 <details>
-<summary><b>A task I filed got a bot comment listing what's missing — what is that?</b></summary>
+<summary><b>How do I find tasks no worker will ever start?</b></summary>
 
-That's the coordination repo's **validate-task** workflow — the queue-entry gate.
-The two ways a task is born dead (no `project:<name>` label, so no worker will
-ever see it; or an empty **Goal**/**Acceptance** section, so a worker claims it
-and stalls) are otherwise silent, so on a new/edited `kraken-task` issue it posts
-one comment naming exactly what to fix. It only **informs** — it never blocks,
-closes, or relabels. Fix the flagged item and the comment stops recurring; a
-compliant task never gets one.
+Run **`/kraken:status`** — it ends with a **🧹 Queue hygiene** section listing
+every open task missing a `project:<name>` label (so no worker will ever see it)
+or an empty **Goal**/**Acceptance** (so a worker claims it and stalls). It costs
+nothing extra: `status` already reads every open task's labels and body.
+
+The issue form catches most of this at the source — Goal and Acceptance are
+`required` fields, so a blank one never becomes an issue. What the form cannot do
+is apply the `project:` label, which is exactly what hygiene is there for. A
+project-less task is reported even under `--project`: it belongs to no project,
+so a scope would bury the one failure you most need to see. It **informs** —
+nothing is blocked, closed, or relabelled.
 
 </details>
 
@@ -542,7 +543,7 @@ run is always a deliberate release.
 
 Nothing that runs. `/plugin uninstall kraken@kraken` removes the skills — the
 only thing Kraken ever installs on a machine. The queue is just a private repo
-of issues you own (the cleanup and validator workflows live inside it): keep it,
+of issues you own, with nothing running inside it: keep it,
 archive it, or delete it. No service to stop, no daemon to kill, no state
 anywhere else.
 

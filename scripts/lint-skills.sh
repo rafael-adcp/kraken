@@ -17,7 +17,6 @@ README="README.md"
 PROTOCOL="PROTOCOL.md"
 PLUGIN=".claude-plugin/plugin.json"
 TEMPLATE="skills/unleash/task-template.yml"
-VALIDATE="skills/unleash/validate-task.yml"
 # Every label / machine-line / disclaimer emitter lives in kraken.py, so all the
 # per-emitter checks below resolve to that single module.
 KRAKEN="skills/unleash/kraken.py"
@@ -192,7 +191,7 @@ if command -v python3 >/dev/null 2>&1; then
   done
 fi
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
-  for y in "$TEMPLATE" "$VALIDATE" .github/workflows/*.yml; do
+  for y in "$TEMPLATE" .github/workflows/*.yml; do
     [ -f "$y" ] || continue
     python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$y" 2>/dev/null \
       || err "invalid YAML: $y"

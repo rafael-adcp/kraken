@@ -11,18 +11,17 @@ import unittest
 
 from harness import KrakenConformanceTest, SCRIPTS
 
-ASSET_SRCS = ["task-template.yml", "kraken.py",
-              "cleanup-closed.yml", "validate-task.yml"]
+ASSET_SRCS = ["task-template.yml", "kraken.py"]
 ASSET_DSTS = [
     ".github/ISSUE_TEMPLATE/task.yml",
     ".github/kraken.py",
-    ".github/workflows/cleanup-closed.yml",
-    ".github/workflows/validate-task.yml",
 ]
-# protocol/5 retired the scheduled reconciler and the requeue mutation; init
-# deletes the copies an earlier release installed instead of keeping them in sync.
+# protocol/5 retired every coordination workflow; init deletes the copies an
+# earlier release installed instead of keeping them in sync.
 RETIRED_DSTS = [".github/workflows/reclaim-stale.yml",
-                ".github/workflows/requeue-on-reply.yml"]
+                ".github/workflows/requeue-on-reply.yml",
+                ".github/workflows/cleanup-closed.yml",
+                ".github/workflows/validate-task.yml"]
 RETIRED_DST = RETIRED_DSTS[0]
 
 
@@ -67,14 +66,14 @@ class InitTests(KrakenConformanceTest):
         # --- 3. create-only: a drifted asset is reported by plain init, not
         #        overwritten (a plain run never writes over an existing file) ---
         self.truncate_log()
-        custom = os.path.join(self.state, "custom.yml")
-        self._write(custom, "name: my hand-edited validator\n")
-        self.mk_content(".github/workflows/validate-task.yml", custom)
+        custom = os.path.join(self.state, "custom.py")
+        self._write(custom, "# my hand-edited transition program\n")
+        self.mk_content(".github/kraken.py", custom)
         r = self.kraken("init", "OWNER/tasks")
         self.assertEqual(r.rc, 0, "create-only exit")
-        self.assertIn("init: asset .github/workflows/validate-task.yml (drifted)", r.out,
+        self.assertIn("init: asset .github/kraken.py (drifted)", r.out,
                       "drifted asset not flagged")
-        self.assertTrue(filecmp.cmp(self._contents(".github/workflows/validate-task.yml"), custom, shallow=False),
+        self.assertTrue(filecmp.cmp(self._contents(".github/kraken.py"), custom, shallow=False),
                         "plain init overwrote a drifted asset — create-only violated")
         self.assertNotIn("PUT ", self.log_text(),
                          "a PUT was issued during a plain run where every asset already exists")
