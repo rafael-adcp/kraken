@@ -425,7 +425,6 @@ class InitConstantsTests(unittest.TestCase):
             ".github/ISSUE_TEMPLATE/task.yml",
             ".github/kraken.py",
             ".github/workflows/cleanup-closed.yml",
-            ".github/workflows/requeue-on-reply.yml",
             ".github/workflows/validate-task.yml",
         })
 
@@ -435,6 +434,7 @@ class InitConstantsTests(unittest.TestCase):
         dests = {dest for _, dest, _ in kraken.INIT_ASSETS}
         pruned = {dest for dest, _ in kraken.OBSOLETE_ASSETS}
         self.assertIn(".github/workflows/reclaim-stale.yml", pruned)
+        self.assertIn(".github/workflows/requeue-on-reply.yml", pruned)
         self.assertEqual(dests & pruned, set(),
                          "an asset cannot be both installed and pruned")
         for dest, sentinel in kraken.OBSOLETE_ASSETS:
@@ -458,7 +458,7 @@ class InitConstantsTests(unittest.TestCase):
             "assets": [
                 {"path": ".github/ISSUE_TEMPLATE/task.yml", "status": "created"},
                 {"path": ".github/workflows/cleanup-closed.yml", "status": "unchanged"},
-                {"path": ".github/workflows/requeue-on-reply.yml", "status": "drifted"},
+                {"path": ".github/workflows/validate-task.yml", "status": "drifted"},
                 {"path": ".github/workflows/reclaim-stale.yml", "status": "removed"},
             ],
             "labels": ["kraken-task", "project:app"],
@@ -575,8 +575,16 @@ class ClaimNextIterationTests(unittest.TestCase):
         kraken.classify_queue = (
             lambda repo, project, include_body=False, read=None: rows
         )
+        # claim-next re-derives each candidate's requeue verdict off the node the
+        # filter used, so the read has to carry a node per row.
+        # rows=None models a failed queue read, which now surfaces at read_queue.
+        nodes = [{"number": r[0], "title": r[1], "createdAt": r[2], "body": "",
+                  "labels": {"nodes": [{"name": "kraken-task"}]},
+                  "comments": {"nodes": []},
+                  "blockedBy": {"nodes": []}} for r in (rows or [])]
+        kraken.read_queue = lambda repo: None if rows is None else (nodes, {})
 
-        def fake_claim_once(repo, issue, worker):
+        def fake_claim_once(repo, issue, worker, allow_held=()):
             self.attempted.append(issue)
             return claim_results[issue]
         kraken._claim_once = fake_claim_once

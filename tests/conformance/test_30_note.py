@@ -2,9 +2,9 @@
 """kraken.py note: a free-form worker comment lands with the attribution
 disclaimer as its first line and exactly ONE non-state-changing `note` marker,
 and it touches neither the label nor the claim ref — the task stays exactly where
-it was. The marker is what makes requeue-check read it as a worker comment
-structurally, so a note posted on a held task never bounces it back into the
-queue."""
+it was. The marker is what makes the §6 requeue derivation read it as a worker
+comment structurally, so a note posted on a held task never bounces it back into
+the queue."""
 import os
 import unittest
 
@@ -35,14 +35,15 @@ class NoteTests(KrakenConformanceTest):
         self.assertTrue(self.has_label(7, "in-progress"), "note changed the label")
         self.assertTrue(self.claim_ref_exists(7), "note touched the claim ref")
 
-        # requeue-check must treat this worker note as a no-op, never an operator
-        # reply — the `note` marker's structural presence is why.
-        r = self.kraken(
-            "requeue-check", "OWNER/tasks", 7,
-            env={"COMMENT_BODY": self.last_comment(7), "COMMENT_AUTHOR_TYPE": "User"},
-        )
-        self.assertEqual(r.rc, 0, "requeue-check exit on a worker note")
-        self.assertIn("worker comment", r.out, "note was not recognized as a worker comment")
+        # The §6 requeue derivation must read this note as a worker comment, never
+        # an operator reply — the `note` marker's structural presence is why. Read
+        # it on a HELD task, where a misread would be visible as a requeue.
+        self.mk_issue(70, "escalated", "kraken-task", "project:app", "needs-decision")
+        self.mk_comment(70, self.last_comment(7))
+        r = self.kraken("list-startable", "OWNER/tasks", "app")
+        self.assertEqual(r.rc, 0, "list-startable exit")
+        self.assertNotIn("70\t", r.out,
+                         "a worker note was misread as an operator reply and requeued the task")
 
     def test_note_bad_invocation(self):
         self.mk_issue(8, "task", "kraken-task", "project:app", "in-progress")

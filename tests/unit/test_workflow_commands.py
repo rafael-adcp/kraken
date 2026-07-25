@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Unit tests for the vendored-workflow subcommands (issues #37, #39): reap,
-requeue-check, validate, and cleanup. These are the coordination-repo workflows'
-logic, moved out of jq/grep/awk/bash and into kraken.py so one parser (with one
-set of unit tests) drives all four.
+"""Unit tests for the coordination passes kraken.py owns: the §6 reconcile and
+requeue derivation, plus the validate and cleanup subcommands. These began as
+coordination-repo workflows (issues #37, #39), moved out of jq/grep/awk/bash into
+kraken.py so one parser drives them all; protocol/5 then moved the reconcile and
+the requeue onto the reader, where they are decided rather than executed.
 
 Two layers: the pure parsing/decision helpers (no transport at all), and the
 cmd_* entry points with their gh transport mocked — exactly the pattern
@@ -37,8 +38,8 @@ def disclaimer_body(worker, *rest):
 # --- human-vs-worker discrimination ------------------------------------------
 
 class WorkerCommentTests(unittest.TestCase):
-    """requeue-on-reply's discriminator: a comment is a worker's iff it carries a
-    hidden kraken marker on any line (PROTOCOL.md §4), with a first-line
+    """The requeue derivation's discriminator: a comment is a worker's iff it
+    carries a hidden kraken marker on any line (PROTOCOL.md §4), with a first-line
     attribution disclaimer as a legacy fallback. Both are derived from kraken.py
     constants, never a second copy."""
 
@@ -90,7 +91,7 @@ class WorkerCommentTests(unittest.TestCase):
 # --- requeue-directive detection ---------------------------------------------
 
 class RequeueDirectiveTests(unittest.TestCase):
-    """awaiting-merge (delivered work) bounces back ONLY on an explicit,
+    """awaiting-merge (delivered work) rejoins the queue ONLY on an explicit,
     structured requeue directive: a protocol/3 requeue marker or a standalone
     requeue/requeue: line. A prose sentence must never bounce a ready branch."""
 
@@ -345,99 +346,119 @@ class ReapCommandTests(unittest.TestCase):
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
 
 
-# --- cmd_requeue_check: held-state rules, transport mocked -------------------
+# --- the requeue derivation: held-state rules, no transport at all -----------
 
-class RequeueCheckCommandTests(unittest.TestCase):
+def _cmt(body):
+    return {"body": body, "createdAt": "2026-07-01T00:00:00Z"}
 
-    def setUp(self):
-        self._orig = {
-            "issue_label_names": kraken.issue_label_names,
-            "swap_labels": kraken.swap_labels,
-            "post_comment": kraken.post_comment,
-        }
-        self.swaps = []
-        self.posts = []
-        kraken.swap_labels = lambda repo, issue, remove=None, add=None: (
-            self.swaps.append((issue, remove, add)) or True)
-        kraken.post_comment = lambda repo, issue, body: (
-            self.posts.append((issue, body)) or True)
 
-    def tearDown(self):
-        kraken.issue_label_names = self._orig["issue_label_names"]
-        kraken.swap_labels = self._orig["swap_labels"]
-        kraken.post_comment = self._orig["post_comment"]
-        for k in ("COMMENT_BODY", "COMMENT_AUTHOR_TYPE"):
-            os.environ.pop(k, None)
+def _worker_cmt(worker="w1", mtype="needs-decision"):
+    return _cmt(kraken.compose_comment(worker, "a question",
+                                       {"type": mtype, "worker": worker}))
 
-    def _run(self, issue, labels, body, author_type):
-        kraken.issue_label_names = lambda repo, i: labels
-        os.environ["COMMENT_BODY"] = body
-        os.environ["COMMENT_AUTHOR_TYPE"] = author_type
-        args = SimpleNamespace(repo="OWNER/tasks", issue=str(issue))
-        with redirect_stdout(StringIO()):
-            rc = kraken.cmd_requeue_check(args)
-        return rc
 
-    def test_bot_comment_is_a_noop(self):
-        rc = self._run(1, ["needs-decision"], "stale-claim: ...", "Bot")
-        self.assertEqual(rc, kraken.EXIT_OK)
-        self.assertEqual(self.swaps, [])
-        self.assertEqual(self.posts, [])
+class RequeueVerdictTests(unittest.TestCase):
+    """protocol/5's read filter (PROTOCOL.md §6). Through protocol/4 an operator
+    reply MUTATED the label via a workflow; now the same fact — an operator
+    comment newer than the last worker comment — is DERIVED on the read. No
+    network is involved, which is the point: the verdict is a property of the
+    thread, identical for every reader."""
 
-    def test_worker_comment_is_a_noop(self):
-        rc = self._run(1, ["needs-decision"],
-                       disclaimer_body("w1", "which option?"), "User")
-        self.assertEqual(self.swaps, [])
-        self.assertEqual(self.posts, [])
+    def test_bare_reply_requeues_needs_decision(self):
+        comments = [_worker_cmt(), _cmt("go with option B")]
+        self.assertTrue(kraken.requeue_verdict(("needs-decision",), comments))
 
-    def test_note_marker_comment_is_a_noop(self):
-        # A worker note now carries a `note` marker; requeue-check must read it as
-        # a worker comment structurally and leave needs-decision held.
-        rc = self._run(1, ["needs-decision"], kraken.compose_note("w1", "assuming X"), "User")
-        self.assertEqual(rc, kraken.EXIT_OK)
-        self.assertEqual(self.swaps, [])
-        self.assertEqual(self.posts, [])
+    def test_no_reply_stays_held(self):
+        self.assertFalse(kraken.requeue_verdict(("needs-decision",),
+                                                [_worker_cmt()]))
 
-    def test_needs_decision_requeues_on_bare_reply(self):
-        rc = self._run(1, ["kraken-task", "needs-decision"], "option B", "User")
-        self.assertEqual(self.swaps, [(str(1), "needs-decision", None)])
-        self.assertEqual(len(self.posts), 1)
-        self.assertTrue(self.posts[0][1].startswith("requeue: operator reply detected"))
+    def test_empty_thread_stays_held(self):
+        self.assertFalse(kraken.requeue_verdict(("needs-decision",), []))
 
-    def test_awaiting_merge_bare_comment_stays_held(self):
-        rc = self._run(1, ["awaiting-merge"], "merging tomorrow", "User")
-        self.assertEqual(self.swaps, [])
-        self.assertEqual(self.posts, [])
+    def test_a_worker_comment_after_the_reply_re_holds(self):
+        # The operator answered, a worker picked it up and escalated AGAIN: the
+        # newest worker comment outranks the older reply, so it is held again.
+        comments = [_worker_cmt(), _cmt("go with option B"), _worker_cmt()]
+        self.assertFalse(kraken.requeue_verdict(("needs-decision",), comments))
 
-    def test_awaiting_merge_requeues_on_directive(self):
-        rc = self._run(1, ["awaiting-merge"], "requeue:", "User")
-        self.assertEqual(self.swaps, [(str(1), "awaiting-merge", None)])
-        self.assertTrue(self.posts[0][1].startswith("requeue: explicit requeue"))
+    def test_worker_comments_never_requeue(self):
+        # Every kraken-authored comment carries a marker — including the
+        # reconciler's stale-claim note and the validator's — so none of them can
+        # requeue the escalation they just posted. This is what retires the
+        # protocol/4 `user.type == Bot` gate.
+        for body in (kraken.stale_claim_body("w1", "silent"),
+                     kraken.orphan_projection_body("w1"),
+                     kraken.validation_body([kraken.VALIDATE_GOAL_MISSING]),
+                     kraken.compose_note("w1", "still working")):
+            comments = [_worker_cmt(), _cmt(body)]
+            self.assertFalse(
+                kraken.requeue_verdict(("needs-decision",), comments),
+                "a kraken-authored comment requeued the task: %s" % body[:60])
 
-    def test_awaiting_merge_pasted_requeue_marker_is_read_as_worker(self):
-        # Accepted edge (PROTOCOL.md §4): a comment carrying ANY hidden marker now
-        # reads as worker-authored, so a pasted requeue marker no longer bounces a
-        # delivered task — the standalone `requeue:` line, or hand-removal, is the
-        # operator's path.
-        body = "bounce\n\n" + kraken.make_marker({"type": "requeue"})
-        rc = self._run(1, ["awaiting-merge"], body, "User")
-        self.assertEqual(rc, kraken.EXIT_OK)
-        self.assertEqual(self.swaps, [])
-        self.assertEqual(self.posts, [])
+    def test_awaiting_merge_needs_an_explicit_directive(self):
+        delivered = [_worker_cmt(mtype="delivered")]
+        self.assertFalse(kraken.requeue_verdict(
+            ("awaiting-merge",), delivered + [_cmt("nice, thanks")]))
+        self.assertTrue(kraken.requeue_verdict(
+            ("awaiting-merge",), delivered + [_cmt("please fix the naming\nrequeue")]))
 
-    def test_no_held_label_is_a_noop(self):
-        rc = self._run(1, ["kraken-task"], "nice work", "User")
-        self.assertEqual(self.swaps, [])
-        self.assertEqual(self.posts, [])
+    def test_a_prose_requeue_does_not_bounce_a_ready_branch(self):
+        delivered = [_worker_cmt(mtype="delivered")]
+        self.assertFalse(kraken.requeue_verdict(
+            ("awaiting-merge",),
+            delivered + [_cmt("requeue: only if CI is red, otherwise merge it")]))
 
-    def test_transport_failure_on_labels_is_twenty(self):
-        kraken.issue_label_names = lambda repo, i: None
-        os.environ["COMMENT_BODY"] = "option B"
-        os.environ["COMMENT_AUTHOR_TYPE"] = "User"
-        args = SimpleNamespace(repo="OWNER/tasks", issue="1")
-        with redirect_stdout(StringIO()):
-            rc = kraken.cmd_requeue_check(args)
-        self.assertEqual(rc, kraken.EXIT_TRANSPORT)
+    def test_the_directive_may_arrive_in_a_later_reply(self):
+        delivered = [_worker_cmt(mtype="delivered")]
+        self.assertTrue(kraken.requeue_verdict(
+            ("awaiting-merge",),
+            delivered + [_cmt("hmm"), _cmt("requeue")]))
+
+    def test_a_truncated_window_cannot_mislead(self):
+        # A window holding NO worker comment means the last one is older than the
+        # window — so every operator comment in it is newer, which is the correct
+        # verdict. This is why a fixed comment window is safe.
+        self.assertTrue(kraken.requeue_verdict(
+            ("needs-decision",), [_cmt("reply %d" % i) for i in range(25)]))
+
+
+class RequeuedLabelsTests(unittest.TestCase):
+    """requeued_labels: the derivation as the classifier and the claim both see
+    it — which held labels an operator reply has already lifted."""
+
+    @staticmethod
+    def _node(number, labels, comments=()):
+        return {"number": number, "title": "t", "createdAt": "2026-01-01",
+                "body": "", "labels": {"nodes": [{"name": l} for l in labels]},
+                "comments": {"nodes": list(comments)},
+                "blockedBy": {"nodes": []}}
+
+    def test_answered_needs_decision_is_lifted(self):
+        node = self._node(1, ["kraken-task", "needs-decision"],
+                          [_worker_cmt(), _cmt("do option B")])
+        self.assertEqual(kraken.requeued_labels(node, {}), ("needs-decision",))
+
+    def test_unanswered_stays_held(self):
+        node = self._node(1, ["kraken-task", "needs-decision"], [_worker_cmt()])
+        self.assertEqual(kraken.requeued_labels(node, {}), ())
+
+    def test_a_live_claim_ref_outranks_the_thread(self):
+        # A comment on a CLAIMED task is context for its worker, never a requeue:
+        # the lock is the truth (§5), so the timeline is not consulted at all.
+        node = self._node(1, ["kraken-task", "needs-decision"],
+                          [_worker_cmt(), _cmt("do option B")])
+        self.assertEqual(kraken.requeued_labels(node, {1: "sha"}), ())
+
+    def test_in_progress_is_never_requeued_by_a_reply(self):
+        # An in-progress label with no ref is the reconciler's rule 4 (a repair),
+        # not a requeue — two mechanisms for one label would race.
+        node = self._node(1, ["kraken-task", "in-progress"],
+                          [_worker_cmt(), _cmt("any news?")])
+        self.assertEqual(kraken.requeued_labels(node, {}), ())
+
+    def test_an_unheld_task_lifts_nothing(self):
+        node = self._node(1, ["kraken-task"], [_cmt("just chatter")])
+        self.assertEqual(kraken.requeued_labels(node, {}), ())
 
 
 # --- cmd_validate: gate + debounce, transport mocked ------------------------

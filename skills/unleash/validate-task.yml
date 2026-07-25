@@ -14,8 +14,9 @@
 # field rule, the marker, and debounce all live there and are unit-tested.
 #
 # It INFORMS; the operator acts — never blocks, closes, or relabels. A compliant
-# task gets no comment; a non-kraken-task issue is a no-op. Its comment is the
-# Actions bot (user.type == Bot), so requeue-on-reply's Bot gate ignores it. A
+# task gets no comment; a non-kraken-task issue is a no-op. Its comment carries a
+# `validation` marker, so the §6 requeue derivation reads it as machine-authored
+# and never requeues on it. A
 # per-issue concurrency group serializes an edit burst. All four behaviors are
 # pinned by tests/conformance/test_25_validate_task.py.
 name: Validate task on arrival

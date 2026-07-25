@@ -12,17 +12,18 @@ import unittest
 from harness import KrakenConformanceTest, SCRIPTS
 
 ASSET_SRCS = ["task-template.yml", "kraken.py",
-              "cleanup-closed.yml", "requeue-on-reply.yml", "validate-task.yml"]
+              "cleanup-closed.yml", "validate-task.yml"]
 ASSET_DSTS = [
     ".github/ISSUE_TEMPLATE/task.yml",
     ".github/kraken.py",
     ".github/workflows/cleanup-closed.yml",
-    ".github/workflows/requeue-on-reply.yml",
     ".github/workflows/validate-task.yml",
 ]
-# protocol/5 retired the scheduled reconciler; init deletes the copy an earlier
-# release installed instead of keeping it in sync.
-RETIRED_DST = ".github/workflows/reclaim-stale.yml"
+# protocol/5 retired the scheduled reconciler and the requeue mutation; init
+# deletes the copies an earlier release installed instead of keeping them in sync.
+RETIRED_DSTS = [".github/workflows/reclaim-stale.yml",
+                ".github/workflows/requeue-on-reply.yml"]
+RETIRED_DST = RETIRED_DSTS[0]
 
 
 class InitTests(KrakenConformanceTest):
@@ -78,27 +79,28 @@ class InitTests(KrakenConformanceTest):
         self.assertNotIn("PUT ", self.log_text(),
                          "a PUT was issued during a plain run where every asset already exists")
 
-    def test_init_prunes_the_retired_reconciler_workflow(self):
+    def test_init_prunes_every_retired_workflow(self):
         """Re-running init on a repo stood up by an older release is the
-        migration: the retired workflow is deleted, so no cron keeps mutating
-        labels under semantics the workers no longer implement."""
+        migration: each retired workflow is deleted, so no server-side job keeps
+        mutating labels under semantics the workers no longer implement."""
         self.mk_repo("OWNER/tasks")
-        vendored = os.path.join(self.state, "old-reaper.yml")
-        # The bytes an older init installed: the bundled header is the sentinel
-        # that proves the file is kraken's own to delete.
-        self._write(vendored,
-                    "# Reaper for kraken. Installed by `init` into the "
-                    "coordination repo as\n# .github/workflows/reclaim-stale.yml"
-                    "\nname: Reclaim stale claims\n")
-        self.mk_content(RETIRED_DST, vendored)
+        for i, dst in enumerate(RETIRED_DSTS):
+            vendored = os.path.join(self.state, "old-%d.yml" % i)
+            # The bytes an older init installed: the bundled header is the
+            # sentinel that proves the file is kraken's own to delete.
+            self._write(vendored,
+                        "# Something for kraken. Installed by `init` into the "
+                        "coordination repo as\n# %s\nname: retired\n" % dst)
+            self.mk_content(dst, vendored)
 
         r = self.kraken("init", "OWNER/tasks")
-        self.assertEqual(r.rc, 0, "init exit with a retired asset present")
-        self.assertIn("init: asset %s (removed)" % RETIRED_DST, r.out,
-                      "the retired workflow was not reported removed")
-        self.assertFalse(os.path.isfile(self._contents(RETIRED_DST)),
-                         "the retired workflow survived the prune")
-        self.assertIn("assets_removed=1", r.out)
+        self.assertEqual(r.rc, 0, "init exit with retired assets present")
+        for dst in RETIRED_DSTS:
+            self.assertIn("init: asset %s (removed)" % dst, r.out,
+                          "%s was not reported removed" % dst)
+            self.assertFalse(os.path.isfile(self._contents(dst)),
+                             "%s survived the prune" % dst)
+        self.assertIn("assets_removed=%d" % len(RETIRED_DSTS), r.out)
 
         # Idempotent: a second run finds nothing to prune and says removed=0.
         r = self.kraken("init", "OWNER/tasks")
