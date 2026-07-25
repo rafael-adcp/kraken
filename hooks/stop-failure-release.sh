@@ -3,8 +3,8 @@
 # `rate_limit`).
 #
 # A usage limit kills the turn but not the session, so SessionEnd never fires and
-# a held claim would squat on in-progress until the ~6h reaper — and the wake the
-# watcher spent on the dead turn would be lost (the queue snapshot no longer
+# a held lease would squat on in-progress until its TTL runs out — and the wake
+# the watcher spent on the dead turn would be lost (the queue snapshot no longer
 # changes). StopFailure is the one event that DOES fire there, so this hook:
 #   1. stamps the wake-retry flag ($KRAKEN_STATE_DIR/wake-retry); `kraken.py
 #      watch` re-emits its wake when the flag is newer than its last emission, so
@@ -19,7 +19,8 @@
 # and must not release its live claim, so they are deliberately not matched.
 #
 # Best-effort: ALWAYS exits 0. gh still works at limit time, so the release
-# normally lands; if not, the reaper is the backstop. The StopFailure JSON on
+# normally lands; if not, the lease expiry is the backstop — this hook makes
+# recovery immediate, it is not what makes it happen. The StopFailure JSON on
 # stdin is unused — the matcher already scoped the error type.
 set -u
 

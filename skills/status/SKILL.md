@@ -1,6 +1,6 @@
 ---
 name: status
-description: Read-only console of a kraken queue — everything the operator reads in one place. Runs `kraken.py status`, which computes the review queue (awaiting-merge, with PR links), the decision queue (needs-decision), what is still in-progress (worker name + heartbeat age), a merged-PR-but-open-issue orphan flag, and the launch recon (project: labels), then renders that output. No writes, no label changes.
+description: Read-only console of a kraken queue — everything the operator reads in one place. Runs `kraken.py status`, which computes the review queue (awaiting-merge, with PR links), the decision queue (needs-decision), what is still in-progress (worker name + lease age, flagging expired leases), a merged-PR-but-open-issue orphan flag, and the launch recon (project: labels), then renders that output. No writes, no label changes.
 ---
 
 # Kraken — surface the depths
@@ -34,7 +34,7 @@ is reported and the launch recon enumerates every project.
 ## Protocol
 
 Everything deterministic is mechanized in the subcommand (PROTOCOL.md §12) — the queue
-fetch, the PR-link parse, the heartbeat-age anchor, the orphan heuristic, and the
+fetch, the PR-link parse, the lease-age anchor, the orphan heuristic, and the
 project enumeration. Your job is to run it and render the result; there is no `gh`
 orchestration left to do by hand.
 
@@ -48,7 +48,7 @@ orchestration left to do by hand.
    (scripts, cron, a future `stats` over the timeline) add `--json` — see the schema
    below. The subcommand is **read-only**: it runs `gh` reads only (the batched
    GraphQL queue walk, the claim refs plus their commit meta for in-flight
-   worker/heartbeat-age, the paginated comment history for the awaiting-merge PR
+   worker/lease-age, the paginated comment history for the awaiting-merge PR
    link, `gh pr view` for the orphan check, `gh label list` for the recon) and
    never writes.
 
@@ -67,8 +67,8 @@ orchestration left to do by hand.
         #97  <title>  (options in thread)
 
      ⚙️  In flight (in-progress) — N running
-        #99  <title>  · worker <name> · last heartbeat 12m ago
-        #93  <title>  · worker <name> · last heartbeat 9h ago  ⚠️  silent — the next drain reclaims it
+        #99  <title>  · worker <name> · lease renewed 12m ago
+        #93  <title>  · worker <name> · lease renewed 9h ago  ⚠️  lease expired — the next drain steals it
 
      ⚠️  1 possible orphan(s): #85 — PR looks merged but the issue is still open. You decide.
 
@@ -81,11 +81,13 @@ orchestration left to do by hand.
         /kraken:unleash OWNER/tasks --worker-name <worker-name> --project <name-2>
    ```
 
-   The heartbeat age is anchored to the worker's **claim ref commit date** (the
-   `claim`/`heartbeat` commit on `refs/kraken/claims/<issue>`), NOT the issue's
+   The lease age is anchored to the worker's **claim ref commit date** (the
+   `claim`/`heartbeat` commit on the highest `refs/kraken/claims/<issue>/<gen>`),
+   NOT the issue's
    `updatedAt` — an operator comment on a dead worker's issue must not make it look
-   alive (the reconciler moves silent claims to `needs-decision` after 6h off that
-   same anchor). The orphan
+   alive. The ⚠️ means the lease is past its TTL: it holds nothing any more, and the
+   next worker to read the queue takes the task over (PROTOCOL.md §5). Nothing here
+   acts on that — `status` writes nothing, ever. The orphan
    line **flags, it never acts** — no label change, no close; the decision is mine. The
    Launch section appears only without `--project`; a queue with zero `project:` labels
    says so (create one with `gh -R OWNER/tasks label create "project:<name>"` or
@@ -103,9 +105,10 @@ A stable object for downstream tooling:
   "review_queue":   [ { "number", "title", "pr_url": "<url>"|null, "orphan": true|false } ],
   "decision_queue": [ { "number", "title" } ],
   "in_flight":      [ { "number", "title", "worker": "<name>"|null,
-                        "heartbeat_anchor": "<iso>"|null,
+                        "heartbeat_anchor": "<iso>"|null,   // the lease timestamp
                         "heartbeat_age_seconds": <int>|null,
-                        "heartbeat_msg": "<progress>"|null } ],
+                        "heartbeat_msg": "<progress>"|null,
+                        "stale": true|false } ],            // true = lease expired
   "orphans":  [ <number>, ... ],        // review numbers whose PR looks merged
   "projects": [ "<name>", ... ]         // every project: label (recon targets)
 }
@@ -113,7 +116,8 @@ A stable object for downstream tooling:
 
 `heartbeat_age_seconds` / `heartbeat_anchor` / `heartbeat_msg` are `null` when there is
 no readable claim ref (an orphan projection, or a claim commit that could not be read);
-`pr_url` is `null` when no PR was recorded.
+`stale` is `true` when the lease no longer holds — expired, or with no readable clock
+behind it; `pr_url` is `null` when no PR was recorded.
 
 ## Authorization boundaries
 

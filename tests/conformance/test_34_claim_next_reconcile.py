@@ -21,18 +21,25 @@ Three things are under test, all against the real gh stub:
 import re
 import unittest
 
-from harness import KrakenConformanceTest
+from harness import KrakenConformanceTest, expiry_marker
+from kraken import LEASE_EXPIRY_ESCALATE
 
 
 class ClaimNextReconcileTests(KrakenConformanceTest):
     def test_the_claim_path_runs_the_four_rules(self):
-        # #1 DEAD — an 8h-old claim ref. Rule 2: reclaim to needs-decision.
-        self.mk_issue(1, "dead worker", "kraken-task", "project:app", "in-progress")
-        self.mk_claim_ref(1, "dead-worker", age_hours=8)
+        # #1 UNFINISHABLE — an expired lease on a task already stolen
+        # LEASE_EXPIRY_ESCALATE times. Rule 2: reclaim to needs-decision. (A
+        # FIRST expiry is not a rule at all under protocol/6 — it is stolen, see
+        # test_an_expired_lease_is_stolen_not_escalated.)
+        self.mk_issue(1, "nobody can finish this", "kraken-task", "project:app",
+                      "in-progress")
+        self.mk_expired_lease(1, "dead-worker")
+        for i in range(LEASE_EXPIRY_ESCALATE):
+            self.mk_comment(1, expiry_marker("w%d" % i))
 
-        # #2 ALIVE — heartbeated just now. Untouched by every rule.
+        # #2 ALIVE — renewed just now. Untouched by every rule.
         self.mk_issue(2, "live worker", "kraken-task", "project:app", "in-progress")
-        self.mk_claim_ref(2, "live-worker", age_hours=0, mtype="heartbeat",
+        self.mk_claim_ref(2, "live-worker", age_seconds=5, mtype="heartbeat",
                           msg="still going")
 
         # #3 ORPHAN PROJECTION — in-progress label, no ref. Rule 4: requeue.
@@ -41,17 +48,17 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         # #4 ORPHAN LOCK — a ref left on an escalated issue. Rule 1: drop it.
         self.mk_issue(4, "escalated, ref lingered", "kraken-task", "project:app",
                       "needs-decision")
-        self.mk_claim_ref(4, "gone-worker", age_hours=1)
+        self.mk_claim_ref(4, "gone-worker", age_seconds=60)
 
         # #5 HEAL — a fresh ref whose in-progress projection never landed. Rule 3.
         self.mk_issue(5, "projection crashed", "kraken-task", "project:app")
-        self.mk_claim_ref(5, "healthy-worker", age_hours=0)
+        self.mk_claim_ref(5, "healthy-worker", age_seconds=5)
 
         # #6 ORPHAN LOCK ON CLOSED — the issue is gone from the open walk, so the
         #    rule needs no per-ref issue read to spot it.
         self.mk_issue(6, "closed, ref lingered", "kraken-task", "project:app")
         self.set_issue_state(6, "closed")
-        self.mk_claim_ref(6, "old-worker", age_hours=2)
+        self.mk_claim_ref(6, "old-worker", age_seconds=120)
 
         r = self.kraken("claim-next", "OWNER/tasks", "app", "w-drain")
         self.assertEqual(r.rc, 0, "the drain should have claimed #3: %s" % r.err)
@@ -87,6 +94,33 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         self.assertTrue(self.has_label(5, "in-progress"), "#5 not healed")
         self.assertTrue(self.claim_ref_exists(5), "#5 lost its live lock")
         self.assertEqual(self.comment_count(5), 0, "#5 got a spurious comment")
+
+    def test_an_expired_lease_is_stolen_not_escalated(self):
+        """The protocol/6 recovery path, end to end and with nothing installed:
+        a worker dies holding a lease, and the very next drain takes the task
+        over — no cron, no hook, no operator, and no needs-decision detour."""
+        self.mk_issue(1, "abandoned mid-flight", "kraken-task", "project:app",
+                      "in-progress")
+        dead = self.mk_expired_lease(1, "dead-worker")
+
+        r = self.kraken("claim-next", "OWNER/tasks", "app", "w-drain")
+        self.assertEqual(r.rc, 0, "the drain should have stolen #1: %s%s"
+                         % (r.out, r.err))
+
+        # The lease changed hands: a NEW ref, this worker's, and the label the
+        # dead worker left behind now projects the new lease.
+        self.assertTrue(self.claim_ref_exists(1), "#1 left with no lease at all")
+        self.assertNotEqual(self.claim_ref(1), dead, "#1 kept the dead lease")
+        self.assertTrue(self.has_label(1, "in-progress"), "#1 lost its projection")
+        self.assertFalse(self.has_label(1, "needs-decision"),
+                         "a first expiry must not reach the operator")
+
+        # The steal is on the record, naming both workers — the audit trail, and
+        # what §6's repeat guard counts.
+        bodies = "\n".join(self.comment_bodies(1))
+        self.assertIn('"type":"lease-expired"', bodies, "no lease-expired marker")
+        self.assertIn("dead-worker", bodies, "the steal does not name the old holder")
+        self.assert_disclaimer(1, "w-drain")
 
     def test_an_agreeing_queue_costs_zero_writes(self):
         """The overwhelmingly common case: nothing to repair. The reconcile must

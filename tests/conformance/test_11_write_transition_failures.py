@@ -54,11 +54,17 @@ class WriteTransitionFailureTests(KrakenConformanceTest):
         self.assertEqual(r.rc, 20, "heartbeat exit on commit failure")
         self.assertEqual(r.out, "heartbeat: gh-failure issue=8 stage=commit", "heartbeat commit-failure line")
 
-        # heartbeat: the ref PATCH fails -> 20 (the commit was made, the ref did
-        # not move; the old anchor stands, which is the safe direction).
-        r = self.kraken("heartbeat", "OWNER/tasks", 8, "w1", "still here", fail=r"PATCH \S*/git/refs")
+        # heartbeat: the ref CREATE fails -> 20. A renewal climbs a generation
+        # (PROTOCOL.md §6), so a failed create leaves the lease exactly where it
+        # was — the old generation, the old anchor — which is the safe
+        # direction: the worker still holds the task, just closer to its TTL.
+        held = self.claim_ref(8)
+        r = self.kraken("heartbeat", "OWNER/tasks", 8, "w1", "still here",
+                        fail=r"POST \S*/git/refs")
         self.assertEqual(r.rc, 20, "heartbeat exit on ref failure")
         self.assertEqual(r.out, "heartbeat: gh-failure issue=8 stage=ref", "heartbeat ref-failure line")
+        self.assertEqual(self.claim_ref(8), held,
+                         "a failed renewal moved the lease anyway")
 
 
 if __name__ == "__main__":

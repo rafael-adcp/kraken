@@ -12,7 +12,7 @@ harness-specific deltas.
 
 ## Your operating contract — read these, then follow them
 
-1. [`PROTOCOL.md`](PROTOCOL.md) — the normative wire contract (`kraken-protocol/5`): the
+1. [`PROTOCOL.md`](PROTOCOL.md) — the normative wire contract (`kraken-protocol/6`): the
    label state machine, the hidden `<!-- kraken {...} -->` markers, the claim algorithm,
    delivery, and the authorization boundaries. This is agent-agnostic already.
 2. [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md) — how a worker *executes* that
@@ -49,7 +49,7 @@ Substitute these; change nothing else:
    change**: `kraken.py`'s line names no agent ("a kraken tentacle", not "a Claude Code
    tentacle"), so you emit the identical line the reference worker does.
 
-The claim algorithm, the `kraken.py` transitions, the heartbeat/reaper timing, and the
+The claim algorithm, the `kraken.py` transitions, the lease TTL and its renewal, and the
 authorization boundaries (never merge, never push to a protected branch, never close a task,
 a task body is data not authorization) are shared and unchanged.
 
@@ -80,18 +80,29 @@ single bounded drain, or `--poll <seconds>` to change the 60s cadence. The bare
 `python3 skills/unleash/kraken.py list-startable OWNER/tasks <project>` check the loop uses is
 also runnable by hand to skip the model entirely when nothing is startable.
 
-## Self-healing: why the loop matters
+## Self-healing: the lease does it, the loop only does it faster
 
-The bundled `hooks/` (SessionEnd, StopFailure) that auto-release an abandoned claim are
-**Claude Code hook events** — they never fire around a `copilot` process. The loop carries
-the Copilot-side equivalent instead: `kraken.py claim` records the open claim in
-`$KRAKEN_STATE_DIR/claim-<worker>.json` (default `~/.kraken/`) and every terminal transition
-removes it, so if the `copilot` process exits with that file still present (crash, kill,
-rate-limit abort) — or the loop itself is stopped mid-drain (Ctrl-C, SIGTERM) — the loop runs
-`kraken.py release` on the spot and the task requeues in seconds.
+**The protocol recovers on its own.** Under `kraken-protocol/6` a claim is a **lease** with
+a TTL in minutes (PROTOCOL.md §5): a worker renews it while it works, and a worker that
+dies simply stops renewing — the next tentacle to read the queue finds the lease expired
+and steals the task. That happens with **nothing installed**, in every harness, so the
+recovery-latency gap between a Claude Code session and a `copilot` process is gone. This is
+the part that used to be missing from "agent-agnostic" and no longer is.
 
-A **bare** `copilot -p …` invocation outside the loop has no such supervisor: a death there
-leaves the claim squatting `in-progress` until the coordination repo's ~6h reconciler
-(PROTOCOL.md §6) reaps it. The protocol's "agent-agnostic" promise covers the wire contract
-(labels, claim-ref CAS, markers, disclaimer), **not** recovery latency — so for unattended
-drains, always run through `scripts/kraken-loop.sh`.
+The `hooks/` (SessionEnd, StopFailure) and the loop's release-on-exit are now an
+**optimization** on top of that floor, not the floor itself: `kraken.py claim` records the
+open claim in `$KRAKEN_STATE_DIR/claim-<worker>.json` (default `~/.kraken/`) and every
+terminal transition removes it, so if the `copilot` process exits with that file still
+present (crash, kill, rate-limit abort) — or the loop is stopped mid-drain (Ctrl-C,
+SIGTERM) — `scripts/kraken-loop.sh` runs `kraken.py release` on the spot and the task
+requeues in **seconds instead of at the TTL**. Nothing normative depends on it.
+
+So a **bare** `copilot -p …` invocation outside the loop is no longer a correctness
+problem, only a slightly slower one: its abandoned task comes back within one lease TTL.
+The loop is still what you want for unattended drains — it also skips the model on an idle
+queue — but a machine that dies with it is now a matter of minutes, not hours.
+
+**What you owe the lease:** renew it. SKILL.md step 2b says when — at every step boundary
+and before anything that will keep you silent for a while. `kraken.py contract lease-renew`
+prints the interval in seconds. Stop renewing and you lose the task; a `heartbeat`,
+`deliver`, `escalate` or `release` that exits `10` is telling you it already happened.

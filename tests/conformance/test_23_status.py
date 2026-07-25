@@ -58,11 +58,11 @@ class StatusTests(KrakenConformanceTest):
         self.assertIn("#97  needs a human call", out, "decision item #97 missing")
 
         # Heartbeat age anchors to the machine line.
-        self.assertRegex(out, r"#99 .*worker dead-worker .*last heartbeat 8h ago",
-                         "in-flight #99 heartbeat age not anchored (expected 8h)")
+        self.assertRegex(out, r"#99 .*worker dead-worker .*lease renewed 8h ago",
+                         "in-flight #99 lease age not anchored (expected 8h)")
         self.assertRegex(out, r"#100 .*worker live-worker", "in-flight #100 missing worker")
-        self.assertFalse(re.search(r"#100 .*last heartbeat 8h ago", out),
-                         "in-flight #100 read the stale claim, not the fresh heartbeat")
+        self.assertFalse(re.search(r"#100 .*lease renewed 8h ago", out),
+                         "in-flight #100 read the stale lease, not the fresh renewal")
 
         # Orphan heuristic: #88 (merged PR) flagged; #91 (open PR) not.
         self.assertIn("possible orphan(s): #88", out, "#88 not flagged as an orphan")
@@ -99,8 +99,9 @@ class StatusTests(KrakenConformanceTest):
         self.assertEqual(scoped["project"], "web", "--project not reflected in json")
 
     def test_silent_claim_is_flagged(self):
-        """With no scheduled reconciler, a dead worker looks exactly like a slow
-        one until someone claims. The console has to say which it is."""
+        """A lease about to expire reads exactly like one being renewed, and
+        only the operator knows which of their workers is alive. The console has
+        to say which leases no longer hold."""
         self.mk_issue(1, "silent", "kraken-task", "project:app", "in-progress")
         self.mk_claim_ref(1, "dead-worker", age_hours=8)
         self.mk_issue(2, "alive", "kraken-task", "project:app", "in-progress")
@@ -108,9 +109,9 @@ class StatusTests(KrakenConformanceTest):
 
         r = self.kraken("status", "OWNER/tasks", "--project", "app")
         self.assertEqual(r.rc, 0, "status exit: %s" % r.err)
-        self.assertRegex(r.out, r"#1 .*silent — the next drain reclaims it")
-        self.assertNotRegex(r.out, r"#2 .*silent —",
-                            "a live worker was flagged silent")
+        self.assertRegex(r.out, r"#1 .*lease expired — the next drain steals it")
+        self.assertNotRegex(r.out, r"#2 .*lease expired",
+                            "a live worker's lease was flagged expired")
 
         js = json.loads(self.kraken("status", "OWNER/tasks", "--project", "app",
                                     "--json").out)

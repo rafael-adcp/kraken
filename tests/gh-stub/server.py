@@ -20,7 +20,13 @@ State layout (under the server's state dir):
   issues/<n>/blocked_by  one blocker issue number per line (optional)
   issues/<n>/comments/NNNN.md   bodies, NNNN = server order
   issues/<n>/comments/NNNN.at   optional ISO timestamp for that comment
-  refs/<n>               claim ref refs/kraken/claims/<n>; content = target sha
+  refs/<n>               protocol/5 claim ref refs/kraken/claims/<n> (generation
+                         0); content = target sha
+  refs/<n>-<gen>         claim ref refs/kraken/claims/<n>/<gen>; content = sha.
+                         The holder of a task is its HIGHEST generation, and the
+                         only way to take a lease is to CREATE the next one, so
+                         the create below is the CAS for claims, steals and
+                         renewals alike.
   objects/<sha>.json     git commit object: {"message", "committedDate"}
   pr/NNNN.json           a pull request: {"state", "mergedAt"}
   labels                 repo label registry, one per line
@@ -80,6 +86,22 @@ class Knobs:
         self._barrier_n = n
         self._barrier = threading.Barrier(n) if n > 1 else None
         self._snapshot = None
+
+    def set_cas_barrier(self, n):
+        """Hold every ref CREATE until `n` of them have arrived. The guard
+        barrier above synchronizes claimers at the label read, which only the
+        claim path performs — this one synchronizes at the CAS itself, so a
+        RENEWAL (which reads no labels) can be raced against a steal."""
+        n = int(n or 0)
+        self._cas_barrier = threading.Barrier(n) if n > 1 else None
+
+    def cas_wait(self):
+        if getattr(self, "_cas_barrier", None) is None:
+            return
+        try:
+            self._cas_barrier.wait(timeout=30)
+        except threading.BrokenBarrierError:
+            pass
 
     def guard_wait(self, read_labels):
         """Hold every claim-guard caller until `barrier` of them arrive, then
@@ -257,8 +279,26 @@ class StubState:
                         "color=%s\ndescription=%s\n" % (color, desc))
 
     # --- claim refs / git data ---
-    def ref_path(self, n):
-        return self.path("refs", str(n))
+    def ref_path(self, n, gen=0):
+        # Flat filenames keep the state dir simple: generation 0 is the bare
+        # protocol/5 name, anything else is "<issue>-<gen>".
+        name = str(n) if int(gen) == 0 else "%d-%d" % (int(n), int(gen))
+        return self.path("refs", name)
+
+    @staticmethod
+    def parse_ref_file(name):
+        """(issue, generation) for a refs/ filename, or None."""
+        if name.isdigit():
+            return (int(name), 0)
+        issue, _, gen = name.partition("-")
+        if issue.isdigit() and gen.isdigit():
+            return (int(issue), int(gen))
+        return None
+
+    @staticmethod
+    def ref_name(n, gen):
+        return ("refs/kraken/claims/%d" % n if gen == 0
+                else "refs/kraken/claims/%d/%d" % (n, gen))
 
     def create_commit(self, message):
         sha = hashlib.sha1(
@@ -274,17 +314,27 @@ class StubState:
         if not os.path.isfile(f):
             return None
         sha = self._read(f).rstrip("\n")
-        return {"ref": "refs/kraken/claims/%s" % n, "object": {"sha": sha}}
+        return {"ref": self.ref_name(int(n), 0), "object": {"sha": sha}}
 
-    def matching_refs(self):
+    def matching_refs(self, prefix=""):
+        """GitHub's matching-refs semantics: every ref whose NAME starts with
+        "refs/<prefix>" — a plain string prefix, so asking for
+        kraken/claims/12 also returns kraken/claims/120/1. The client is
+        expected to filter; the stub must not do it for them."""
         rdir = self.path("refs")
         out = []
         if os.path.isdir(rdir):
-            for e in sorted(os.listdir(rdir),
-                            key=lambda x: int(x) if x.isdigit() else 0):
+            entries = []
+            for e in os.listdir(rdir):
+                parsed = self.parse_ref_file(e)
+                if parsed is not None:
+                    entries.append((parsed[0], parsed[1], e))
+            for n, gen, e in sorted(entries):
+                name = self.ref_name(n, gen)
+                if not name.startswith("refs/" + prefix):
+                    continue
                 sha = self._read(os.path.join(rdir, e)).rstrip("\n")
-                out.append({"ref": "refs/kraken/claims/%s" % e,
-                            "object": {"sha": sha}})
+                out.append({"ref": name, "object": {"sha": sha}})
         return out
 
     # --- pull requests ---
@@ -502,13 +552,17 @@ class Handler(BaseHTTPRequestHandler):
             self._create_ref(body)
             return
 
-        m = re.match(r"^/repos/[^/]+/[^/]+/git/refs/kraken/claims/([0-9]+)$", path)
-        if m and method == "PATCH":
-            self._update_ref(int(m.group(1)), body)
-            return
-        if m and method == "DELETE":
-            self._delete_ref(int(m.group(1)))
-            return
+        m = re.match(
+            r"^/repos/[^/]+/[^/]+/git/refs/kraken/claims/([0-9]+)(?:/([0-9]+))?$",
+            path)
+        if m:
+            n, gen = int(m.group(1)), int(m.group(2) or 0)
+            if method == "PATCH":
+                self._update_ref(n, gen, body)
+                return
+            if method == "DELETE":
+                self._delete_ref(n, gen)
+                return
 
         m = re.match(r"^/repos/[^/]+/[^/]+/git/ref/kraken/claims/([0-9]+)$", path)
         if m and method == "GET":
@@ -519,8 +573,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, ref)
             return
 
-        if re.search(r"/git/matching-refs/kraken/claims/", path) and method == "GET":
-            self._send(200, paginate(s.matching_refs(), qs))
+        m = re.match(r"^/repos/[^/]+/[^/]+/git/matching-refs/(.*)$", path)
+        if m and method == "GET" and m.group(1).startswith("kraken/claims"):
+            self._send(200, paginate(s.matching_refs(m.group(1)), qs))
             return
 
         # --- issue comments ---
@@ -635,11 +690,13 @@ class Handler(BaseHTTPRequestHandler):
     def _create_ref(self, body):
         s = self.state
         ref = body.get("ref", "")
-        m = re.match(r"^refs/kraken/claims/([0-9]+)$", ref)
+        # Race tests line every creator up here, right before the CAS.
+        self.knobs.cas_wait()
+        m = re.match(r"^refs/kraken/claims/([0-9]+)(?:/([0-9]+))?$", ref)
         if not m:
             self._send(422, {"message": "unsupported ref name"})
             return
-        path = s.ref_path(m.group(1))
+        path = s.ref_path(m.group(1), m.group(2) or 0)
         # The CAS: creation is atomic under the lock — the lock IS GitHub's
         # server-side serialization, so exactly one racer sees "absent".
         with self.knobs.lock:
@@ -649,19 +706,19 @@ class Handler(BaseHTTPRequestHandler):
             s._write(path, body.get("sha", "") + "\n")
         self._send(201, {"ref": ref})
 
-    def _update_ref(self, n, body):
+    def _update_ref(self, n, gen, body):
         s = self.state
-        path = s.ref_path(n)
+        path = s.ref_path(n, gen)
         with self.knobs.lock:
             if not os.path.isfile(path):
                 self._send(422, {"message": "Reference does not exist"})
                 return
             s._write(path, body.get("sha", "") + "\n")
-        self._send(200, {"ref": "refs/kraken/claims/%d" % n})
+        self._send(200, {"ref": s.ref_name(n, gen)})
 
-    def _delete_ref(self, n):
+    def _delete_ref(self, n, gen):
         s = self.state
-        path = s.ref_path(n)
+        path = s.ref_path(n, gen)
         with self.knobs.lock:
             if not os.path.isfile(path):
                 self._send(422, {"message": "Reference does not exist"})

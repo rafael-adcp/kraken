@@ -13,7 +13,7 @@ dependency graph come for free.
 
 The coordination contract itself — task shape, label state machine, the machine marker,
 claim algorithm, authorization boundaries — is normatively specified in
-[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/5`). This file is how a Claude
+[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/6`). This file is how a Claude
 Code worker executes that contract (subagent-per-task, Monitor watcher, the bundled
 scripts); if the two ever disagree, the spec wins.
 
@@ -93,8 +93,8 @@ time:
 | --- | --- |
 | `kraken.py claim-next OWNER/tasks <project> <worker-name>` | list → guard → CAS-claim the first startable candidate in queue order (`priority:high` first, then oldest) in one shot; prints the won task (number, title, body) |
 | `kraken.py list-startable OWNER/tasks <project>` | (read-only) startable candidates in queue order: `priority:high` first, then oldest first |
-| `kraken.py claim OWNER/tasks <issue> <worker-name>` | queued → `in-progress`: guard, then the compare-and-swap on the claim ref; on a win, projects the label + claim comment |
-| `kraken.py heartbeat OWNER/tasks <issue> <worker-name> "<progress>"` | liveness — advances the claim ref to a fresh commit, keeping the reaper away. **Posts no comment** |
+| `kraken.py claim OWNER/tasks <issue> <worker-name>` | queued → `in-progress`: guard, then the compare-and-swap on the claim ref; on a win, projects the label + claim comment. An **expired** lease on the task is stolen (delete + the same CAS), leaving a `lease-expired` note |
+| `kraken.py heartbeat OWNER/tasks <issue> <worker-name> "<progress>"` | **renews your lease** — advances the claim ref to a fresh commit, restarting its TTL. **Posts no comment.** Exit `10` means the lease is no longer yours: stop |
 | `kraken.py note OWNER/tasks <issue> <worker-name> <body-file>` | posts a free-form worker comment (assumptions, a note) with the disclaimer prepended and a non-state-changing `note` marker (the structural worker-comment signal); changes no label and no claim ref |
 | `kraken.py escalate OWNER/tasks <issue> <worker-name> <question-file>` | `in-progress` → `needs-decision`: question posted, labels swapped, claim ref released |
 | `kraken.py deliver OWNER/tasks <issue> <worker-name> <result-file> [pr-url]` | `in-progress` → `awaiting-merge`: result posted, labels swapped, claim ref released |
@@ -107,14 +107,21 @@ time:
 - **Branch on its exit codes** — each subcommand documents its own; `20` always
   means gh/network failure with the write possibly half-landed: re-check the
   issue's real state before retrying, and never move on while a claim is
-  ambiguous.
-- The claim is a **compare-and-swap on the git ref `refs/kraken/claims/<issue>`**:
-  the server admits exactly one creator (HTTP 422 to the rest), so `kraken.py`
-  never reconstructs ownership from the comment thread. It composes the
+  ambiguous. `10` on a *write* (`heartbeat`, `escalate`, `deliver`, `release`)
+  means **you lost the lease** — another worker holds the task now. Nothing was
+  written. Stop working it; say so and move on (the branch and PR you already
+  pushed stay, and whoever holds the task inherits the thread).
+- The claim is a **compare-and-swap on the git ref
+  `refs/kraken/claims/<issue>/<generation>`**: whoever holds the highest
+  generation holds the task, and taking it means creating the next one — the
+  server admits exactly one creator (HTTP 422 to the rest), so `kraken.py` never
+  reconstructs ownership from the comment thread. Claiming, stealing an expired
+  lease and renewing your own are the same write, which is why none of them can
+  ever both succeed. It composes the
   attribution disclaimer and the hidden machine marker
   (`<!-- kraken {"type":...} -->`) itself — the `claim`/`heartbeat` markers ride
-  the claim ref's commit, the `needs-decision`/`delivered`/`released` markers ride
-  their comment — never hand-write those. The escalation question and the result
+  the claim ref's commit, the `needs-decision`/`delivered`/`released`/`lease-expired`
+  markers ride their comment — never hand-write those. The escalation question and the result
   comment stay yours to write: put the body in a file and hand it to the subcommand.
 
 ## Protocol
@@ -211,17 +218,24 @@ time:
       remove the `needs-decision` label, the task becomes claimable again — whoever
       picks it up inherits the full thread as context.)
    b. **Execute** in your environment, following all my rules (TDD, conventions,
-      comments policy). Keep changes scoped to the task. On a long task, send a
-      **heartbeat** at least every ~2 hours:
+      comments policy). Keep changes scoped to the task. **Your claim is a lease
+      with a TTL, and you have to renew it** — run this at every step boundary,
+      and always before starting anything that will keep you silent for a while
+      (a long build, a full test suite, a big refactor pass):
 
       ```
       python3 "<this skill's folder>/kraken.py" heartbeat OWNER/tasks <issue> <worker-name> "<one line of progress>"
       ```
 
-      This advances your claim ref to a fresh commit (no timeline comment — the
-      progress line rides the commit, and `status` surfaces it). The coordination
-      repo's reconciler reclaims a claim whose ref has been silent for 6h,
-      assuming the worker died — the heartbeat is what keeps it away.
+      This advances your claim ref to a fresh commit and restarts the TTL (no
+      timeline comment — the progress line rides the commit, and `status`
+      surfaces it). Ask the script for the numbers rather than assuming them —
+      `kraken.py contract lease-ttl` and `kraken.py contract lease-renew`, both
+      in seconds; renew at least that often. **Stop renewing and you lose the
+      task**: once the lease expires, the next worker to read the queue takes it
+      over, which is exactly how a dead worker's task gets recovered in minutes
+      with nothing installed. If a heartbeat exits `10`, that already happened —
+      stop working the task and report it; `deliver` would refuse anyway.
    c. **Validate** against the issue's **acceptance** — run it for real and report the
       real result. A task whose acceptance was not executed does not move forward.
    d. **Record the outcome** on the issue: write the result comment (what was done,
@@ -231,8 +245,11 @@ time:
       python3 "<this skill's folder>/kraken.py" deliver OWNER/tasks <issue> <worker-name> <result-file> <pr-url>
       ```
 
-      It posts the result with the `delivered` marker, **swaps `in-progress` for
-      `awaiting-merge`**, and releases the claim ref — do NOT close. "Done" for a worker means *delivered for
+      It checks your lease is still yours, posts the result with the `delivered`
+      marker, **swaps `in-progress` for `awaiting-merge`**, and releases the claim
+      ref — do NOT close. Exit `10` means the lease was stolen while you were
+      quiet: nothing was written, the task belongs to another worker now, and
+      your branch and PR are still there for whoever holds it. "Done" for a worker means *delivered for
       review*; the task closes when the work actually lands (the PR's `Closes` line
       handles that on merge — see Delivering the work). Failed or stalled: keep it
       open, label it honestly, and say exactly where it stands. (Review bounce: I
@@ -338,7 +355,7 @@ issue's notes say otherwise:
   (a) manage issues **in the coordination repo** (labels and comments — never
   closing or reopening a task: "done" is *delivered for review*, and closing is
   mine or the merge's) and your own claim ref under `refs/kraken/claims/`
-  (create/heartbeat/delete it);
+  (create/renew/delete your lease — and delete an EXPIRED one you are stealing);
   (b) in the task's work repo, **deliver as described above**: create work branches
   (repo's naming convention), commit to them with the attribution trailers, push
   them, and open draft PRs.

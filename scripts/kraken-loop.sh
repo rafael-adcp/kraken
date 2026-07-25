@@ -11,10 +11,11 @@
 # so an idle queue never spends a token. The operator owns cadence + stop
 # (Ctrl-C); it never outlives this terminal. Run it straight from a checkout.
 #
-# Self-heal: the bundled SessionEnd/StopFailure hooks only fire inside a Claude
-# Code session, so the loop carries its own — if a drain dies holding a claim
-# (copilot crash, rate-limit abort, Ctrl-C), it releases the claim on the spot
-# via hooks/lib-release-claims.sh instead of waiting ~6h for the reaper.
+# Self-heal: under protocol/6 a claim is a LEASE that expires on its own, so an
+# abandoned task comes back within one TTL no matter how the drain died. This
+# loop just makes it immediate: if a drain dies holding a lease (copilot crash,
+# rate-limit abort, Ctrl-C), it releases on the spot via
+# hooks/lib-release-claims.sh instead of waiting out the TTL.
 #
 # Usage:
 #   scripts/kraken-loop.sh OWNER/tasks --worker-name <name> --project <name> \
@@ -98,10 +99,13 @@ cd "$REPO_DIR" || { echo "kraken-loop: cannot cd into $REPO_DIR" >&2; exit 1; }
 # this loop is the Copilot harness's equivalent. `kraken.py claim` writes
 # $KRAKEN_STATE_DIR/claim-<worker>.json and every terminal transition
 # (deliver/escalate/release) removes it, so a file that survives the `copilot`
-# process is proof the drain died holding the claim (crash, kill, rate-limit
-# abort). Release it on the spot — scoped to THIS worker's claim only — so the
-# task requeues in seconds instead of waiting ~6h for the reconciler
-# (PROTOCOL.md §6). Best-effort: a failed release falls back to the reaper.
+# process is proof the drain died holding the lease (crash, kill, rate-limit
+# abort). Release it on the spot — scoped to THIS worker's lease only — so the
+# task requeues in seconds instead of at the lease TTL (PROTOCOL.md §5).
+# Best-effort: a failed release falls back to that expiry, which is the actual
+# recovery mechanism; this is only the fast path. `release` itself refuses (exit
+# 10) if the lease has already been stolen, so a late release can never free a
+# task another worker is running.
 . "$REPO_DIR/hooks/lib-release-claims.sh"
 
 release_own_claim() { # $1 = reason
@@ -129,8 +133,8 @@ drain_pass() {
     printf '%s\n' "$startable" | sed 's/^/  /'
     # Add -s/--silent for terser logs.
     copilot -p "$PROMPT" --allow-all-tools --no-ask-user
-    # A claim that survived the copilot process is abandoned — nobody is left
-    # to finish or release it. Free the task now, not in ~6h.
+    # A lease that survived the copilot process is abandoned — nobody is left
+    # to finish or renew it. Free the task now, not at the TTL.
     release_own_claim "copilot exited mid-drain"
     return 0
   fi

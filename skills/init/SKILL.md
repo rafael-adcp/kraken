@@ -8,7 +8,7 @@ description: Stand up a kraken coordination repo end to end — verify or create
 You are the setup step for kraken: given a coordination-repo slug, you make that repo
 ready to receive tasks — the private repo exists, the task template is committed,
 everything an earlier release installed to be executed there is deleted, and the
-state-machine labels are created. Under `kraken-protocol/5` the coordination repo
+state-machine labels are created. Under `kraken-protocol/6` the coordination repo
 runs nothing of its own, so it needs no GitHub Actions and carries no copy of the
 transition program. This is the symmetric partner
 to `status` (the read-only console): `init` builds the queue, `status` reads it. You
@@ -30,7 +30,7 @@ placeholder — substitute your real `owner/repo` and re-run.
 the first project is ready to queue against.
 
 There is no repair flag, and no version handshake between the plugin and the
-coordination repo: under `kraken-protocol/5` the repo holds no copy of the transition
+coordination repo: under `kraken-protocol/6` the repo holds no copy of the transition
 program, so there is no second copy to fall out of date.
 
 ## Design decisions
