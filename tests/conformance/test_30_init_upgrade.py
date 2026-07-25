@@ -20,7 +20,6 @@ ASSETS = [
     ("task-template.yml", ".github/ISSUE_TEMPLATE/task.yml"),
     ("kraken.py", ".github/kraken.py"),
     ("cleanup-closed.yml", ".github/workflows/cleanup-closed.yml"),
-    ("requeue-on-reply.yml", ".github/workflows/requeue-on-reply.yml"),
     ("validate-task.yml", ".github/workflows/validate-task.yml"),
 ]
 DST = dict(ASSETS)
@@ -28,8 +27,7 @@ BUNDLED = {name: os.path.join(SCRIPTS, name) for name, _ in ASSETS}
 
 # Two assets are seeded drifted; the rest are seeded byte-identical to bundled.
 DRIFTED = ("kraken.py", "validate-task.yml")
-IN_SYNC = ("task-template.yml", "cleanup-closed.yml",
-           "requeue-on-reply.yml")
+IN_SYNC = ("task-template.yml", "cleanup-closed.yml")
 
 
 class InitUpgradeTests(KrakenConformanceTest):

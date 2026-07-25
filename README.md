@@ -132,7 +132,7 @@ flowchart LR
     P -->|deliver — draft PR or analysis| M[awaiting-merge]
     P -->|blocking question| D[needs-decision]
     P -->|silent for 6h — the next reader reclaims it| D
-    D -->|you reply — the requeue workflow drops the label| Q
+    D -->|you reply — the next reader requeues it| Q
     M -->|review asks changes + remove the label| Q
     M -->|PR merges — the task closes| E(((closed)))
 ```
@@ -165,12 +165,13 @@ worker reuses that same skill with the harness deltas in [`AGENTS.md`](AGENTS.md
    <details>
    <summary>Not running the plugin? The same setup by hand</summary>
 
-   The five assets land at `.github/ISSUE_TEMPLATE/task.yml`, the vendored
+   The four assets land at `.github/ISSUE_TEMPLATE/task.yml`, the vendored
    transition program `.github/kraken.py` (which the coordination workflows
-   exec), and the three `.github/workflows/` files (`cleanup-closed.yml`,
-   `requeue-on-reply.yml`, `validate-task.yml`). There is **no** reconciler
-   workflow: under `kraken-protocol/5` the worker reconciles stale claims on the
-   queue read it performs before every claim (PROTOCOL.md §6).
+   exec), and the two `.github/workflows/` files (`cleanup-closed.yml`,
+   `validate-task.yml`). There are **no** reconciler and requeue workflows:
+   under `kraken-protocol/5` the worker reconciles stale claims — and derives an
+   answered task's requeue — on the queue read it performs before every claim
+   (PROTOCOL.md §6).
 
    ```bash
    gh repo create OWNER/tasks --private --clone && cd tasks
@@ -178,9 +179,8 @@ worker reuses that same skill with the harness deltas in [`AGENTS.md`](AGENTS.md
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/task-template.yml -o .github/ISSUE_TEMPLATE/task.yml
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/kraken.py -o .github/kraken.py
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/cleanup-closed.yml -o .github/workflows/cleanup-closed.yml
-   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/requeue-on-reply.yml -o .github/workflows/requeue-on-reply.yml
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/validate-task.yml -o .github/workflows/validate-task.yml
-   git add -A && git commit -m "chore: kraken task template, transition program, cleanup, requeue, and validator" && git push
+   git add -A && git commit -m "chore: kraken task template, transition program, cleanup, and validator" && git push
 
    gh -R OWNER/tasks label create kraken-task
    gh -R OWNER/tasks label create in-progress
@@ -307,7 +307,7 @@ everything else:
 | Queue a task                 | Open an issue from the task template + `project:<name>` label                  | ✅ web + mobile                   |
 | Chain tasks                  | `gh -R OWNER/tasks issue edit <n> --add-blocked-by <m>`                         | ✅ web — Relationships sidebar    |
 | See the queues               | `/kraken:status OWNER/tasks`                                                    | ✅ filter issues by label         |
-| Answer a decision            | **Reply on the issue** — the requeue workflow drops `needs-decision` for you   | ✅ web + mobile                   |
+| Answer a decision            | **Reply on the issue** — the next worker to read the queue picks it up again   | ✅ web + mobile                   |
 | Send work back after review  | Comment the feedback, then **remove `awaiting-merge`** (or start a line `requeue:`) | ✅ web + mobile                   |
 | Land the work                | Merge the draft PR — its `Closes` line closes the task and unblocks dependents  | ✅ web + mobile                   |
 | Cancel a task                | Close the issue                                                                 | ✅ web + mobile                   |
@@ -394,12 +394,12 @@ work repos, and a fan-out of named, audited workers. The honest side-by-side is
 <details>
 <summary><b>A task landed in <code>needs-decision</code> — what do I do?</b></summary>
 
-Just **reply on the issue** ("option B, go"). The coordination repo's
-requeue-on-reply workflow sees a human comment (no 🐙 attribution disclaimer)
-and removes `needs-decision` for you, so the task rejoins the queue and whoever
-claims it inherits the full thread as context. Forgot nothing to remove — the
-old "reply *and* remove the label" gesture still works if you prefer, and
-removing the label by hand is always fine.
+Just **reply on the issue** ("option B, go"). Nothing else: a reply newer than
+the task's last 🐙 comment *is* the requeue — every worker derives it on the read
+(PROTOCOL.md §6), so the task rejoins the queue immediately and whoever claims it
+inherits the full thread as context. The `needs-decision` label stays until that
+worker claims it and swaps it off; nothing reads it in the meantime. The old
+"reply *and* remove the label" gesture still works if you prefer.
 
 </details>
 

@@ -198,10 +198,11 @@ def compose_note(worker, prose):
     """A free-form worker comment (assumptions, progress prose): the attribution
     disclaimer, the prose, then a single non-state-changing `note` marker
     (PROTOCOL.md §4), blank-line separated so GitHub keeps them distinct. The
-    marker is what makes requeue-check read this as a worker comment
+    marker is what makes the §6 requeue derivation read this as a worker comment
     *structurally* — the disclaimer stays as human-facing attribution but is no
-    longer the arbiter. A `note` marker carries no machine state: reap, requeue,
-    and validate all treat it as inert (they key on their own marker types)."""
+    longer the arbiter. A `note` marker carries no machine state: the reconcile,
+    the requeue derivation, and validate all treat it as inert (they key on their
+    own marker types)."""
     return compose_comment(worker, prose, {"type": "note", "worker": worker})
 
 
@@ -672,10 +673,20 @@ def issue_body(repo, issue):
 # `issues(labels: [...])` is a UNION (unlike REST's AND), so we filter server-side
 # on the single "kraken-task" label and match the project label client-side.
 
+# How many trailing comments the queue walk carries per task. The requeue
+# derivation (§6) only ever needs the NEWEST comment of two classes — the last
+# worker comment and any operator reply after it — so a window cannot mislead it:
+# a window holding no worker comment means the last one is older than the window,
+# which makes every operator comment inside it newer, the correct verdict. 25 is
+# therefore about payload, not correctness.
+QUEUE_COMMENT_WINDOW = 25
+
+
 def fetch_open_tasks(repo):
     """Every OPEN kraken-task issue in the repo, across all projects — number,
-    title, createdAt, body, labels, and native blocked-by, all in one paginated
-    GraphQL walk. Returns the node list, or None on transport failure."""
+    title, createdAt, body, labels, native blocked-by, and the trailing comment
+    window the requeue derivation reads, all in one paginated GraphQL walk.
+    Returns the node list, or None on transport failure."""
     owner, name = repo.split("/", 1)
     nodes = []
     cursor = None
@@ -687,6 +698,7 @@ def fetch_open_tasks(repo):
             f'pageInfo {{ hasNextPage endCursor }} '
             f'nodes {{ number title createdAt body '
             f'labels(first: 20) {{ nodes {{ name }} }} '
+            f'comments(last: {QUEUE_COMMENT_WINDOW}) {{ nodes {{ body createdAt }} }} '
             f'blockedBy(first: 50) {{ nodes {{ number state }} }} }} }} }} }}'
         )
         resp = graphql(query)
@@ -716,6 +728,122 @@ def resolve_depends_on(repo, targets):
         n: str((repo_obj.get(f"i{n}") or {}).get("state", "")).upper() == "OPEN"
         for n in targets
     }
+
+
+# --- the requeue derivation (PROTOCOL.md §6) ---------------------------------
+# When the operator answers a held task, the task rejoins the queue. Through
+# protocol/4 that was a MUTATION: a workflow watched the comment stream and
+# removed the holding label. But "an operator replied after the last worker
+# comment" is a property of the thread, readable at any time — so protocol/5
+# DERIVES it on the read instead. No workflow, no label write, and no window
+# where the queue disagrees with the thread.
+#
+# The comment window rides the queue walk (QUEUE_COMMENT_WINDOW), so the
+# derivation costs no request of its own.
+
+# The held labels an operator reply can lift. `in-progress` is deliberately NOT
+# one: an in-progress label with no ref behind it is the reconciler's rule 4
+# (§6), a repair, not a requeue — two mechanisms for one label would race.
+REQUEUEABLE_LABELS = ("needs-decision", "awaiting-merge")
+
+
+def is_worker_comment(body):
+    """Whether a comment was posted by a worker — the requeue derivation's
+    discriminator (PROTOCOL.md §4). **Structural**: a worker comment is one that
+    carries a hidden kraken marker on ANY line. Every worker-posted comment wears
+    one (the transition markers for state changes, the `note` marker for a
+    free-form note), so marker presence — not the presentation text — is the
+    arbiter, closing the fragility class kraken-protocol removed everywhere else.
+    It also subsumes the coordination repo's own bot comments (the validator's
+    carry a `validation` marker), which is why the derivation needs no author
+    metadata in the query at all.
+
+    A comment whose FIRST line opens with the attribution disclaimer also counts,
+    as a back-compat fallback for legacy threads and any comment written before
+    `note` gained its marker (the prefix is derived from the DISCLAIMER constant,
+    never a second copy). The disclaimer stays the human-facing attribution but is
+    no longer load-bearing for requeue.
+
+    Accepted edge (§4): an operator who pastes a raw kraken marker into a reply is
+    read as a worker and will not requeue — the same class of edge as an operator
+    quoting the disclaimer on the first line; removing the held label by hand is
+    the escape hatch."""
+    if any(parse_marker(line) is not None for line in body.split("\n")):
+        return True
+    prefix = DISCLAIMER.split("{worker}")[0]  # "> 🐙 **Kraken worker `"
+    first_line = body.split("\n", 1)[0].rstrip("\r")
+    return first_line.startswith(prefix)
+
+
+def has_requeue_directive(body):
+    """Whether a comment carries an EXPLICIT, STRUCTURED requeue directive — the
+    only thing that bounces a DELIVERED (awaiting-merge) task back for rework, so
+    a prose sentence merely starting a line with "requeue:" no longer bounces a
+    ready branch by accident. Two accepted forms: a protocol/3
+    `<!-- kraken {"type":"requeue"} -->` marker, or a standalone directive line
+    whose only content is `requeue`/`requeue:` (case-insensitive)."""
+    lines = body.split("\n")
+    for raw in lines:
+        marker = parse_marker(raw)
+        if marker and marker.get("type") == "requeue":
+            return True
+    for raw in lines:
+        if re.match(r"^\s*requeue:?\s*$", raw, re.IGNORECASE):
+            return True
+    return False
+
+
+def comment_nodes_of(node):
+    """The queue walk's trailing comment window for a task node, oldest-first."""
+    return (node.get("comments") or {}).get("nodes") or []
+
+
+def requeue_verdict(held, comments):
+    """Whether an operator reply has requeued a task held by `held` labels — a
+    PURE read of the thread (PROTOCOL.md §6), so it is decided identically by
+    every reader and needs no write to become true.
+
+    The rule: an operator comment (one carrying no kraken marker) newer than the
+    newest worker comment. The two held states stay asymmetric — a bare reply
+    requeues `needs-decision` (a human comment is almost always the answer), but
+    `awaiting-merge` is already *delivered* and stays held unless a reply carries
+    an explicit requeue directive, so a `requeue:` buried in prose cannot bounce a
+    ready branch.
+
+    Ordering is the comment list's own (GitHub returns a thread oldest-first);
+    nothing here reads a timestamp, so a re-posted comment cannot reorder the
+    verdict."""
+    worker_at = -1
+    for i, rec in enumerate(comments):
+        if is_worker_comment(rec.get("body") or ""):
+            worker_at = i
+    replies = [rec for i, rec in enumerate(comments)
+               if i > worker_at and not is_worker_comment(rec.get("body") or "")]
+    if not replies:
+        return False
+    if "awaiting-merge" in held:
+        return any(has_requeue_directive(rec.get("body") or "") for rec in replies)
+    return True
+
+
+def requeued_labels(node, claim_refs):
+    """The held labels this task carries that an operator reply has already
+    lifted — a tuple, empty when the task is genuinely held. Pure, so the
+    classification and the claim that follows it reach the same verdict from the
+    same node without a second read.
+
+    A live claim ref outranks any reading of the timeline: the lock is the truth
+    (§5), and a comment on a claimed task is context for its worker, not a
+    requeue."""
+    if node["number"] in claim_refs:
+        return ()
+    labels = set(label_names_of(node))
+    if "in-progress" in labels:
+        return ()
+    held = tuple(h for h in REQUEUEABLE_LABELS if h in labels)
+    if not held:
+        return ()
+    return held if requeue_verdict(held, comment_nodes_of(node)) else ()
 
 
 def read_queue(repo):
@@ -749,7 +877,11 @@ def classify_queue(repo, project, include_body=False, read=None):
     Held means: a held label (the projection) OR a live claim ref (the lock).
     Reading both keeps the filter honest across the crash window between a won
     CAS and its label projection — a ref-held task is never offered as
-    startable just because the label has not landed yet."""
+    startable just because the label has not landed yet.
+
+    A held LABEL is not the last word, though: a task whose operator has already
+    replied is requeued by derivation (§6, requeued_labels) and rejoins the
+    candidates — it still has to clear its dependencies like any other."""
     if read is None:
         read = read_queue(repo)
         if read is None:
@@ -779,7 +911,10 @@ def classify_queue(repo, project, include_body=False, read=None):
         created = node.get("createdAt", "")
         body = node.get("body") or ""
         label_names = [l.get("name", "") for l in node.get("labels", {}).get("nodes", [])]
-        if any(h in label_names for h in HELD_LABELS) or number in claim_refs:
+        # A held label only holds while the operator has not answered: the
+        # requeue derivation lifts the ones an operator reply already cleared.
+        still_held = set(HELD_LABELS) - set(requeued_labels(node, claim_refs))
+        if any(h in label_names for h in still_held) or number in claim_refs:
             rows.append([number, title, created, "held", body])
             continue
 
@@ -830,11 +965,17 @@ def cmd_list_startable(args):
 
 # --- subcommand: claim -------------------------------------------------------
 
-def _claim_once(repo, issue, worker):
+def _claim_once(repo, issue, worker, allow_held=()):
     """The one contended claim sequence — guard, CAS, projection — executed
     identically every time (PROTOCOL.md §5). Returns an exit code and prints a
     `claim:` diagnostic line. Shared by `claim` and `claim-next` so they can never
-    drift."""
+    drift.
+
+    `allow_held` names the held labels the caller's §6 requeue derivation has
+    already lifted, so the guard does not refuse the very task the queue filter
+    just offered. They are stale projection, and the projection step below swaps
+    them off. The guard is an optimisation either way — the claim-ref CAS is the
+    only thing that decides ownership."""
 
     # 1. Guard — re-fetch labels; a held task is skipped with zero writes.
     label_names = issue_label_names(repo, issue)
@@ -842,9 +983,11 @@ def _claim_once(repo, issue, worker):
         print(f"claim: gh-failure issue={issue} stage=guard")
         return EXIT_TRANSPORT
     for held in HELD_LABELS:
-        if held in label_names:
+        if held in label_names and held not in allow_held:
             print(f"claim: held issue={issue} label={held}")
             return EXIT_NOT_CLEAR
+    # The requeued labels still on the issue: dropped as part of the projection.
+    stale_held = [h for h in HELD_LABELS if h in label_names and h in allow_held]
 
     # 2. CAS — orphan claim commit, then create the claim ref (only one creator wins).
     sha = create_claim_commit(repo, {"type": "claim", "worker": worker})
@@ -867,6 +1010,10 @@ def _claim_once(repo, issue, worker):
     #    if the writes below fail; then the in-progress label and claim comment. A
     #    failure here leaves the claim HELD — exit 20 says re-check, reaper heals.
     write_claim_state(repo, issue, worker)
+    for stale in stale_held:
+        if not swap_labels(repo, issue, remove=stale):
+            print(f"claim: gh-failure issue={issue} stage=label (claim held)")
+            return EXIT_TRANSPORT
     if not swap_labels(repo, issue, add="in-progress"):
         print(f"claim: gh-failure issue={issue} stage=label (claim held)")
         return EXIT_TRANSPORT
@@ -981,10 +1128,15 @@ def cmd_claim_next(args):
         print("claim-next: gh-failure stage=list")
         return EXIT_TRANSPORT
 
+    by_number = {n["number"]: n for n in nodes}
     for number, title, _created, state, body in rows:  # priority-first, then FIFO
         if state != "startable":
             continue
-        rc = _claim_once(repo, number, worker)
+        # Re-derive the requeue verdict from the same node the filter used — a
+        # pure call, no request — so the guard accepts a task an operator reply
+        # has already requeued instead of refusing what was just offered.
+        allow_held = requeued_labels(by_number[number], claim_refs)
+        rc = _claim_once(repo, number, worker, allow_held=allow_held)
         if rc == EXIT_OK:
             if args.json:
                 print(json.dumps({"issue": number, "title": title, "body": body}))
@@ -1126,8 +1278,8 @@ def cmd_release(args):
 def cmd_note(args):
     """Post a free-form worker comment (assumptions, a progress note) with the
     attribution disclaimer prepended and a single non-state-changing `note`
-    marker (PROTOCOL.md §4) — the structural signal that makes requeue-check read
-    it as worker-authored. It carries no machine state: it changes no label and
+    marker (PROTOCOL.md §4) — the structural signal that makes the §6 requeue
+    derivation read it as worker-authored. It carries no machine state: it changes no label and
     touches no claim ref, so the task stays exactly where it was — the missing
     worker-authored write the skill otherwise had you hand-assemble (SKILL.md
     step 2a / Conventions), disclaimer and all."""
@@ -1432,7 +1584,11 @@ def compute_status(repo, project, nodes, now, *, claim_refs, commit_meta,
         seen_projects |= project_names_of(node)
         number = node["number"]
         title = node.get("title", "")
-        labels = label_names_of(node)
+        # The console reads the queue the way a worker does (§6): a task whose
+        # operator has already replied is back in the queue, so it must not keep
+        # sitting in the review or decision list waiting for a call already made.
+        labels = [l for l in label_names_of(node)
+                  if l not in requeued_labels(node, claim_refs)]
 
         if "awaiting-merge" in labels:
             records = comment_reader(repo, number)
@@ -1675,8 +1831,6 @@ INIT_ASSETS = (
      "chore: add kraken task template"),
     ("cleanup-closed.yml", ".github/workflows/cleanup-closed.yml",
      "chore: add kraken cleanup-closed workflow"),
-    ("requeue-on-reply.yml", ".github/workflows/requeue-on-reply.yml",
-     "chore: add kraken requeue-on-reply workflow"),
     ("validate-task.yml", ".github/workflows/validate-task.yml",
      "chore: add kraken validate-task workflow"),
     ("kraken.py", ".github/kraken.py",
@@ -1692,6 +1846,7 @@ INIT_ASSETS = (
 # never destroyed by a bootstrap command.
 OBSOLETE_ASSETS = (
     (".github/workflows/reclaim-stale.yml", b"for kraken. Installed by"),
+    (".github/workflows/requeue-on-reply.yml", b"for kraken. Installed by"),
 )
 
 # The canonical state-machine labels — (name, color, description). The labels UI
@@ -1904,10 +2059,10 @@ def render_init(report):
 
 
 # --- coordination-repo subcommands -------------------------------------------
-# The logic-bearing coordination passes (reconcile, requeue-on-reply,
-# validate-task) live here rather than re-implementing the protocol parse in
-# jq/grep/awk — ONE parser, sharing the marker decoder, disclaimer, and label
-# vocabulary (and unit tests) with the worker side.
+# The logic-bearing coordination passes (reconcile, validate-task) live here
+# rather than re-implementing the protocol parse in jq/grep/awk — ONE parser,
+# sharing the marker decoder, disclaimer, and label vocabulary (and unit tests)
+# with the worker side.
 
 # --- the reconciler (PROTOCOL.md §6) -----------------------------------------
 # The claim ref is the lock and its commit date the liveness clock, so the refs
@@ -2136,112 +2291,6 @@ def cmd_reap(args):
         f"orphan_locks={counts['orphan-lock']} healed={counts['heal']} "
         f"requeued={counts['requeue']}"
     )
-    return EXIT_OK
-
-
-def is_worker_comment(body):
-    """Whether a comment was posted by a worker — requeue-on-reply's discriminator
-    (PROTOCOL.md §4). **Structural**: a worker comment is one that carries a hidden
-    kraken marker on ANY line. Every worker-posted comment now wears one (the
-    transition markers for state changes, the `note` marker for a free-form note),
-    so marker presence — not the presentation text — is the arbiter, closing the
-    fragility class kraken-protocol removed everywhere else.
-
-    A comment whose FIRST line opens with the attribution disclaimer also counts,
-    as a back-compat fallback for legacy threads and any comment written before
-    `note` gained its marker (the prefix is derived from the DISCLAIMER constant,
-    never a second copy). The disclaimer stays the human-facing attribution but is
-    no longer load-bearing for requeue.
-
-    Accepted edge (§4): an operator who pastes a raw kraken marker into a reply is
-    read as a worker and will not requeue — the same class of edge as an operator
-    quoting the disclaimer on the first line; removing the held label by hand is
-    the escape hatch."""
-    if any(parse_marker(line) is not None for line in body.split("\n")):
-        return True
-    prefix = DISCLAIMER.split("{worker}")[0]  # "> 🐙 **Kraken worker `"
-    first_line = body.split("\n", 1)[0].rstrip("\r")
-    return first_line.startswith(prefix)
-
-
-def has_requeue_directive(body):
-    """Whether a comment carries an EXPLICIT, STRUCTURED requeue directive — the
-    only thing that bounces a DELIVERED (awaiting-merge) task back for rework, so
-    a prose sentence merely starting a line with "requeue:" no longer bounces a
-    ready branch by accident. Two accepted forms: a protocol/3
-    `<!-- kraken {"type":"requeue"} -->` marker, or a standalone directive line
-    whose only content is `requeue`/`requeue:` (case-insensitive)."""
-    lines = body.split("\n")
-    for raw in lines:
-        marker = parse_marker(raw)
-        if marker and marker.get("type") == "requeue":
-            return True
-    for raw in lines:
-        if re.match(r"^\s*requeue:?\s*$", raw, re.IGNORECASE):
-            return True
-    return False
-
-
-def cmd_requeue_check(args):
-    """Requeue a held task when a genuine OPERATOR comment arrives
-    (requeue-on-reply.yml). The triggering comment's body and author type come
-    through the environment (COMMENT_BODY / COMMENT_AUTHOR_TYPE), never argv —
-    the same untrusted-input discipline the workflow kept, so a comment carrying
-    $(...) or backticks is only ever data. No-ops (never requeue): bot/self
-    comments, worker comments (any hidden marker, or a legacy disclaimer first
-    line — §4), and comments on an issue carrying no held label. needs-decision
-    requeues on ANY bare operator comment; awaiting-merge (delivered) only on an
-    explicit requeue directive. Exit 0 always on a clean run, 20 on gh/transport
-    failure."""
-    repo, issue = args.repo, args.issue
-    body = os.environ.get("COMMENT_BODY", "")
-    author_type = os.environ.get("COMMENT_AUTHOR_TYPE", "")
-
-    # Self/bot comments (the reaper's stale-claim:, this workflow's confirmation,
-    # the validator) never requeue — user.type is the tell, not the marker.
-    if author_type == "Bot":
-        print(f"requeue: bot/self comment on #{issue} — no-op")
-        return EXIT_OK
-
-    if is_worker_comment(body):
-        print(f"requeue: worker comment (marker or disclaimer) on #{issue} — no-op")
-        return EXIT_OK
-
-    labels = issue_label_names(repo, issue)
-    if labels is None:
-        print(f"requeue: gh-failure stage=labels issue={issue}", file=sys.stderr)
-        return EXIT_TRANSPORT
-
-    if "needs-decision" in labels:
-        if not swap_labels(repo, issue, remove="needs-decision"):
-            print(f"requeue: gh-failure stage=label issue={issue}", file=sys.stderr)
-            return EXIT_TRANSPORT
-        if not post_comment(repo, issue,
-                            "requeue: operator reply detected — needs-decision "
-                            "removed, the task rejoins the queue with its full "
-                            "thread as context."):
-            print(f"requeue: gh-failure stage=comment issue={issue}", file=sys.stderr)
-            return EXIT_TRANSPORT
-        print(f"requeue: needs-decision removed on #{issue}")
-        return EXIT_OK
-
-    if "awaiting-merge" in labels:
-        if has_requeue_directive(body):
-            if not swap_labels(repo, issue, remove="awaiting-merge"):
-                print(f"requeue: gh-failure stage=label issue={issue}", file=sys.stderr)
-                return EXIT_TRANSPORT
-            if not post_comment(repo, issue,
-                                "requeue: explicit requeue on a delivered task — "
-                                "awaiting-merge removed, the worker continues on "
-                                "the existing branch."):
-                print(f"requeue: gh-failure stage=comment issue={issue}", file=sys.stderr)
-                return EXIT_TRANSPORT
-            print(f"requeue: awaiting-merge removed on #{issue} (explicit requeue directive)")
-            return EXIT_OK
-        print(f"requeue: awaiting-merge on #{issue} left held (no explicit requeue directive) — no-op")
-        return EXIT_OK
-
-    print(f"requeue: #{issue} carries no held label — no-op")
     return EXIT_OK
 
 
@@ -2536,15 +2585,6 @@ def build_parser():
     p.add_argument("--max-hours", type=int, default=None,
                    help="staleness threshold in hours (default: MAX_HOURS env, else 6)")
     p.set_defaults(func=cmd_reap)
-
-    p = sub.add_parser(
-        "requeue-check",
-        help="requeue-on-reply.yml: requeue a held task on a genuine operator "
-             "reply (reads COMMENT_BODY / COMMENT_AUTHOR_TYPE from the env)",
-    )
-    p.add_argument("repo")
-    p.add_argument("issue")
-    p.set_defaults(func=cmd_requeue_check)
 
     p = sub.add_parser(
         "validate",

@@ -213,14 +213,20 @@ class StubState:
                 out.append({"number": int(bn), "state": st.upper() if upper else st})
         return out
 
-    def issue_node(self, n):
+    def issue_node(self, n, comment_window=25):
         d = self.issue_dir(n)
+        # The queue walk carries a trailing comment window (GraphQL spells the
+        # timestamp createdAt where REST spells it created_at) — the requeue
+        # derivation reads it off the same page as the labels.
+        window = self.comments(n)[-comment_window:] if comment_window else []
         return {
             "number": int(n),
             "title": self._read(os.path.join(d, "title")).rstrip("\n"),
             "createdAt": self._read(os.path.join(d, "createdAt")).rstrip("\n"),
             "body": self.issue_body(n),
             "labels": {"nodes": [{"name": x} for x in self.issue_labels(n)]},
+            "comments": {"nodes": [{"body": c["body"], "createdAt": c["created_at"]}
+                                   for c in window]},
             "blockedBy": {"nodes": self.blocked_by_nodes(n, upper=True)},
         }
 
@@ -321,6 +327,8 @@ def graphql_list_issues(state, q):
     labels = re.findall(r'"([^"]*)"', lm.group(0)) if lm else []
     fm = re.search(r"first: ([0-9]+)", q)
     first = int(fm.group(1)) if fm else 100
+    cm = re.search(r"comments\(last: ([0-9]+)\)", q)
+    window = int(cm.group(1)) if cm else 0
     am = re.search(r'after: "([^"]*)"', q)
     after = am.group(1) if am else ""
 
@@ -332,7 +340,7 @@ def graphql_list_issues(state, q):
         present = state.issue_labels(n)
         if not all(l in present for l in labels):
             continue
-        nodes.append(state.issue_node(n))
+        nodes.append(state.issue_node(n, comment_window=window))
     nodes.sort(key=lambda x: (x["createdAt"], x["number"]))
     if after != "":
         after_n = int(after)
