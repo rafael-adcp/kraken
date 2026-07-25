@@ -1097,10 +1097,12 @@ def cmd_release(args):
 
 def cmd_note(args):
     """Post a free-form worker comment (assumptions, a progress note) with the
-    attribution disclaimer prepended and no hidden marker. It is a pure comment:
-    it changes no label and touches no claim ref, so the task stays exactly where
-    it was — the missing worker-authored write the skill otherwise had you
-    hand-assemble (SKILL.md step 2a / Conventions), disclaimer and all."""
+    attribution disclaimer prepended and a single non-state-changing `note`
+    marker (PROTOCOL.md §4) — the structural signal that makes requeue-check read
+    it as worker-authored. It carries no machine state: it changes no label and
+    touches no claim ref, so the task stays exactly where it was — the missing
+    worker-authored write the skill otherwise had you hand-assemble (SKILL.md
+    step 2a / Conventions), disclaimer and all."""
     repo, issue, worker, body_file = args.repo, args.issue, args.worker, args.body_file
     if not os.path.isfile(body_file):
         print(f"note: no such file {body_file}", file=sys.stderr)
@@ -1314,19 +1316,35 @@ def parse_pr_url(records):
     return from_marker or fallback
 
 
-_PR_PARTS_RE = re.compile(r"/([^/]+)/([^/]+)/pull/(\d+)")
+_PR_PARTS_RE = re.compile(r"^https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/pull/(\d+)")
+
+
+def parse_github_pr_url(pr_url):
+    """(owner, name, number) parsed from a github.com web pull-request URL, or
+    None when the delivery URL isn't one — a non-GitHub delivery (GitLab MR,
+    Bitbucket PR, ...) that PROTOCOL.md never forbids, or anything else kraken's
+    merge-state check can't understand. Distinct from a transport failure: this
+    is a shape check, no network involved."""
+    m = _PR_PARTS_RE.search(pr_url or "")
+    if m is None:
+        return None
+    return m.group(1), m.group(2), m.group(3)
 
 
 def pr_is_merged(pr_url):
     """Whether a delivery PR is already merged — the orphan heuristic's only
-    signal. Returns True/False, or None on transport failure or an unparseable
-    URL (a flag is never guessed from a failed read). The web `…/pull/N` URL
-    recorded in the delivery marker maps to the REST `pulls/N` endpoint, whose
+    signal. Returns True/False; False also covers a delivery URL kraken cannot
+    evaluate (not a github.com pull-request URL) — "not confirmed merged",
+    never guessed, so a legitimate non-GitHub delivery no longer bricks the
+    whole status read. None is reserved for an actual gh transport failure on a
+    github.com PR URL it did understand — compute_status still propagates that
+    as the stage=read failure it actually is. The web `…/pull/N` URL recorded
+    in the delivery marker maps to the REST `pulls/N` endpoint, whose
     `merged`/`merged_at` fields are the authoritative merge signal."""
-    m = _PR_PARTS_RE.search(pr_url or "")
-    if m is None:
-        return None
-    owner, name, number = m.group(1), m.group(2), m.group(3)
+    parts = parse_github_pr_url(pr_url)
+    if parts is None:
+        return False
+    owner, name, number = parts
     data = http_json("GET", f"/repos/{owner}/{name}/pulls/{number}")
     if data is None:
         return None
@@ -1394,13 +1412,18 @@ def compute_status(repo, project, nodes, now, *, claim_refs, commit_meta,
                 return None
             pr_url = parse_pr_url(records)
             orphan = False
+            merge_state_unknown = False
             if pr_url:
                 merged = pr_merged(pr_url)
                 if merged is None:
                     return None
                 orphan = bool(merged)
-            review.append({"number": number, "title": title,
-                           "pr_url": pr_url, "orphan": orphan})
+                # A non-GitHub delivery (GitLab MR, Bitbucket PR, ...) is never
+                # flagged an orphan — pr_merged already returns False for it —
+                # but the operator should still see it wasn't actually checked.
+                merge_state_unknown = parse_github_pr_url(pr_url) is None
+            review.append({"number": number, "title": title, "pr_url": pr_url,
+                           "orphan": orphan, "merge_state_unknown": merge_state_unknown})
         elif "needs-decision" in labels:
             decision.append({"number": number, "title": title})
         elif "in-progress" in labels or number in claim_refs:
@@ -1455,7 +1478,12 @@ def render_status(report):
                  "  📋 Review queue (awaiting-merge) — nothing waiting")
     for item in review:
         link = f" → {item['pr_url']}" if item["pr_url"] else " → (no PR link recorded)"
-        flag = "  ⚠️  PR looks merged — close it?" if item["orphan"] else ""
+        if item["orphan"]:
+            flag = "  ⚠️  PR looks merged — close it?"
+        elif item.get("merge_state_unknown"):
+            flag = "  ℹ️  merge-state unknown (non-GitHub delivery)"
+        else:
+            flag = ""
         lines.append(f"     #{item['number']}  {item['title']}{link}{flag}")
     lines.append("")
 
@@ -2372,8 +2400,8 @@ def build_parser():
 
     p = sub.add_parser(
         "note",
-        help="post a free-form worker comment (disclaimer prepended, no marker); "
-             "changes no label or claim ref",
+        help="post a free-form worker comment (disclaimer prepended, inert "
+             "`note` marker); changes no label or claim ref",
     )
     p.add_argument("repo")
     p.add_argument("issue")

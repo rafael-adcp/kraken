@@ -199,7 +199,7 @@ the surrounding prose is a pure human courtesy. **Grammar** (normative):
 
 | `type` | Fields | Rides | Posted by | Meaning |
 | --- | --- | --- | --- | --- |
-| `claim` | `worker` | claim ref commit | claim | the worker holding the claim ref (§5) |
+| `claim` | `worker` | claim ref commit (and the projection comment) | claim | the worker holding the claim ref (§5) |
 | `heartbeat` | `worker`, `msg`? | claim ref commit | heartbeat | liveness; its commit date is the reaper's clock (§6) |
 | `needs-decision` | `worker` | comment | escalation | question posted, decision pending (§7) |
 | `delivered` | `worker`, `pr`? | comment | delivery | result posted, review pending (optional `pr` URL) (§8) |
@@ -335,7 +335,7 @@ success (the delete is idempotent).
      whose label projection did not land): add the label.
   4. **Orphan projection** — an open `in-progress` issue with **no** ref (a
      crashed release, or a claim made before protocol/4): remove the label so
-     the task requeues.
+     the task requeues, leaving a `stale-claim` comment saying why.
 - The coordination repo also runs the **requeue-on-reply** workflow
   ([`skills/unleash/requeue-on-reply.yml`](skills/unleash/requeue-on-reply.yml)):
   on a new comment, it removes the holding label so the task requeues — so the
@@ -444,7 +444,7 @@ improvisation.
 
 The **reference implementation** of the worker side is
 [`skills/unleash/kraken.py`](skills/unleash/kraken.py) — one stdlib-only program
-with a subcommand per transition (`list-startable`, `claim`, `heartbeat`,
+with a subcommand per transition (`list-startable`, `claim`, `heartbeat`, `note`,
 `escalate`, `deliver`, `release`, `watch`), driven by a Claude Code skill
 ([`skills/unleash/SKILL.md`](skills/unleash/SKILL.md)) that supplies the
 judgment between transitions. The transport is direct HTTP over the stdlib
@@ -458,7 +458,13 @@ deterministic claim loop (list, guard, CAS, skip-on-loss, try the next
 candidate) behind one invocation — a worker-side ergonomic detail, not part of
 the wire contract; it exits `0` holding a won claim (printing the task's number,
 title, and body), a distinct `3` when nothing is claimable, and `20` on
-transport failure with the same state-unknown semantics.
+transport failure with the same state-unknown semantics. Before it claims, it
+also refuses — writing nothing — when this worker already holds an open claim
+(`11`, the §5 one-task-at-a-time rule, tracked in a local claim-state file), when
+the coordination repo's vendored copy of the program has drifted from the
+worker's bundled one (`12`, fail closed), or when the repo carries no
+`project:<name>` label so the worker would be deaf rather than idle (`13`). All
+four are reference-implementation ergonomics, not wire contract.
 
 A read-only `status OWNER/tasks [--project <name>] [--json]` subcommand
 (operator-side, driven by [`skills/status/SKILL.md`](skills/status/SKILL.md))

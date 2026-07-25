@@ -28,7 +28,7 @@ ran, e.g. `kraken-copilot-1`), and a `--project` (only take `project:<name>` tas
 
 ## Deltas — the only Claude-Code-specific parts of SKILL.md to substitute
 
-Everything in SKILL.md applies verbatim **except** its two Claude-Code harness assumptions.
+Everything in SKILL.md applies verbatim **except** the three harness assumptions below.
 Substitute these; change nothing else:
 
 1. **The watcher (SKILL.md step 4).** SKILL.md arms the Claude Code **Monitor tool** running
