@@ -623,6 +623,24 @@ makes it real. Unless the task's notes say otherwise:
 - A work repo that cannot take a branch push: put the full diff or patch in
   the result comment and flag it — work MUST NOT be silently lost.
 
+**The `pr` field is the delivery URL.** It is the one authoritative record of
+where the work landed, and it is structured on purpose. A consumer that needs
+the delivery PR (a review console, a dashboard, an orphan check) MUST read it
+from the `pr` field of the **newest** `delivered` marker on the task, and MUST
+NOT derive it from the visible prose — the §4 marker-only reading rule applied to
+the last place where free text was still read as data. A link found in prose is
+not a delivery: it can be a PR a human mentioned in passing, another task's PR,
+or a `/pull/N` in an unrelated repo, and a reader that greps for one reports the
+wrong PR with the same confidence as the right one.
+
+A reader MAY fall back to scanning the prose **only** when no `delivered` marker
+on the task carries a usable `pr` — a thread delivered before the field existed —
+and when it does it MUST mark the result as legacy rather than present it as a
+recorded delivery (the reference `status` console reports it as
+`pr_source: "legacy-free-text"`, against `"marker"` for the structured read).
+That fallback is legacy-only: it is removable at the next backward-incompatible
+protocol bump, and nothing new may be built on it.
+
 ## 9. Release
 
 A worker abandoning a claim without delivering (environment cannot host the

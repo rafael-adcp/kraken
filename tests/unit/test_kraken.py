@@ -606,7 +606,7 @@ class CommentRecordsPaginationTests(unittest.TestCase):
         self.assertEqual(len(result), 150)
         # The delivered marker past comment 100 is found — invisible under a
         # 100-comment truncation.
-        self.assertEqual(kraken.parse_pr_url(result), "https://x/pull/9")
+        self.assertEqual(kraken.parse_pr_url(result), ("https://x/pull/9", "marker"))
 
     def test_maps_created_at_to_createdat(self):
         recs = [
@@ -617,7 +617,7 @@ class CommentRecordsPaginationTests(unittest.TestCase):
         result = kraken.comment_records("OWNER/tasks", "42")
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0]["createdAt"], "2026-07-01T00:00:00Z")
-        self.assertEqual(kraken.parse_pr_url(result), "https://x/pull/1")
+        self.assertEqual(kraken.parse_pr_url(result), ("https://x/pull/1", "marker"))
 
     def test_transport_failure_returns_none(self):
         kraken.http_request = lambda m, p, body=None: (500, "")
@@ -910,22 +910,56 @@ class StatusHelperTests(unittest.TestCase):
 
     def test_parse_pr_url_from_delivered_marker(self):
         recs = [self._rec(dlv("w1", pr="https://github.com/o/r/pull/42") + "\n\nbody", "t")]
-        self.assertEqual(kraken.parse_pr_url(recs), "https://github.com/o/r/pull/42")
+        self.assertEqual(kraken.parse_pr_url(recs),
+                         ("https://github.com/o/r/pull/42", "marker"))
 
     def test_parse_pr_url_newest_wins(self):
         recs = [
             self._rec(dlv("w1", pr="https://github.com/o/r/pull/1"), "t1"),
             self._rec(dlv("w2", pr="https://github.com/o/r/pull/9"), "t2"),
         ]
-        self.assertEqual(kraken.parse_pr_url(recs), "https://github.com/o/r/pull/9")
+        self.assertEqual(kraken.parse_pr_url(recs),
+                         ("https://github.com/o/r/pull/9", "marker"))
+
+    def test_parse_pr_url_marker_beats_a_foreign_link_in_prose(self):
+        # #71: the delivery URL is a structured field, not something to grep out
+        # of the thread. A human quoting SOMEONE ELSE'S PR first must never
+        # outrank the worker's own delivered marker.
+        recs = [
+            self._rec("related work: https://github.com/other/repo/pull/3", "t1"),
+            self._rec(dlv("w1", pr="https://github.com/o/r/pull/42"), "t2"),
+        ]
+        self.assertEqual(kraken.parse_pr_url(recs),
+                         ("https://github.com/o/r/pull/42", "marker"))
 
     def test_parse_pr_url_fallback_to_url_in_prose(self):
+        # A legacy thread, delivered before the marker carried `pr`: the prose is
+        # all there is — read it, but say it was read from free text.
         recs = [self._rec("landed in https://github.com/o/r/pull/7 fyi", "t")]
-        self.assertEqual(kraken.parse_pr_url(recs), "https://github.com/o/r/pull/7")
+        self.assertEqual(kraken.parse_pr_url(recs),
+                         ("https://github.com/o/r/pull/7", "legacy-free-text"))
+
+    def test_parse_pr_url_marker_without_pr_falls_back(self):
+        # A delivered marker whose `pr` is missing or null is not a delivery URL;
+        # it must not break the read, and it must not shadow the legacy prose.
+        for marker in (dlv("w1"), kraken.make_marker(
+                {"type": "delivered", "worker": "w1", "pr": None})):
+            recs = [self._rec("see https://github.com/o/r/pull/7", "t1"),
+                    self._rec(marker + "\n\ndone", "t2")]
+            self.assertEqual(kraken.parse_pr_url(recs),
+                             ("https://github.com/o/r/pull/7", "legacy-free-text"),
+                             marker)
+
+    def test_parse_pr_url_ignores_pr_on_a_non_delivered_marker(self):
+        # `delivered` is the delivery marker; a `pr` key riding any other type is
+        # not one, and a marker line is never re-read as prose either.
+        recs = [self._rec(kraken.make_marker(
+            {"type": "note", "worker": "w1", "pr": "https://github.com/o/r/pull/3"}), "t")]
+        self.assertEqual(kraken.parse_pr_url(recs), (None, None))
 
     def test_parse_pr_url_none_when_absent(self):
         recs = [self._rec(dlv("w1") + "\n\njust prose", "t")]
-        self.assertIsNone(kraken.parse_pr_url(recs))
+        self.assertEqual(kraken.parse_pr_url(recs), (None, None))
 
     def test_parse_iso_roundtrip(self):
         self.assertEqual(kraken.parse_iso("2026-07-01T00:00:00Z"), 1782864000.0)
@@ -1126,6 +1160,36 @@ class StatusComputeTests(unittest.TestCase):
         report = self._call(nodes, comments=comments,
                             merged={"https://github.com/o/r/pull/5": False}, projects=["app"])
         self.assertFalse(report["review_queue"][0]["merge_state_unknown"])
+
+    def test_review_item_reports_where_the_pr_link_came_from(self):
+        # #71: the report says whether the link is the delivery's own structured
+        # field or a legacy guess off the prose — a downstream reader must be
+        # able to tell them apart without re-reading the thread.
+        nodes = [
+            self._node(88, "delivered with a marker",
+                       ["kraken-task", "project:app", "awaiting-merge"]),
+            self._node(91, "legacy delivery",
+                       ["kraken-task", "project:app", "awaiting-merge"],
+                       created="2026-07-01T01:00:00Z"),
+            self._node(92, "no PR at all",
+                       ["kraken-task", "project:app", "awaiting-merge"],
+                       created="2026-07-01T02:00:00Z"),
+        ]
+        comments = {
+            88: [{"body": "cf https://github.com/other/repo/pull/3", "createdAt": "t1"},
+                 {"body": dlv("w", pr="https://github.com/o/r/pull/5"), "createdAt": "t2"}],
+            91: [{"body": "delivered in https://github.com/o/r/pull/6", "createdAt": "t"}],
+            92: [{"body": dlv("w"), "createdAt": "t"}],
+        }
+        report = self._call(nodes, comments=comments, projects=["app"])
+        items = {r["number"]: r for r in report["review_queue"]}
+        self.assertEqual(items[88]["pr_url"], "https://github.com/o/r/pull/5",
+                         "a foreign PR quoted by a human outranked the marker")
+        self.assertEqual(items[88]["pr_source"], "marker")
+        self.assertEqual(items[91]["pr_url"], "https://github.com/o/r/pull/6")
+        self.assertEqual(items[91]["pr_source"], "legacy-free-text")
+        self.assertIsNone(items[92]["pr_url"])
+        self.assertIsNone(items[92]["pr_source"])
 
     def test_awaiting_merge_comment_failure_propagates_none(self):
         nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]

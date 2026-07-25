@@ -1845,6 +1845,13 @@ def cmd_watch(args):
 # Reuses fetch_open_tasks (queue), the claim refs (in-flight worker/age/progress),
 # and paginated comment reads only for awaiting-merge tasks (the PR link).
 
+# The LEGACY free-text fallback, and nothing else (§8). The delivery URL is a
+# structured field — the `delivered` marker's `pr` — and reading it off the prose
+# is exactly the text coupling the marker retired (#24, #32, #48): a regex over a
+# comment thread happily returns a PR a human mentioned in passing, another
+# task's PR, or some other repo's `/pull/N`. Kept only for threads delivered
+# before the marker carried `pr`, always reported as legacy, and removable at the
+# next backward-incompatible protocol bump.
 _PR_URL_RE = re.compile(r"https?://\S+?/pull/\d+")
 
 
@@ -1889,21 +1896,38 @@ def claim_meta_of(sha, commit_meta):
 
 
 def parse_pr_url(records):
-    """The delivery PR URL for an awaiting-merge task: the newest structured
-    source wins — a protocol/3 delivered marker's "pr" field — falling back to
-    the newest GitHub pull-request URL anywhere in the thread. None when no PR
-    was recorded."""
+    """The delivery PR URL of an awaiting-merge task, as `(url, source)`.
+
+    The structured field is the source of truth (§8): the `pr` of the newest
+    `delivered` marker in the thread, source `"marker"`. The prose is read ONLY
+    when no `delivered` marker carries a usable `pr` — a legacy thread, or a
+    delivery posted without a PR — and comes back tagged `"legacy-free-text"` so
+    every reader can say out loud that the link was guessed rather than
+    recorded. `(None, None)` when no PR was recorded at all.
+
+    A marker line is machine payload, never prose: it is skipped by the regex
+    pass, so a delivered marker with no `pr` can never seed the fallback from
+    its own JSON, and a `note`/`released` marker that happens to carry a `pr`
+    key is not a delivery."""
     from_marker = None
     fallback = None
     for rec in records:  # server order — keep overwriting so the newest wins
         for raw in (rec.get("body") or "").split("\n"):
             marker = parse_marker(raw)
-            if marker is not None and marker.get("pr"):
-                from_marker = marker["pr"]
+            if marker is not None:
+                if marker.get("type") == "delivered":
+                    pr = marker.get("pr")
+                    if isinstance(pr, str) and pr.strip():
+                        from_marker = pr.strip()
+                continue
             m = _PR_URL_RE.search(raw)
             if m:
                 fallback = m.group(0)
-    return from_marker or fallback
+    if from_marker:
+        return from_marker, "marker"
+    if fallback:
+        return fallback, "legacy-free-text"
+    return None, None
 
 
 _PR_PARTS_RE = re.compile(r"^https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/pull/(\d+)")
@@ -2043,7 +2067,7 @@ def compute_status(repo, project, nodes, now, *, leases, commit_meta,
             records = comment_reader(repo, number)
             if records is None:
                 return None
-            pr_url = parse_pr_url(records)
+            pr_url, pr_source = parse_pr_url(records)
             orphan = False
             merge_state_unknown = False
             if pr_url:
@@ -2056,7 +2080,8 @@ def compute_status(repo, project, nodes, now, *, leases, commit_meta,
                 # but the operator should still see it wasn't actually checked.
                 merge_state_unknown = parse_github_pr_url(pr_url) is None
             review.append({"number": number, "title": title, "pr_url": pr_url,
-                           "orphan": orphan, "merge_state_unknown": merge_state_unknown})
+                           "pr_source": pr_source, "orphan": orphan,
+                           "merge_state_unknown": merge_state_unknown})
         elif "needs-decision" in labels:
             decision.append({"number": number, "title": title})
         elif "in-progress" in labels or number in leases:
@@ -2115,6 +2140,10 @@ def render_status(report):
                  "  📋 Review queue (awaiting-merge) — nothing waiting")
     for item in review:
         link = f" → {item['pr_url']}" if item["pr_url"] else " → (no PR link recorded)"
+        # A link the delivery never recorded is a guess off the thread's prose —
+        # say so, so the operator knows which links the worker stands behind.
+        if item["pr_url"] and item.get("pr_source") == "legacy-free-text":
+            link += "  (legacy: read from free text, no delivered marker)"
         if item["orphan"]:
             flag = "  ⚠️  PR looks merged — close it?"
         elif item.get("merge_state_unknown"):
