@@ -86,6 +86,9 @@ class StatusTests(KrakenConformanceTest):
                         "json #88 orphan flag not true")
         self.assertFalse(next(d for d in js["review_queue"] if d["number"] == 91)["orphan"],
                          "json #91 orphan flag not false")
+        self.assertEqual(
+            [d["pr_source"] for d in js["review_queue"]], ["marker", "marker"],
+            "json review_queue must say the PR came from the delivered marker")
         f99 = next(d for d in js["in_flight"] if d["number"] == 99)
         self.assertEqual(f99["worker"], "dead-worker", "json in_flight #99 worker wrong")
         self.assertGreaterEqual(f99["heartbeat_age_seconds"], 28000, "json in_flight #99 age not anchored")
@@ -97,6 +100,46 @@ class StatusTests(KrakenConformanceTest):
         self.assertEqual(scoped["decision_queue"], [], "--project web should have empty decision queue")
         self.assertEqual(scoped["in_flight"], [], "--project web should have empty in_flight")
         self.assertEqual(scoped["project"], "web", "--project not reflected in json")
+
+    def test_pr_link_comes_from_the_delivered_marker(self):
+        """#71 — the delivery URL is the `delivered` marker's `pr` field
+        (PROTOCOL.md §8), never something grepped out of the prose. The regex
+        survives only for threads delivered before the field existed, and what it
+        finds is reported as legacy."""
+        # #1: a human quotes an unrelated PR of another repo BEFORE the delivery.
+        self.mk_issue(1, "marker wins", "kraken-task", "project:app", "awaiting-merge")
+        self.mk_comment(1, "cf. https://github.com/OWNER/other/pull/999 — unrelated")
+        self.mk_comment(1, '> d\n\n<!-- kraken {"type":"delivered","worker":"w1","pr":"https://github.com/OWNER/work/pull/5"} -->\n\nlanded')
+        self.mk_pr(5, "OPEN")
+        self.mk_pr(999, "MERGED", now_iso())
+        # #2: a legacy thread — prose only, no marker carrying `pr`.
+        self.mk_issue(2, "legacy delivery", "kraken-task", "project:app", "awaiting-merge")
+        self.mk_comment(2, "delivered in https://github.com/OWNER/work/pull/6")
+        self.mk_pr(6, "OPEN")
+        # #3: delivered with no PR recorded at all — must not break the read.
+        self.mk_issue(3, "no pr", "kraken-task", "project:app", "awaiting-merge")
+        self.mk_comment(3, '> d\n\n<!-- kraken {"type":"delivered","worker":"w1"} -->\n\npatch in this comment')
+
+        r = self.kraken("status", "OWNER/tasks", "--project", "app")
+        self.assertEqual(r.rc, 0, "status exit: %s" % r.err)
+        self.assertRegex(r.out, r"#1 .*https://github\.com/OWNER/work/pull/5",
+                         "#1 must report the marker's PR")
+        self.assertNotIn("other/pull/999", r.out,
+                         "#1 reported a PR a human merely mentioned")
+        self.assertNotIn("possible orphan(s): #1", r.out,
+                         "#1 was flagged an orphan off someone else's merged PR")
+        self.assertRegex(r.out, r"#2 .*pull/6.*legacy",
+                         "#2's free-text link must be marked legacy")
+        self.assertRegex(r.out, r"#3 .*no PR link recorded")
+
+        js = json.loads(self.kraken("status", "OWNER/tasks", "--project", "app",
+                                    "--json").out)
+        sources = {d["number"]: (d["pr_url"], d["pr_source"]) for d in js["review_queue"]}
+        self.assertEqual(sources, {
+            1: ("https://github.com/OWNER/work/pull/5", "marker"),
+            2: ("https://github.com/OWNER/work/pull/6", "legacy-free-text"),
+            3: (None, None),
+        }, "json pr_url/pr_source wrong: %s" % sources)
 
     def test_silent_claim_is_flagged(self):
         """A lease about to expire reads exactly like one being renewed, and

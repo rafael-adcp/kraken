@@ -61,7 +61,7 @@ orchestration left to do by hand.
 
      📋 Review queue (awaiting-merge) — N waiting for your merge
         #88  <title> → PR/MR link
-        #91  <title> → PR/MR link
+        #91  <title> → PR/MR link  (legacy: read from free text, no delivered marker)
 
      ❓ Decision queue (needs-decision) — N waiting for your call
         #97  <title>  (options in thread)
@@ -80,6 +80,10 @@ orchestration left to do by hand.
         /kraken:unleash OWNER/tasks --worker-name <worker-name> --project <name-1>
         /kraken:unleash OWNER/tasks --worker-name <worker-name> --project <name-2>
    ```
+
+   The PR link comes from the delivery's own `pr` field (PROTOCOL.md §8). The
+   `legacy:` tag on a review line means no `delivered` marker carried one and the link
+   was read off the thread's prose — treat it as a guess and confirm before merging.
 
    The lease age is anchored to the worker's **claim ref commit date** (the
    `claim`/`heartbeat` commit on the highest `refs/kraken/claims/<issue>/<gen>`),
@@ -102,7 +106,9 @@ A stable object for downstream tooling:
   "repo": "OWNER/tasks",
   "project": "<name>" | null,           // the --project scope, or null
   "generated_at": "2026-...Z",
-  "review_queue":   [ { "number", "title", "pr_url": "<url>"|null, "orphan": true|false } ],
+  "review_queue":   [ { "number", "title", "pr_url": "<url>"|null,
+                        "pr_source": "marker"|"legacy-free-text"|null,
+                        "orphan": true|false } ],
   "decision_queue": [ { "number", "title" } ],
   "in_flight":      [ { "number", "title", "worker": "<name>"|null,
                         "heartbeat_anchor": "<iso>"|null,   // the lease timestamp
@@ -117,7 +123,10 @@ A stable object for downstream tooling:
 `heartbeat_age_seconds` / `heartbeat_anchor` / `heartbeat_msg` are `null` when there is
 no readable claim ref (an orphan projection, or a claim commit that could not be read);
 `stale` is `true` when the lease no longer holds — expired, or with no readable clock
-behind it; `pr_url` is `null` when no PR was recorded.
+behind it; `pr_url` is `null` when no PR was recorded. `pr_source` says where that
+link came from: `"marker"` is the delivery's own `pr` field, the source of truth
+(PROTOCOL.md §8); `"legacy-free-text"` means no `delivered` marker carried a `pr` and
+the link was read off the thread's prose — a legacy guess, not a recorded delivery.
 
 ## Authorization boundaries
 
