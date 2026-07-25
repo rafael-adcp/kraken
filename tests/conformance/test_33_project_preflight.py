@@ -8,16 +8,10 @@ forever. A configured project, idle or not, drains normally.
 """
 import unittest
 
-from harness import KrakenConformanceTest, KRAKEN
+from harness import KrakenConformanceTest
 
 
 class ProjectPreflightTests(KrakenConformanceTest):
-    def setUp(self):
-        super().setUp()
-        # The drift handshake runs in the same drain: seed a matching vendored
-        # copy so the project check is what is under test.
-        self.mk_content(".github/kraken.py", KRAKEN)
-
     def _seed_startable(self):
         self.mk_issue(7, "ready task", "kraken-task", "project:app")
         self.mk_body(7, "### Goal\nship it")

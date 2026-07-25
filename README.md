@@ -165,19 +165,18 @@ worker reuses that same skill with the harness deltas in [`AGENTS.md`](AGENTS.md
    <details>
    <summary>Not running the plugin? The same setup by hand</summary>
 
-   Two files: the issue-form template and the transition program.
-   **`kraken-protocol/5` installs no workflows at all** — the coordination repo
-   runs nothing. Stale claims, an answered task's requeue and queue-entry
-   validation are all derived by the reader, on the queue read a worker or
-   `status` performs anyway (PROTOCOL.md §2.1, §6). You do not need GitHub
-   Actions enabled on this repo.
+   **One file.** Under `kraken-protocol/5` the coordination repo runs nothing —
+   no workflows, and no vendored copy of the transition program for them to
+   exec. Stale claims, an answered task's requeue and queue-entry validation are
+   all derived by the reader, on the queue read a worker or `status` performs
+   anyway (PROTOCOL.md §2.1, §6). You do not need GitHub Actions enabled on this
+   repo at all.
 
    ```bash
    gh repo create OWNER/tasks --private --clone && cd tasks
-   mkdir -p .github/ISSUE_TEMPLATE .github/workflows
+   mkdir -p .github/ISSUE_TEMPLATE
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/task-template.yml -o .github/ISSUE_TEMPLATE/task.yml
-   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/kraken.py -o .github/kraken.py
-   git add -A && git commit -m "chore: kraken task template and transition program" && git push
+   git add -A && git commit -m "chore: kraken task template" && git push
 
    gh -R OWNER/tasks label create kraken-task
    gh -R OWNER/tasks label create in-progress

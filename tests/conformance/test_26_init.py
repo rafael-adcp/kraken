@@ -11,17 +11,17 @@ import unittest
 
 from harness import KrakenConformanceTest, SCRIPTS
 
-ASSET_SRCS = ["task-template.yml", "kraken.py"]
-ASSET_DSTS = [
-    ".github/ISSUE_TEMPLATE/task.yml",
-    ".github/kraken.py",
-]
-# protocol/5 retired every coordination workflow; init deletes the copies an
-# earlier release installed instead of keeping them in sync.
+# protocol/5 installs ONE file: the issue form. Nothing in the coordination repo
+# is executed, so there is nothing for a vendored transition program to run.
+ASSET_SRCS = ["task-template.yml"]
+ASSET_DSTS = [".github/ISSUE_TEMPLATE/task.yml"]
+# ... and deletes everything an earlier release installed to be executed,
+# including the vendored program itself.
 RETIRED_DSTS = [".github/workflows/reclaim-stale.yml",
                 ".github/workflows/requeue-on-reply.yml",
                 ".github/workflows/cleanup-closed.yml",
-                ".github/workflows/validate-task.yml"]
+                ".github/workflows/validate-task.yml",
+                ".github/kraken.py"]
 RETIRED_DST = RETIRED_DSTS[0]
 
 
@@ -60,21 +60,22 @@ class InitTests(KrakenConformanceTest):
         self.assertEqual(r.rc, 0, "idempotent re-run exit")
         self.assertNotIn("POST /user/repos", self.log_text(), "re-run wrongly re-created the repo")
         self.assertNotIn("PUT ", self.log_text(), "re-run wrongly re-wrote an asset (PUT on unchanged file)")
-        self.assertIn("init: asset %s (unchanged)" % ASSET_DSTS[0], r.out,
-                      "re-run did not report the task template as unchanged")
+        self.assertIn("init: asset %s (present)" % ASSET_DSTS[0], r.out,
+                      "re-run did not report the task template as already present")
 
-        # --- 3. create-only: a drifted asset is reported by plain init, not
-        #        overwritten (a plain run never writes over an existing file) ---
+        # --- 3. create-only: an edited asset is left exactly as it is ---------
+        # Nothing in the coordination repo is executed under protocol/5, so a
+        # template the operator tuned is their business — init reports it present
+        # and writes nothing over it.
         self.truncate_log()
-        custom = os.path.join(self.state, "custom.py")
-        self._write(custom, "# my hand-edited transition program\n")
-        self.mk_content(".github/kraken.py", custom)
+        custom = os.path.join(self.state, "custom.yml")
+        self._write(custom, "name: my hand-edited task form\n")
+        self.mk_content(ASSET_DSTS[0], custom)
         r = self.kraken("init", "OWNER/tasks")
         self.assertEqual(r.rc, 0, "create-only exit")
-        self.assertIn("init: asset .github/kraken.py (drifted)", r.out,
-                      "drifted asset not flagged")
-        self.assertTrue(filecmp.cmp(self._contents(".github/kraken.py"), custom, shallow=False),
-                        "plain init overwrote a drifted asset — create-only violated")
+        self.assertIn("init: asset %s (present)" % ASSET_DSTS[0], r.out)
+        self.assertTrue(filecmp.cmp(self._contents(ASSET_DSTS[0]), custom, shallow=False),
+                        "plain init overwrote an edited asset — create-only violated")
         self.assertNotIn("PUT ", self.log_text(),
                          "a PUT was issued during a plain run where every asset already exists")
 
@@ -87,9 +88,16 @@ class InitTests(KrakenConformanceTest):
             vendored = os.path.join(self.state, "old-%d.yml" % i)
             # The bytes an older init installed: the bundled header is the
             # sentinel that proves the file is kraken's own to delete.
-            self._write(vendored,
-                        "# Something for kraken. Installed by `init` into the "
-                        "coordination repo as\n# %s\nname: retired\n" % dst)
+            if dst.endswith(".py"):
+                # The vendored transition program: its own module docstring is
+                # the sentinel that proves the file is kraken's own.
+                self._write(vendored,
+                            "#!/usr/bin/env python3\n\"\"\"kraken.py \u2014 the bundled "
+                            "worker-side transitions.\"\"\"\n")
+            else:
+                self._write(vendored,
+                            "# Something for kraken. Installed by `init` into the "
+                            "coordination repo as\n# %s\nname: retired\n" % dst)
             self.mk_content(dst, vendored)
 
         r = self.kraken("init", "OWNER/tasks")

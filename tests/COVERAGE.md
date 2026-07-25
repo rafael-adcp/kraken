@@ -117,6 +117,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 
 | Clause (line) | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
+| §12 nothing is installed | Nothing is installed into the coordination repo for the protocol to work: `init` commits the issue form and the labels, there is no vendored copy of the program and therefore no version handshake | ✅ pinned | `tests/conformance/test_26_init.py` pins the asset set down to the one template, proves every retired workflow AND the vendored program are deleted from a repo an older release set up, and that the prune spares a file kraken did not write; `tests/conformance/test_34_claim_next_reconcile.py` `test_the_drain_no_longer_reads_the_vendored_program` proves a drain reads no `.github/kraken.py` and does not refuse when it is absent, and `test_a_drain_costs_no_more_than_it_did_before` pins the per-drain call budget against protocol/4's. |
 | L409 | Matching the exit-code contract (`0`/`10`/`11`/`20`) is **RECOMMENDED**; the wire contract is what conformance means | ✅ pinned | `0` success: `tests/conformance/test_02_claim_clear.py`; `10` lost CAS: `tests/conformance/test_04_claim_race.py`, `tests/conformance/test_05_claim_thread_independence.py`; `11` no longer clear: `tests/conformance/test_03_claim_held.py`; `20` transport failure: `tests/conformance/test_07_gh_failure.py`, `tests/conformance/test_11_write_transition_failures.py`. |
 
 ## Open gaps (follow-up issues)
