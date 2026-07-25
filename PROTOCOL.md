@@ -128,21 +128,28 @@ Dependencies use GitHub's native *blocked-by* relationships. A `depends-on:
 The two ways a task is dead on arrival — no `project:<name>` label (invisible to
 every worker) or an empty/absent **Goal** or **Acceptance** section (a worker
 claims it, then stalls) — are the queue's most common operator mistakes, and
-they are otherwise silent. The coordination repo SHOULD run the **validator**
-([`skills/unleash/validate-task.yml`](skills/unleash/validate-task.yml)): on a
-`kraken-task` issue being opened, edited, or relabeled, it checks the three
-requirements above and, when any is missing, posts a single actionable comment
-(a `validation` marker) naming exactly what to fix. Section detection
-keys on the issue-form headings the template produces (`### Goal`,
-`### Acceptance`); a hand-written issue lacking them counts as missing them.
+they are otherwise silent. The queue's **first line of defence is the issue form
+itself**: the bundled template marks Goal and Acceptance `required`, so the form
+refuses a blank field before the issue exists.
 
-The validator **informs; the operator acts** — it never blocks, closes, or
-relabels the task into a held state. A compliant task gets no comment (no noise
-on the happy path), a non-`kraken-task` issue is a no-op, and the check is
-idempotent: a burst of edits that do not change what is missing does not pile up
-duplicate comments (it skips when an identical `validation` comment is already
-the latest one). The validator's comment carries a `validation` marker, so
-the §6 requeue derivation reads it as machine-authored and never requeues on it.
+Beyond that, validation is an **advisory a reader computes**, not a gate the
+queue enforces: an operator console SHOULD report every open task missing a
+`project:<name>` label, a **Goal**, or an **Acceptance**, over the queue read it
+is performing anyway (the reference implementation does this in `status`). Section
+detection keys on the issue-form headings the template produces (`### Goal`,
+`### Acceptance`); a hand-written issue lacking them counts as missing them. A
+report scoped to one project MUST still surface a task carrying no project label
+at all — that task belongs to no project, and being invisible is exactly the
+failure being reported.
+
+Validation **informs; the operator acts**. It MUST NOT block, close, or relabel
+a task into a held state, and a worker MUST NOT refuse a task on these grounds —
+a claimed task whose Goal is unusable is an escalation (§7), not a validation
+failure. An implementation MAY instead (or additionally) comment the same three
+findings on the issue; the reference implementation keeps that as an
+operator-invoked `validate` subcommand, debounced so a re-run adds no duplicate,
+and its comment carries a `validation` marker so the §6 requeue derivation reads
+it as machine-authored.
 
 ## 3. Labels: the state machine
 
@@ -467,12 +474,22 @@ would treat the still-live ref as a held claim.
 
 ## 10. Close and cleanup
 
-Closing a task ends it: cancellation (operator closes) or landing (merge
-closes via `Closes`). The coordination repo SHOULD run the cleanup workflow
-([`skills/unleash/cleanup-closed.yml`](skills/unleash/cleanup-closed.yml)):
-on close, every label except `kraken-task` and `project:<name>` is stripped and
-any leftover claim ref (§5) is deleted, so closed issues read clean and neither
-a label filter nor a lingering lock survives the close.
+Closing a task ends it: cancellation (operator closes) or landing (merge closes
+via `Closes`).
+
+A closed task's **labels are inert**: every read in this contract — the startable
+filter (§3), the requeue derivation and the reconcile (§6), the console — walks
+**open** issues only, so a state-machine label stranded on a closed issue decides
+nothing. It is untidy, never corrupt, and no conforming implementation is
+required to clean it up. An operator who wants closed issues to read clean MAY
+strip everything but `kraken-task` and `project:<name>` (the reference
+implementation keeps a `cleanup` subcommand for that).
+
+A leftover **claim ref** is a different matter, because a ref is a lock: a close
+that outruns its worker's ref delete leaves one behind. That is rule 1 of the
+reconcile (§6) — a ref whose issue is no longer an open task is an orphan lock,
+deleted by the next reader — so the close needs no special handling for it
+either.
 
 ## 11. Authorization boundaries
 

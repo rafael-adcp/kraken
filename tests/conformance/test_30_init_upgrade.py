@@ -15,19 +15,18 @@ import unittest
 
 from harness import KrakenConformanceTest, SCRIPTS
 
-# (bundled src name, destination path) for the six assets init manages.
+# (bundled src name, destination path) for the assets init manages.
 ASSETS = [
     ("task-template.yml", ".github/ISSUE_TEMPLATE/task.yml"),
     ("kraken.py", ".github/kraken.py"),
-    ("cleanup-closed.yml", ".github/workflows/cleanup-closed.yml"),
-    ("validate-task.yml", ".github/workflows/validate-task.yml"),
 ]
 DST = dict(ASSETS)
 BUNDLED = {name: os.path.join(SCRIPTS, name) for name, _ in ASSETS}
 
-# Two assets are seeded drifted; the rest are seeded byte-identical to bundled.
-DRIFTED = ("kraken.py", "validate-task.yml")
-IN_SYNC = ("task-template.yml", "cleanup-closed.yml")
+# Both assets are seeded drifted, so the ordering rule below (the sentinel is
+# written LAST and a failed write aborts the run) has something to order.
+DRIFTED = ("task-template.yml", "kraken.py")
+IN_SYNC = ()
 
 
 class InitUpgradeTests(KrakenConformanceTest):
@@ -49,10 +48,8 @@ class InitUpgradeTests(KrakenConformanceTest):
         return src
 
     def _seed_drift(self):
-        """Seed an existing coordination repo mid-drift:
-          - kraken.py + validate-task.yml = bundled bytes + a marker -> DRIFTED
-          - the remaining four            = the current bundled bytes -> UNCHANGED
-        so a run touches only the two drifted files and nothing is `absent`."""
+        """Seed an existing coordination repo mid-drift: every asset is the
+        bundled bytes plus a marker, so each is DRIFTED and nothing is `absent`."""
         self.mk_repo("OWNER/tasks")
         for name in DRIFTED:
             self.mk_content(DST[name], self._drifted_src(name))
@@ -90,21 +87,21 @@ class InitUpgradeTests(KrakenConformanceTest):
 
     def test_partial_upgrade_failure_keeps_the_alarm_on(self):
         # kraken.py is the drift-handshake sentinel and init writes it LAST,
-        # aborting on the first failed write — so an upgrade that dies on a
-        # workflow PUT must leave the sentinel drifted, and the next drain must
-        # still refuse (exit 12) instead of waving stale workflows through.
+        # aborting on the first failed write — so an upgrade that dies on an
+        # earlier asset must leave the sentinel drifted, and the next drain must
+        # still refuse (exit 12) instead of waving a stale copy through.
         self._seed_drift()
         self.truncate_log()
         r = self.kraken("init", "OWNER/tasks", "--upgrade",
-                        fail=r"PUT \S*contents/\.github/workflows/validate-task\.yml")
+                        fail=r"PUT \S*contents/\.github/ISSUE_TEMPLATE/task\.yml")
         self.assertEqual(r.rc, 20, "a failed asset write must exit 20 (transport)")
-        self.assertIn("stage=asset path=.github/workflows/validate-task.yml", r.err,
+        self.assertIn("stage=asset path=.github/ISSUE_TEMPLATE/task.yml", r.err,
                       "the failed asset was not named")
 
         # The sentinel was never reached: still the drifted bytes, no PUT to it.
         self.assertFalse(
             filecmp.cmp(self._contents(DST["kraken.py"]), BUNDLED["kraken.py"], shallow=False),
-            "a partial upgrade advanced the kraken.py sentinel past a stale workflow")
+            "a partial upgrade advanced the kraken.py sentinel past a stale asset")
         self.assertEqual(self._put_lines_for(DST["kraken.py"]), [],
                          "a PUT was issued to kraken.py after an earlier asset failed")
 
@@ -130,7 +127,7 @@ class InitUpgradeTests(KrakenConformanceTest):
             self.assertFalse(filecmp.cmp(self._contents(dst), BUNDLED[name], shallow=False),
                              "%s was overwritten by a plain (create-only) init" % dst)
 
-        # Nothing at all is written: no create (all six exist), no upgrade.
+        # Nothing at all is written: no create (both exist), no upgrade.
         self.assertNotIn("PUT ", self.log_text(),
                          "plain init wrote an asset (a PUT) when it must only report")
         self.assertIn("assets_drifted=2", r.out)

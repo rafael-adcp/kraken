@@ -7,10 +7,11 @@ description: Read-only console of a kraken queue — everything the operator rea
 
 You are the operator's console for kraken: the one read-only view of a coordination
 repo. The whole computation lives in `kraken.py status` — the review queue and the
-decision queue (what needs me), what is still in flight, the one blind spot the state
-machine has (an `awaiting-merge` task whose PR is already merged but whose issue was
-never closed — the reconcile only watches `in-progress`, so these can sit forever), and
-the launch recon (which projects live in this queue). You run the subcommand and render
+decision queue (what needs me), what is still in flight (and which of those claims
+have gone silent), the one blind spot the state machine has (an `awaiting-merge` task
+whose PR is already merged but whose issue was never closed — the reconcile only watches
+`in-progress`, so these can sit forever), the queue-entry hygiene report (tasks no
+worker can start as filed), and the launch recon (which projects live in this queue). You run the subcommand and render
 its output. You read the queue; you never touch it.
 
 ## Invocation
@@ -67,8 +68,13 @@ orchestration left to do by hand.
 
      ⚙️  In flight (in-progress) — N running
         #99  <title>  · worker <name> · last heartbeat 12m ago
+        #93  <title>  · worker <name> · last heartbeat 9h ago  ⚠️  silent — the next drain reclaims it
 
      ⚠️  1 possible orphan(s): #85 — PR looks merged but the issue is still open. You decide.
+
+     🧹 Queue hygiene — N task(s) a worker cannot start as filed
+        #12  <title>  · missing: project label
+        A task with no project: label is invisible to every worker; one with no Goal or Acceptance stalls on arrival.
 
      🚀 Launch — one worker per prepared environment
         /kraken:unleash OWNER/tasks --worker-name <worker-name> --project <name-1>

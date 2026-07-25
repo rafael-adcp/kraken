@@ -1566,6 +1566,39 @@ def format_age(seconds):
     return f"{hours // 24}d"
 
 
+def queue_hygiene(nodes, project=""):
+    """The queue entries that are dead on arrival, read off the walk the console
+    already performed (PROTOCOL.md §2.1): no `project:<name>` label (invisible to
+    every worker), or an empty/absent Goal or Acceptance section (a worker claims
+    it, then stalls). Returns [{number, title, missing: [...]}], oldest first.
+
+    This is the read-side twin of the arrival-time validator: the same three
+    checks, the same wording, decided from the issue bodies the queue walk
+    already carries — so it costs no request of its own and needs nothing running
+    in the coordination repo.
+
+    A `project` scope filters tasks that HAVE a project label, but never hides a
+    task that has none: belonging to no project, it is exactly what the scope
+    would bury, and it is the failure this check exists to surface."""
+    out = []
+    for node in sorted(nodes, key=lambda n: (n.get("createdAt", ""), n.get("number", 0))):
+        projects = project_names_of(node)
+        if projects and project and project not in projects:
+            continue
+        body = node.get("body") or ""
+        missing = []
+        if not projects:
+            missing.append("project label")
+        if is_empty_section(section_body(body, "Goal")):
+            missing.append("Goal")
+        if is_empty_section(section_body(body, "Acceptance")):
+            missing.append("Acceptance")
+        if missing:
+            out.append({"number": node["number"], "title": node.get("title", ""),
+                        "missing": missing})
+    return out
+
+
 def compute_status(repo, project, nodes, now, *, claim_refs, commit_meta,
                    comment_reader, pr_merged, project_lister):
     """Pure-ish status computation, transport injected so it is unit-testable:
@@ -1573,6 +1606,12 @@ def compute_status(repo, project, nodes, now, *, claim_refs, commit_meta,
     meta, and reader callbacks, build the review/decision/in-flight/projects
     report. Returns the report dict, or None on any injected-transport failure
     (propagated as exit 20)."""
+    # Queue hygiene reads the UNFILTERED walk on purpose: the most valuable case
+    # it reports — a task carrying no project label at all — is precisely the one
+    # a project scope would hide, since the task belongs to no project.
+    hygiene = queue_hygiene(nodes, project)
+    stale_after = reap_max_hours() * 3600
+
     if project:
         pl = project
         nodes = [n for n in nodes if pl in project_names_of(n)]
@@ -1622,10 +1661,15 @@ def compute_status(repo, project, nodes, now, *, claim_refs, commit_meta,
                     anchor_epoch = parse_iso(anchor)
                     if anchor_epoch is not None:
                         age = max(0, int(now - anchor_epoch))
+            # Past the staleness threshold this claim is what the next drain's
+            # reconcile (§6) will reclaim. Nothing repairs it on a schedule any
+            # more, so the console has to say it out loud — otherwise a dead
+            # worker looks exactly like a slow one until someone claims.
             in_flight.append({"number": number, "title": title, "worker": worker,
                               "heartbeat_anchor": anchor,
                               "heartbeat_age_seconds": age,
-                              "heartbeat_msg": msg})
+                              "heartbeat_msg": msg,
+                              "stale": age is None or age >= stale_after})
 
     if project:
         projects = [project]
@@ -1643,6 +1687,7 @@ def compute_status(repo, project, nodes, now, *, claim_refs, commit_meta,
         "decision_queue": decision,
         "in_flight": in_flight,
         "orphans": [r["number"] for r in review if r["orphan"]],
+        "queue_hygiene": hygiene,
         "projects": projects,
     }
 
@@ -1689,9 +1734,23 @@ def render_status(report):
         age = format_age(item["heartbeat_age_seconds"])
         msg = item.get("heartbeat_msg")
         note = f" — {msg}" if msg else ""
+        # A silent claim reads exactly like a busy one, and nothing repairs it on
+        # a schedule now, so say which one it is.
+        flag = "  ⚠️  silent — the next drain reclaims it" if item.get("stale") else ""
         lines.append(f"     #{item['number']}  {item['title']}  · worker {worker} "
-                     f"· last heartbeat {age} ago{note}")
+                     f"· last heartbeat {age} ago{note}{flag}")
     lines.append("")
+
+    hygiene = report.get("queue_hygiene") or []
+    if hygiene:
+        lines.append(f"  🧹 Queue hygiene — {len(hygiene)} task(s) a worker "
+                     f"cannot start as filed")
+        for item in hygiene:
+            lines.append(f"     #{item['number']}  {item['title']}  "
+                         f"· missing: {', '.join(item['missing'])}")
+        lines.append("     A task with no project: label is invisible to every "
+                     "worker; one with no Goal or Acceptance stalls on arrival.")
+        lines.append("")
 
     orphans = report["orphans"]
     if orphans:
@@ -1829,10 +1888,6 @@ def verify_protocol(repo):
 INIT_ASSETS = (
     ("task-template.yml", ".github/ISSUE_TEMPLATE/task.yml",
      "chore: add kraken task template"),
-    ("cleanup-closed.yml", ".github/workflows/cleanup-closed.yml",
-     "chore: add kraken cleanup-closed workflow"),
-    ("validate-task.yml", ".github/workflows/validate-task.yml",
-     "chore: add kraken validate-task workflow"),
     ("kraken.py", ".github/kraken.py",
      "chore: add kraken transition program"),
 )
@@ -1847,6 +1902,8 @@ INIT_ASSETS = (
 OBSOLETE_ASSETS = (
     (".github/workflows/reclaim-stale.yml", b"for kraken. Installed by"),
     (".github/workflows/requeue-on-reply.yml", b"for kraken. Installed by"),
+    (".github/workflows/cleanup-closed.yml", b"for kraken. Installed by"),
+    (".github/workflows/validate-task.yml", b"for kraken. Installed by"),
 )
 
 # The canonical state-machine labels — (name, color, description). The labels UI
@@ -2588,8 +2645,9 @@ def build_parser():
 
     p = sub.add_parser(
         "validate",
-        help="validate-task.yml: flag a task missing its project label, Goal, "
-             "or Acceptance (debounced; informs only)",
+        help="flag a task missing its project label, Goal, or Acceptance by "
+             "commenting on it (debounced; informs only). `status` reports the "
+             "same three checks read-only, for the whole queue at once",
     )
     p.add_argument("repo")
     p.add_argument("issue")
@@ -2597,8 +2655,9 @@ def build_parser():
 
     p = sub.add_parser(
         "cleanup",
-        help="cleanup-closed.yml: strip every state/non-identity label off a "
-             "closed task, keeping only kraken-task and project:<name>",
+        help="strip every state/non-identity label off a closed task, keeping "
+             "only kraken-task and project:<name> (cosmetic; nothing decides on "
+             "a closed task's labels)",
     )
     p.add_argument("repo")
     p.add_argument("issue")

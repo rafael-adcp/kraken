@@ -9,6 +9,7 @@ Every case here therefore asserts on `list-startable` (what the queue says) and
 on `claim-next` (that a worker can actually take the task back), never on a label
 having been rewritten by something.
 """
+import json
 import unittest
 
 from harness import KrakenConformanceTest, KRAKEN
@@ -157,14 +158,17 @@ class RequeueByDerivationTests(KrakenConformanceTest):
         already made stops sitting in the operator's decision list."""
         self.mk_issue(14, "answered", "kraken-task", "project:app", "needs-decision")
         self.worker_comment(14)
-        r = self.kraken("status", "OWNER/tasks", "--project", "app")
-        self.assertIn("#14", r.out, "an unanswered escalation left the decision queue")
+        self.assertIn(14, self.decision_queue(),
+                      "an unanswered escalation left the decision queue")
 
         self.mk_comment(14, "option B, go")
-        r = self.kraken("status", "OWNER/tasks", "--project", "app")
-        self.assertEqual(r.rc, 0, "status exit: %s" % r.err)
-        self.assertNotIn("#14", r.out,
+        self.assertNotIn(14, self.decision_queue(),
                          "an answered task still sits in the decision queue")
+
+    def decision_queue(self):
+        r = self.kraken("status", "OWNER/tasks", "--project", "app", "--json")
+        self.assertEqual(r.rc, 0, "status exit: %s" % r.err)
+        return {i["number"] for i in json.loads(r.out)["decision_queue"]}
 
 
 if __name__ == "__main__":
