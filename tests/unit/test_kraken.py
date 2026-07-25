@@ -239,16 +239,6 @@ class RefCasTests(unittest.TestCase):
         kraken.graphql = lambda q: self.fail("graphql must not be called for []")
         self.assertEqual(kraken.resolve_commit_meta("o/t", []), {})
 
-    def test_resolve_issue_meta_batches_state_and_labels(self):
-        def fake_graphql(q):
-            self.assertIn("i7: issue(number: 7)", q)
-            return {"data": {"repository": {
-                "i7": {"state": "OPEN",
-                       "labels": {"nodes": [{"name": "in-progress"}]}}}}}
-        kraken.graphql = fake_graphql
-        self.assertEqual(kraken.resolve_issue_meta("o/tasks", [7]),
-                         {7: (True, ["in-progress"])})
-
     def test_claim_meta_of_decodes_worker_msg_and_anchor(self):
         cm = {"s1": {"committedDate": "2026-07-01T00:00:00Z",
                      "message": hb("w1", "building the thing")}}
@@ -429,16 +419,27 @@ class InitConstantsTests(unittest.TestCase):
                             f"asset {name} destination not under .github/")
             self.assertTrue(message, f"asset {name} has no commit message")
 
-    def test_the_six_documented_assets_are_installed(self):
+    def test_the_documented_assets_are_installed(self):
         dests = {dest for _, dest, _ in kraken.INIT_ASSETS}
         self.assertEqual(dests, {
             ".github/ISSUE_TEMPLATE/task.yml",
             ".github/kraken.py",
-            ".github/workflows/reclaim-stale.yml",
             ".github/workflows/cleanup-closed.yml",
             ".github/workflows/requeue-on-reply.yml",
             ".github/workflows/validate-task.yml",
         })
+
+    def test_retired_assets_are_pruned_not_installed(self):
+        """protocol/5 retired the scheduled reconciler: init must no longer
+        install it AND must delete the copy an earlier release left behind."""
+        dests = {dest for _, dest, _ in kraken.INIT_ASSETS}
+        pruned = {dest for dest, _ in kraken.OBSOLETE_ASSETS}
+        self.assertIn(".github/workflows/reclaim-stale.yml", pruned)
+        self.assertEqual(dests & pruned, set(),
+                         "an asset cannot be both installed and pruned")
+        for dest, sentinel in kraken.OBSOLETE_ASSETS:
+            self.assertTrue(dest.startswith(".github/"))
+            self.assertTrue(sentinel, f"{dest} has no authorship sentinel")
 
     def test_kraken_py_is_vendored_as_an_asset(self):
         dests = {dest for _, dest, _ in kraken.INIT_ASSETS}
@@ -456,8 +457,9 @@ class InitConstantsTests(unittest.TestCase):
             "repo": "acme/tasks", "repo_status": "created",
             "assets": [
                 {"path": ".github/ISSUE_TEMPLATE/task.yml", "status": "created"},
-                {"path": ".github/workflows/reclaim-stale.yml", "status": "unchanged"},
-                {"path": ".github/workflows/cleanup-closed.yml", "status": "drifted"},
+                {"path": ".github/workflows/cleanup-closed.yml", "status": "unchanged"},
+                {"path": ".github/workflows/requeue-on-reply.yml", "status": "drifted"},
+                {"path": ".github/workflows/reclaim-stale.yml", "status": "removed"},
             ],
             "labels": ["kraken-task", "project:app"],
             "project": "app",
@@ -466,9 +468,10 @@ class InitConstantsTests(unittest.TestCase):
         self.assertIn("init: repo acme/tasks (created)", out)
         self.assertIn("init: asset .github/ISSUE_TEMPLATE/task.yml (created)", out)
         self.assertIn("init: label project:app (upserted)", out)
+        self.assertIn("init: asset .github/workflows/reclaim-stale.yml (removed)", out)
         self.assertIn(
             "assets_created=1 assets_unchanged=1 assets_drifted=1 "
-            "assets_upgraded=0 labels=2", out)
+            "assets_upgraded=0 assets_removed=1 labels=2", out)
         # a drifted asset under a plain init is surfaced as an actionable hint
         self.assertIn("drifted", out)
         self.assertIn("init --upgrade", out)
@@ -549,11 +552,15 @@ class ClaimNextIterationTests(unittest.TestCase):
         self._orig_claim_once = kraken._claim_once
         self._orig_verify = kraken.verify_protocol
         self._orig_verify_project = kraken.verify_project
-        # The protocol handshake and the project preflight are exercised by their
-        # own tests; here they always pass so only the iteration logic is under
-        # test.
+        self._orig_read_queue = kraken.read_queue
+        self._orig_commit_meta = kraken.resolve_commit_meta
+        # The protocol handshake, the project preflight and the §6 reconcile are
+        # exercised by their own tests; here they always pass over an empty queue
+        # read, so only the iteration logic is under test.
         kraken.verify_protocol = lambda repo: (True, "")
         kraken.verify_project = lambda repo, project: (True, "")
+        kraken.read_queue = lambda repo: ([], {})
+        kraken.resolve_commit_meta = lambda repo, shas: {}
         self.attempted = []
 
     def tearDown(self):
@@ -561,9 +568,13 @@ class ClaimNextIterationTests(unittest.TestCase):
         kraken._claim_once = self._orig_claim_once
         kraken.verify_protocol = self._orig_verify
         kraken.verify_project = self._orig_verify_project
+        kraken.read_queue = self._orig_read_queue
+        kraken.resolve_commit_meta = self._orig_commit_meta
 
     def _run(self, rows, claim_results, json_mode=False):
-        kraken.classify_queue = lambda repo, project, include_body=False: rows
+        kraken.classify_queue = (
+            lambda repo, project, include_body=False, read=None: rows
+        )
 
         def fake_claim_once(repo, issue, worker):
             self.attempted.append(issue)
@@ -707,10 +718,14 @@ class ClaimNextProjectGateTests(unittest.TestCase):
         self._orig_verify_project = kraken.verify_project
         self._orig_verify = kraken.verify_protocol
         self._orig_classify = kraken.classify_queue
+        self._orig_read_queue = kraken.read_queue
+        self._orig_commit_meta = kraken.resolve_commit_meta
         kraken.verify_protocol = lambda repo: (True, "")
+        kraken.read_queue = lambda repo: ([], {})
+        kraken.resolve_commit_meta = lambda repo, shas: {}
         self.classified = []
 
-        def spy_classify(repo, project, include_body=False):
+        def spy_classify(repo, project, include_body=False, read=None):
             self.classified.append(project)
             return []
         kraken.classify_queue = spy_classify
@@ -719,6 +734,8 @@ class ClaimNextProjectGateTests(unittest.TestCase):
         kraken.verify_project = self._orig_verify_project
         kraken.verify_protocol = self._orig_verify
         kraken.classify_queue = self._orig_classify
+        kraken.read_queue = self._orig_read_queue
+        kraken.resolve_commit_meta = self._orig_commit_meta
 
     def _run(self, verdict):
         kraken.verify_project = lambda repo, project: verdict
@@ -1040,88 +1057,149 @@ class StatusComputeTests(unittest.TestCase):
         self.assertIsNone(report)
 
 
-class ReconcilerClassificationTests(unittest.TestCase):
-    """cmd_reap's four reconciler rules, isolated from transport: the claim refs,
-    their commit meta, the per-issue meta, and the in-progress list are all
-    injected via mocked helpers, so only the rule dispatch — reclaim / orphan
-    lock / heal / requeue — is under test. Every write is recorded, none real."""
+def _task_node(number, labels):
+    """A minimal open-task node the way fetch_open_tasks returns it — the only
+    issue input reconcile_plan reads."""
+    return {"number": number, "title": "t%d" % number, "createdAt": "2026-01-01",
+            "body": "", "labels": {"nodes": [{"name": l} for l in labels]}}
+
+
+def _at(hours_ago):
+    dt = (kraken.datetime.datetime.now(kraken.datetime.timezone.utc)
+          - kraken.datetime.timedelta(hours=hours_ago))
+    return {"committedDate": dt.strftime("%Y-%m-%dT%H:%M:%SZ"), "message": clm("w")}
+
+
+class ReconcilerPlanTests(unittest.TestCase):
+    """reconcile_plan's four rules as a PURE decision (PROTOCOL.md §6) — no
+    transport at all, because the whole point of protocol/5 is that the rules run
+    off the queue read a reader already has. `nodes` carries only OPEN kraken-task
+    issues, which is what makes rule 1 free: a ref whose issue is absent from that
+    walk is a lock over a closed (or no-longer-task) issue."""
+
+    def _plan(self, nodes, refs, commit_meta, max_hours=6):
+        return kraken.reconcile_plan(nodes, refs, commit_meta,
+                                     kraken.time.time(), max_hours)
+
+    def _rules(self, plan):
+        return sorted((a["rule"], a["issue"]) for a in plan)
+
+    def test_rule1_orphan_lock_on_held_or_absent_issue(self):
+        # #4 escalated but its ref lingered; #6 is closed, so it is not in nodes.
+        nodes = [_task_node(4, ["kraken-task", "needs-decision"])]
+        plan = self._plan(nodes, {4: "s4", 6: "s6"},
+                          {"s4": _at(0), "s6": _at(0)})
+        self.assertEqual(self._rules(plan),
+                         [("orphan-lock", 4), ("orphan-lock", 6)])
+
+    def test_rule2_stale_claim(self):
+        nodes = [_task_node(1, ["kraken-task", "in-progress"])]
+        plan = self._plan(nodes, {1: "s1"}, {"s1": _at(8)})
+        self.assertEqual(self._rules(plan), [("reclaim", 1)])
+        self.assertTrue(plan[0]["held"], "the in-progress label must be swapped off")
+        self.assertIn("8h", plan[0]["reason"])
+
+    def test_unreadable_commit_is_infinitely_stale(self):
+        nodes = [_task_node(1, ["kraken-task", "in-progress"])]
+        plan = self._plan(nodes, {1: "s1"}, {})  # no commit meta for the sha
+        self.assertEqual(self._rules(plan), [("reclaim", 1)])
+        self.assertIn("no readable heartbeat", plan[0]["reason"])
+
+    def test_boundary_exactly_at_max_hours_is_stale(self):
+        nodes = [_task_node(1, ["kraken-task", "in-progress"])]
+        self.assertEqual(self._rules(self._plan(nodes, {1: "s1"}, {"s1": _at(6)})),
+                         [("reclaim", 1)])
+        self.assertEqual(self._plan(nodes, {1: "s1"}, {"s1": _at(5)}), [])
+
+    def test_rule3_heal_missing_label(self):
+        nodes = [_task_node(5, ["kraken-task"])]
+        plan = self._plan(nodes, {5: "s5"}, {"s5": _at(0)})
+        self.assertEqual(self._rules(plan), [("heal", 5)])
+
+    def test_rule4_requeue_orphan_projection(self):
+        plan = self._plan([_task_node(3, ["kraken-task", "in-progress"])], {}, {})
+        self.assertEqual(self._rules(plan), [("requeue", 3)])
+
+    def test_agreeing_state_plans_nothing(self):
+        nodes = [_task_node(2, ["kraken-task", "in-progress"]),
+                 _task_node(9, ["kraken-task"]),
+                 _task_node(10, ["kraken-task", "awaiting-merge"])]
+        self.assertEqual(self._plan(nodes, {2: "s2"}, {"s2": _at(0)}), [],
+                         "a queue that already agrees must cost zero writes")
+
+
+class ReconcilerApplyTests(unittest.TestCase):
+    """apply_reconcile's write ordering and project_reconcile's in-memory fold.
+    Every write is recorded, none real."""
 
     def setUp(self):
-        self._saved = {name: getattr(kraken, name) for name in (
-            "claim_ref_list", "resolve_commit_meta", "resolve_issue_meta",
-            "open_issue_numbers", "claim_ref_delete", "swap_labels", "post_comment")}
-        self.deleted = []
-        self.swaps = []
-        self.comments = []
-        kraken.claim_ref_delete = lambda repo, n: (self.deleted.append(n) or True)
+        self._saved = {n: getattr(kraken, n) for n in
+                       ("claim_ref_delete", "swap_labels", "post_comment")}
+        self.writes = []
+        kraken.claim_ref_delete = lambda repo, n: (
+            self.writes.append(("del-ref", n)) or True)
         kraken.swap_labels = lambda repo, n, remove=None, add=None: (
-            self.swaps.append((n, remove, add)) or True)
-        kraken.post_comment = lambda repo, n, body: (self.comments.append(n) or True)
+            self.writes.append(("labels", n, remove, add)) or True)
+        kraken.post_comment = lambda repo, n, body: (
+            self.writes.append(("comment", n, body)) or True)
 
     def tearDown(self):
         for name, fn in self._saved.items():
             setattr(kraken, name, fn)
 
-    def _reap(self, refs, commit_meta, issue_meta, in_progress, max_hours=6):
-        kraken.claim_ref_list = lambda repo: refs
-        kraken.resolve_commit_meta = lambda repo, shas: commit_meta
-        kraken.resolve_issue_meta = lambda repo, nums: issue_meta
-        kraken.open_issue_numbers = lambda repo, label: in_progress
-        args = SimpleNamespace(repo="o/tasks", max_hours=max_hours)
+    def _apply(self, plan):
         buf = StringIO()
         with redirect_stdout(buf):
-            rc = kraken.cmd_reap(args)
-        return rc, buf.getvalue()
+            counts = kraken.apply_reconcile("o/tasks", plan, "w-reaper")
+        return counts, buf.getvalue()
 
-    def _fresh(self):
-        return {"committedDate": kraken.datetime.datetime.now(
-            kraken.datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "message": clm("w")}
+    def test_reclaim_deletes_the_ref_last(self):
+        counts, _ = self._apply([{"rule": "reclaim", "issue": 1,
+                                  "reason": "no worker heartbeat for 8h",
+                                  "held": True}])
+        self.assertEqual(counts["reclaim"], 1)
+        kinds = [w[0] for w in self.writes]
+        self.assertEqual(kinds, ["labels", "comment", "del-ref"],
+                         "§5 ordering: writes first, ref delete last")
+        self.assertIn(("labels", 1, "in-progress", "needs-decision"), self.writes)
 
-    def _old(self, hours):
-        dt = kraken.datetime.datetime.now(kraken.datetime.timezone.utc) - \
-            kraken.datetime.timedelta(hours=hours)
-        return {"committedDate": dt.strftime("%Y-%m-%dT%H:%M:%SZ"), "message": clm("w")}
+    def test_reclaim_comment_carries_the_worker_disclaimer(self):
+        self._apply([{"rule": "reclaim", "issue": 1, "reason": "silent",
+                      "held": True}])
+        body = [w for w in self.writes if w[0] == "comment"][0][2]
+        self.assertTrue(body.startswith(kraken.disclaimer("w-reaper")),
+                        "a worker posts the reclaim now, so §4 attribution applies")
+        self.assertIn('"type":"stale-claim"', body)
 
-    def test_rule1_orphan_lock_on_held_or_closed(self):
-        # ref on a needs-decision issue, and a ref on a closed issue: both deleted.
-        refs = {4: "s4", 6: "s6"}
-        rc, out = self._reap(
-            refs, {"s4": self._fresh(), "s6": self._fresh()},
-            {4: (True, ["needs-decision"]), 6: (False, [])}, [])
-        self.assertEqual(rc, kraken.EXIT_OK)
-        self.assertEqual(sorted(self.deleted), [4, 6])
-        self.assertEqual(self.swaps, [], "orphan-lock must not touch labels")
-        self.assertEqual(self.comments, [], "orphan-lock must not comment")
+    def test_orphan_lock_touches_nothing_but_the_ref(self):
+        self._apply([{"rule": "orphan-lock", "issue": 4, "reason": "x"}])
+        self.assertEqual(self.writes, [("del-ref", 4)])
 
-    def test_rule2_stale_claim_reclaims_and_deletes(self):
-        refs = {1: "s1"}
-        rc, out = self._reap(refs, {"s1": self._old(8)},
-                             {1: (True, ["in-progress"])}, [1])
-        self.assertIn((1, "in-progress", "needs-decision"), self.swaps)
-        self.assertIn(1, self.comments)
-        self.assertIn(1, self.deleted, "stale claim's ref must be deleted last")
+    def test_transport_failure_answers_none(self):
+        kraken.swap_labels = lambda repo, n, remove=None, add=None: False
+        buf, err = StringIO(), StringIO()
+        with redirect_stdout(buf), redirect_stderr(err):
+            counts = kraken.apply_reconcile(
+                "o/tasks", [{"rule": "heal", "issue": 5, "reason": "x"}], "w")
+        self.assertIsNone(counts)
+        self.assertIn("gh-failure stage=heal issue=5", err.getvalue())
 
-    def test_rule3_heal_missing_label(self):
-        refs = {5: "s5"}
-        rc, out = self._reap(refs, {"s5": self._fresh()},
-                             {5: (True, [])}, [])
-        self.assertIn((5, None, "in-progress"), self.swaps)
-        self.assertNotIn(5, self.deleted, "a live claim's ref must survive the heal")
-
-    def test_rule4_requeue_orphan_projection(self):
-        # in-progress label #3 with NO ref -> requeue (label removed + note).
-        rc, out = self._reap({}, {}, {}, [3])
-        self.assertIn((3, "in-progress", None), self.swaps)
-        self.assertIn(3, self.comments)
-
-    def test_fresh_claim_with_label_is_left_alone(self):
-        refs = {2: "s2"}
-        rc, out = self._reap(refs, {"s2": self._fresh()},
-                             {2: (True, ["in-progress"])}, [2])
-        self.assertEqual(self.deleted, [])
-        self.assertEqual(self.swaps, [])
-        self.assertEqual(self.comments, [])
+    def test_project_reconcile_folds_the_plan_into_the_read(self):
+        # The drain must see the state it just repaired without re-fetching it.
+        nodes = [_task_node(1, ["kraken-task", "in-progress"]),
+                 _task_node(3, ["kraken-task", "in-progress"]),
+                 _task_node(5, ["kraken-task"])]
+        refs = {1: "s1", 5: "s5", 6: "s6"}
+        plan = [{"rule": "reclaim", "issue": 1, "reason": "x", "held": True},
+                {"rule": "requeue", "issue": 3, "reason": "x"},
+                {"rule": "heal", "issue": 5, "reason": "x"},
+                {"rule": "orphan-lock", "issue": 6, "reason": "x"}]
+        kraken.project_reconcile(plan, nodes, refs)
+        self.assertEqual(refs, {5: "s5"}, "reclaimed/orphan refs must be dropped")
+        labels = {n["number"]: set(kraken.label_names_of(n)) for n in nodes}
+        self.assertEqual(labels[1], {"kraken-task", "needs-decision"})
+        self.assertEqual(labels[3], {"kraken-task"})
+        self.assertEqual(labels[5], {"kraken-task", "in-progress"})
 
 
 class WakeRetryDueTests(unittest.TestCase):

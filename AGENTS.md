@@ -12,7 +12,7 @@ harness-specific deltas.
 
 ## Your operating contract — read these, then follow them
 
-1. [`PROTOCOL.md`](PROTOCOL.md) — the normative wire contract (`kraken-protocol/4`): the
+1. [`PROTOCOL.md`](PROTOCOL.md) — the normative wire contract (`kraken-protocol/5`): the
    label state machine, the hidden `<!-- kraken {...} -->` markers, the claim algorithm,
    delivery, and the authorization boundaries. This is agent-agnostic already.
 2. [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md) — how a worker *executes* that

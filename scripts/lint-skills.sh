@@ -17,7 +17,6 @@ README="README.md"
 PROTOCOL="PROTOCOL.md"
 PLUGIN=".claude-plugin/plugin.json"
 TEMPLATE="skills/unleash/task-template.yml"
-REAPER="skills/unleash/reclaim-stale.yml"
 REQUEUE="skills/unleash/requeue-on-reply.yml"
 VALIDATE="skills/unleash/validate-task.yml"
 # Every label / machine-line / disclaimer emitter lives in kraken.py, so all the
@@ -56,7 +55,7 @@ check_label "awaiting-merge" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$
 check_label "priority:high"  "$INIT" "$README" "$PROTOCOL" "$LISTER"
 # common typo class: labels use hyphens, never underscores
 for bad in kraken_task in_progress needs_decision awaiting_merge; do
-  grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$TEMPLATE" "$REAPER" "$WATCHER" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER" "$HEARTBEAT" 2>/dev/null \
+  grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$TEMPLATE" "$WATCHER" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER" "$HEARTBEAT" 2>/dev/null \
     && err "underscore variant '$bad' found (labels use hyphens)"
 done
 [ "$fail" -eq 0 ] && note "4 canonical labels + priority:high aligned across files"
@@ -194,7 +193,7 @@ if command -v python3 >/dev/null 2>&1; then
   done
 fi
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
-  for y in "$TEMPLATE" "$REAPER" "$REQUEUE" "$VALIDATE" .github/workflows/*.yml; do
+  for y in "$TEMPLATE" "$REQUEUE" "$VALIDATE" .github/workflows/*.yml; do
     [ -f "$y" ] || continue
     python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$y" 2>/dev/null \
       || err "invalid YAML: $y"

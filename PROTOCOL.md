@@ -1,6 +1,6 @@
 # The Kraken Coordination Protocol
 
-**Version: `kraken-protocol/4`**
+**Version: `kraken-protocol/5`**
 
 This document is the normative specification of the coordination contract
 between a task queue built on GitHub Issues and the workers that drain it. It
@@ -18,11 +18,28 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY**
 are to be interpreted as described in RFC 2119.
 
 **Versioning.** Backward-incompatible changes to this contract bump the
-integer (`kraken-protocol/4` and onward); clarifications and strictly additive
+integer (`kraken-protocol/5` and onward); clarifications and strictly additive
 rules amend this document in place by PR. An implementation states the protocol
 version it targets (this plugin: in `.claude-plugin/plugin.json`), and the
 `Kraken-Task:` commit trailer's `kraken@<version>` maps any delivered commit
 back to a protocol revision via the release notes.
+
+**What changed in `kraken-protocol/5`.** Reconciliation became an obligation of
+the **reader**, not of the coordination repo. Through protocol/4 the reconciler
+(§6) was a scheduled job the coordination repo ran on a cron, which made "the
+queue repo executes code" a load-bearing assumption: it required CI to be
+enabled on a private repo, it bounded recovery by the scheduling interval, and
+it forced a copy of the transition program to be vendored into the queue repo
+for that job to execute. protocol/5 observes that a stale claim obstructs
+exactly one party — the next worker that wants to claim — and that no other
+observer of it exists. So the reconcile moves into the queue read that worker
+already performs: same four rules, same ref-anchored clock, same ordering,
+performed by whoever reads the queue rather than by a scheduler, and at
+read time rather than up to an interval later. This is a backward-incompatible
+change — a protocol/4 worker assumes the repo repairs itself and performs no
+reconcile of its own, so pointing one at a protocol/5 queue leaves stale claims
+unreclaimed — hence the integer bump. Retired: the requirement that a
+coordination repo run a scheduled reconciler.
 
 **What changed in `kraken-protocol/4`.** Claiming became a true **compare-and-swap
 on a git ref**. Through protocol/3 the claim was arbitrated *after the fact*:
@@ -66,7 +83,7 @@ machine-parsed.
 | --- | --- |
 | **Operator** | The human who owns the queue: files tasks, answers decisions, merges PRs. |
 | **Worker** | A named agent session draining the queue, one task at a time, inside one prepared environment. |
-| **Coordination repo** | A GitHub repository whose **Issues are the queue**. It also holds the state-machine labels, the claim refs (§5), the reaper and cleanup workflows, and the dependency graph. It MUST be private and MUST NOT hold work code. |
+| **Coordination repo** | A GitHub repository whose **Issues are the queue**. It also holds the state-machine labels, the claim refs (§5), and the dependency graph. It MUST be private, MUST NOT hold work code, and — as of protocol/5 — needs to run no scheduled job of its own (§6). |
 | **Work repo** | Where the code lives and deliveries land. MAY be anywhere (GitHub, GitLab, private server). |
 | **Task** | An open coordination-repo issue labeled `kraken-task`. |
 
@@ -317,17 +334,25 @@ success (the delete is idempotent).
   executing: force-update the claim ref to a fresh commit (a `heartbeat` marker,
   optionally carrying a `msg` progress field). This restarts the liveness clock;
   it posts no comment, so a long task does not flood the timeline.
-- The coordination repo runs the **reconciler**
-  ([`skills/unleash/reclaim-stale.yml`](skills/unleash/reclaim-stale.yml)): it
-  reads every claim ref and reconciles the refs (the lock) with the
-  `in-progress` labels (the projection). Staleness is anchored to the **claim
-  ref's commit date** — **not** the issue's `updatedAt`, and nothing on the
-  issue timeline resets it, so a human commenting on a dead worker's issue
-  shortens time-to-triage rather than extending the claim by another
-  `MAX_HOURS`. The reconciler applies, per claim ref and per stray label:
-  1. **Orphan lock** — a ref on a closed issue, or on one already labeled
-     `needs-decision`/`awaiting-merge` (a terminal transition whose ref delete
-     was lost): delete the ref, touch nothing else.
+- **The reader reconciles.** A worker **MUST** reconcile the claim refs (the
+  lock) with the `in-progress` labels (the projection) before it claims, over
+  the queue read it is performing anyway. Reconciliation is *not* delegated to
+  the coordination repo: a stale claim obstructs exactly one party — the next
+  worker that wants to claim — and no other observer of it exists, so the party
+  that cares is the party that repairs. A conforming coordination repo therefore
+  runs **no** scheduled job, and a conforming worker **MUST NOT** assume one
+  exists. An operator MAY additionally run the same pass by hand at any time
+  (the reference implementation exposes it as `kraken.py reap`); doing so is an
+  ergonomic, never a precondition.
+
+  Staleness is anchored to the **claim ref's commit date** — **not** the issue's
+  `updatedAt`, and nothing on the issue timeline resets it, so a human
+  commenting on a dead worker's issue shortens time-to-triage rather than
+  extending the claim by another `MAX_HOURS`. The reconcile applies, per claim
+  ref and per stray label:
+  1. **Orphan lock** — a ref on an issue that is no longer an open task, or on
+     one already labeled `needs-decision`/`awaiting-merge` (a terminal
+     transition whose ref delete was lost): delete the ref, touch nothing else.
   2. **Stale claim** — a ref older than **6 hours** (`MAX_HOURS`, configurable),
      or whose commit cannot be read (nothing proves the worker alive): move the
      task to `needs-decision` with a `stale-claim` comment, then delete the ref.
@@ -336,6 +361,13 @@ success (the delete is idempotent).
   4. **Orphan projection** — an open `in-progress` issue with **no** ref (a
      crashed release, or a claim made before protocol/4): remove the label so
      the task requeues, leaving a `stale-claim` comment saying why.
+
+  The rules are ordered by the same rule §5 gives every transition — writes
+  first, **ref delete last** — so a reconcile interrupted part-way leaves the
+  task held rather than observably free, and the next reader's rule 1 finishes
+  it. Every rule is idempotent, so two workers reconciling concurrently converge
+  rather than fight. The reconciler's comments are posted by a worker and
+  therefore carry the §4 attribution disclaimer like any other worker comment.
 - The coordination repo also runs the **requeue-on-reply** workflow
   ([`skills/unleash/requeue-on-reply.yml`](skills/unleash/requeue-on-reply.yml)):
   on a new comment, it removes the holding label so the task requeues — so the

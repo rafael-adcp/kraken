@@ -19,7 +19,6 @@ from harness import KrakenConformanceTest, SCRIPTS
 ASSETS = [
     ("task-template.yml", ".github/ISSUE_TEMPLATE/task.yml"),
     ("kraken.py", ".github/kraken.py"),
-    ("reclaim-stale.yml", ".github/workflows/reclaim-stale.yml"),
     ("cleanup-closed.yml", ".github/workflows/cleanup-closed.yml"),
     ("requeue-on-reply.yml", ".github/workflows/requeue-on-reply.yml"),
     ("validate-task.yml", ".github/workflows/validate-task.yml"),
@@ -28,9 +27,9 @@ DST = dict(ASSETS)
 BUNDLED = {name: os.path.join(SCRIPTS, name) for name, _ in ASSETS}
 
 # Two assets are seeded drifted; the rest are seeded byte-identical to bundled.
-DRIFTED = ("kraken.py", "reclaim-stale.yml")
+DRIFTED = ("kraken.py", "validate-task.yml")
 IN_SYNC = ("task-template.yml", "cleanup-closed.yml",
-           "requeue-on-reply.yml", "validate-task.yml")
+           "requeue-on-reply.yml")
 
 
 class InitUpgradeTests(KrakenConformanceTest):
@@ -53,7 +52,7 @@ class InitUpgradeTests(KrakenConformanceTest):
 
     def _seed_drift(self):
         """Seed an existing coordination repo mid-drift:
-          - kraken.py + reclaim-stale.yml = bundled bytes + a marker -> DRIFTED
+          - kraken.py + validate-task.yml = bundled bytes + a marker -> DRIFTED
           - the remaining four            = the current bundled bytes -> UNCHANGED
         so a run touches only the two drifted files and nothing is `absent`."""
         self.mk_repo("OWNER/tasks")
@@ -99,9 +98,9 @@ class InitUpgradeTests(KrakenConformanceTest):
         self._seed_drift()
         self.truncate_log()
         r = self.kraken("init", "OWNER/tasks", "--upgrade",
-                        fail=r"PUT \S*contents/\.github/workflows/reclaim-stale\.yml")
+                        fail=r"PUT \S*contents/\.github/workflows/validate-task\.yml")
         self.assertEqual(r.rc, 20, "a failed asset write must exit 20 (transport)")
-        self.assertIn("stage=asset path=.github/workflows/reclaim-stale.yml", r.err,
+        self.assertIn("stage=asset path=.github/workflows/validate-task.yml", r.err,
                       "the failed asset was not named")
 
         # The sentinel was never reached: still the drifted bytes, no PUT to it.

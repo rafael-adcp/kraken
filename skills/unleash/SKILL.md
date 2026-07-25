@@ -13,7 +13,7 @@ dependency graph come for free.
 
 The coordination contract itself — task shape, label state machine, the machine marker,
 claim algorithm, authorization boundaries — is normatively specified in
-[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/4`). This file is how a Claude
+[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/5`). This file is how a Claude
 Code worker executes that contract (subagent-per-task, Monitor watcher, the bundled
 scripts); if the two ever disagree, the spec wins.
 

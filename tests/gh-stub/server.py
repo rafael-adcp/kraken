@@ -460,7 +460,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method):
         from urllib.parse import urlparse, parse_qs, unquote
-        body = self._body() if method in ("POST", "PATCH", "PUT") else {}
+        # DELETE carries a body on the contents API (the required blob sha), so
+        # it is read like the write methods rather than assumed empty.
+        body = self._body() if method in ("POST", "PATCH", "PUT", "DELETE") else {}
         if self._log_and_maybe_fail(method, self.path, body):
             return
         parsed = urlparse(self.path)
@@ -683,6 +685,22 @@ class Handler(BaseHTTPRequestHandler):
                 with open(cfile, "wb") as f:
                     f.write(raw)
             self._send(200, {"content": {"path": path, "sha": _blob_sha(raw)}})
+            return
+        if method == "DELETE":
+            cfile = s.path("contents", path)
+            with self.knobs.lock:
+                if not os.path.isfile(cfile):
+                    self._send(404, {"message": "Not Found"})
+                    return
+                with open(cfile, "rb") as f:
+                    cur_sha = _blob_sha(f.read())
+                # GitHub requires the current blob sha on a delete, exactly as on
+                # an update — a mismatch means someone else moved the file.
+                if body.get("sha") != cur_sha:
+                    self._send(409, {"message": "sha mismatch on delete"})
+                    return
+                os.remove(cfile)
+            self._send(200, {"content": None, "commit": {}})
             return
         self._send(404, {"message": "unrouted contents"})
 

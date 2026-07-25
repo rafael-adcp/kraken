@@ -13,7 +13,7 @@ and quoting hazards they had to defend against by hand. Moving to Python kills
 that whole class of bug and lets pagination (the queue listing, the comment
 history the coordination workflows read) be handled once, correctly.
 
-Claiming (kraken-protocol/4) is a true compare-and-swap: creating the claim
+Claiming (kraken-protocol/5) is a true compare-and-swap: creating the claim
 ref `refs/kraken/claims/<issue>` succeeds for exactly one caller — GitHub
 answers HTTP 422 to everyone else — so the ref IS the arbiter, and its commit's
 server-stamped date IS the liveness clock. The retired protocol/3 comment
@@ -86,8 +86,10 @@ HELD_LABELS = ("in-progress", "needs-decision", "awaiting-merge")
 PRIORITY_LABEL = "priority:high"
 
 # The wire contract this program speaks (PROTOCOL.md): protocol/4 arbitrates the
-# claim on a git-ref CAS and anchors liveness to the claim ref's commit date.
-PROTOCOL_VERSION = 4
+# claim on a git-ref CAS and anchors liveness to the claim ref's commit date;
+# protocol/5 moves the reconcile of that clock onto the READER (§6), so a
+# conforming coordination repo runs no scheduled job of its own.
+PROTOCOL_VERSION = 5
 
 # Installed plugin version, single-sourced from the manifest the release workflow
 # bumps; read at runtime for the Kraken-Task trailer, never a second literal.
@@ -663,25 +665,6 @@ def issue_body(repo, issue):
     return obj.get("body") or ""
 
 
-def open_issue_numbers(repo, label):
-    """Every OPEN issue number carrying `label`, as a list of ints (empty when
-    none), or None on transport failure. The reaper's few in-progress issues.
-    The REST issues listing includes pull requests; they are skipped."""
-    items = http_paginated(
-        f"/repos/{repo}/issues?labels={quote_path(label)}&state=open"
-    )
-    if items is None:
-        return None
-    nums = []
-    for item in items:
-        if not isinstance(item, dict) or "pull_request" in item:
-            continue
-        number = item.get("number")
-        if isinstance(number, int):
-            nums.append(number)
-    return nums
-
-
 # --- subcommand: list-startable ---------------------------------------------
 #
 # Queue fetch and blocked-by check are batched through GraphQL, so an idle poll
@@ -735,7 +718,21 @@ def resolve_depends_on(repo, targets):
     }
 
 
-def classify_queue(repo, project, include_body=False):
+def read_queue(repo):
+    """One queue read: every open kraken-task node (repo-wide, BEFORE any project
+    filter) plus every live claim ref. The single fetch both the reconciler (§6)
+    and the startable classification consume, so a drain that does both pays for
+    it once. Returns (nodes, claim_refs), or None on transport failure."""
+    nodes = fetch_open_tasks(repo)
+    if nodes is None:
+        return None
+    claim_refs = claim_ref_list(repo)
+    if claim_refs is None:
+        return None
+    return (nodes, claim_refs)
+
+
+def classify_queue(repo, project, include_body=False, read=None):
     """The shared startable/held classification list-startable and watch's
     snapshot both read — one code path so the filter can't drift between them.
     Returns a list of (number, title, createdAt, "startable"|"held") ordered
@@ -745,16 +742,19 @@ def classify_queue(repo, project, include_body=False):
     gains a fifth element, the issue body, so claim-next can brief a subagent
     from the win without a second fetch (the GraphQL walk already has it).
 
+    `read` accepts an already-fetched (nodes, claim_refs) pair from read_queue,
+    which is how claim-next classifies the state its reconcile pass just
+    produced without re-fetching it.
+
     Held means: a held label (the projection) OR a live claim ref (the lock).
     Reading both keeps the filter honest across the crash window between a won
     CAS and its label projection — a ref-held task is never offered as
     startable just because the label has not landed yet."""
-    nodes = fetch_open_tasks(repo)
-    if nodes is None:
-        return None
-    claim_refs = claim_ref_list(repo)
-    if claim_refs is None:
-        return None
+    if read is None:
+        read = read_queue(repo)
+        if read is None:
+            return None
+    nodes, claim_refs = read
     project_label = f"project:{project}"
     nodes = [
         n for n in nodes
@@ -916,11 +916,12 @@ def verify_project(repo, project):
 
 
 def cmd_claim_next(args):
-    """Collapse the deterministic claim loop into one invocation: list startable
-    candidates oldest-first, then guard + CAS each in turn, stopping at the first
-    win. Losses (10/11) move to the next candidate; a transport fault (20) stops
-    with state-unknown; an exhausted queue is EXIT_NONE. Never retries a lost CAS
-    on the same issue (PROTOCOL.md §5) — it iterates forward, never back."""
+    """Collapse the deterministic claim loop into one invocation: read the queue,
+    reconcile it (§6), then list startable candidates oldest-first and guard + CAS
+    each in turn, stopping at the first win. Losses (10/11) move to the next
+    candidate; a transport fault (20) stops with state-unknown; an exhausted queue
+    is EXIT_NONE. Never retries a lost CAS on the same issue (PROTOCOL.md §5) — it
+    iterates forward, never back."""
     repo, project, worker = args.repo, args.project, args.worker
 
     refused = refuse_second_claim(worker)
@@ -948,7 +949,34 @@ def cmd_claim_next(args):
         print(message)
         return EXIT_UNKNOWN_PROJECT
 
-    rows = classify_queue(repo, project, include_body=True)
+    read = read_queue(repo)
+    if read is None:
+        print("claim-next: gh-failure stage=list")
+        return EXIT_TRANSPORT
+    nodes, claim_refs = read
+
+    # Reconcile before classifying (PROTOCOL.md §6). A dead worker's claim
+    # obstructs exactly one party — the next worker who wants to claim — and that
+    # is this one, so the repair belongs here rather than in an hourly cron. The
+    # refs are already in hand; only their commit dates are not, so the whole
+    # reconcile costs ONE batched read, O(1) in the number of claims, and NOTHING
+    # at all when no claim is live. The pass is repo-wide (not project-scoped)
+    # because a lock is repo-wide, exactly like the cron it replaces.
+    commit_meta = resolve_commit_meta(repo, list(claim_refs.values()))
+    if commit_meta is None:
+        print("claim-next: gh-failure stage=commits")
+        return EXIT_TRANSPORT
+    plan = reconcile_plan(nodes, claim_refs, commit_meta, time.time(),
+                          reap_max_hours())
+    if plan:
+        if apply_reconcile(repo, plan, worker) is None:
+            # Writes of ours may have half-landed — same state-unknown rule as a
+            # failed claim: re-check before retrying, never push on.
+            print("claim-next: gh-failure stage=reconcile — state unknown, re-check")
+            return EXIT_TRANSPORT
+        project_reconcile(plan, nodes, claim_refs)
+
+    rows = classify_queue(repo, project, include_body=True, read=read)
     if rows is None:
         print("claim-next: gh-failure stage=list")
         return EXIT_TRANSPORT
@@ -1572,10 +1600,10 @@ def cmd_status(args):
 # (under `.github/…`), so drift is simply "the vendored copy no longer matches the
 # copy this plugin ships". There is no manifest of past release hashes to keep in
 # sync — the *current* bundled bytes ARE the reference, compared live, so nothing
-# can fall out of date. This covers ALL SIX assets, not just kraken.py:
-# reclaim-stale.yml and cleanup-closed.yml flipped `permissions: contents: read`
-# -> `write` between protocol/3 and protocol/4, so a stale workflow is as
-# dangerous as a stale parser.
+# can fall out of date. This covers EVERY installed asset, not just kraken.py:
+# cleanup-closed.yml flipped `permissions: contents: read` -> `write` between
+# protocol/3 and protocol/4, so a stale workflow is as dangerous as a stale
+# parser.
 
 
 def bundled_asset(name):
@@ -1645,8 +1673,6 @@ def verify_protocol(repo):
 INIT_ASSETS = (
     ("task-template.yml", ".github/ISSUE_TEMPLATE/task.yml",
      "chore: add kraken task template"),
-    ("reclaim-stale.yml", ".github/workflows/reclaim-stale.yml",
-     "chore: add kraken reaper workflow"),
     ("cleanup-closed.yml", ".github/workflows/cleanup-closed.yml",
      "chore: add kraken cleanup-closed workflow"),
     ("requeue-on-reply.yml", ".github/workflows/requeue-on-reply.yml",
@@ -1655,6 +1681,17 @@ INIT_ASSETS = (
      "chore: add kraken validate-task workflow"),
     ("kraken.py", ".github/kraken.py",
      "chore: add kraken transition program"),
+)
+
+# Assets an earlier kraken release installed and this protocol revision retired.
+# `init` DELETES each one it finds: a cron left running against retired semantics
+# keeps mutating labels behind every worker's back, which is strictly worse than
+# a missing file. The second element is a sentinel that must appear in the file's
+# bytes for the delete to happen — proof the file is kraken's own install and not
+# something the operator wrote at the same path, so a hand-written workflow is
+# never destroyed by a bootstrap command.
+OBSOLETE_ASSETS = (
+    (".github/workflows/reclaim-stale.yml", b"for kraken. Installed by"),
 )
 
 # The canonical state-machine labels — (name, color, description). The labels UI
@@ -1732,6 +1769,16 @@ def gh_put_content(repo, path, data, message, sha=None):
     return 200 <= status < 300
 
 
+def gh_delete_content(repo, path, sha, message):
+    """Delete `path` on the repo via the contents API. The current blob `sha` is
+    required (same as an update) — GitHub rejects a delete without it, which is
+    what keeps the prune from racing a concurrent edit. True on success."""
+    status, _ = http_request(
+        "DELETE", f"/repos/{repo}/contents/{path}", {"message": message, "sha": sha}
+    )
+    return 200 <= status < 300
+
+
 def gh_label_upsert(repo, name, color, description):
     """Upsert a label with its canonical color/description — a create on a fresh
     repo (POST /labels), an in-place re-canonicalize on a re-run (PATCH the
@@ -1749,11 +1796,14 @@ def gh_label_upsert(repo, name, color, description):
 
 def cmd_init(args):
     """Stand up (or repair) a coordination repo: verify-or-create it private,
-    install the bundled assets, and upsert the canonical labels. Plain init is
-    create-only and never overwrites an existing asset — it merely REPORTS one as
-    `unchanged` or `drifted` (differs from the bundled copy). `--upgrade`
-    additionally re-syncs every `drifted` asset to the bundled copy. Idempotent;
-    touches no issues. Exit 0 on success, 20 on any gh/transport failure."""
+    install the bundled assets, prune the retired ones, and upsert the canonical
+    labels. Plain init is create-only and never overwrites an existing asset — it
+    merely REPORTS one as `unchanged` or `drifted` (differs from the bundled
+    copy). `--upgrade` additionally re-syncs every `drifted` asset to the bundled
+    copy. Re-running init on an older coordination repo is also its MIGRATION:
+    assets this protocol revision retired are deleted (OBSOLETE_ASSETS).
+    Idempotent; touches no issues. Exit 0 on success, 20 on any gh/transport
+    failure."""
     repo, project, upgrade = args.repo, args.project, args.upgrade
     report = {
         "repo": repo,
@@ -1797,7 +1847,20 @@ def cmd_init(args):
             status = kind
         report["assets"].append({"path": dest, "status": status})
 
-    # 3. Upsert the canonical labels (+ the project label when scoped).
+    # 3. Prune the assets an earlier release installed and this revision retired,
+    #    so re-running init is also the migration path for a coordination repo
+    #    that was stood up before them.
+    for dest, sentinel in OBSOLETE_ASSETS:
+        current, sha = gh_get_content_meta(repo, dest)
+        if current is None or sha is None or sentinel not in current:
+            continue  # absent, unreadable, or not ours to delete
+        if not gh_delete_content(repo, dest, sha,
+                                 f"chore: remove retired kraken asset {dest}"):
+            print(f"init: gh-failure stage=prune path={dest}", file=sys.stderr)
+            return EXIT_TRANSPORT
+        report["assets"].append({"path": dest, "status": "removed"})
+
+    # 4. Upsert the canonical labels (+ the project label when scoped).
     labels = list(CANONICAL_LABELS)
     if project:
         labels.append((f"project:{project}", PROJECT_LABEL_COLOR, PROJECT_LABEL_DESC))
@@ -1824,12 +1887,12 @@ def render_init(report):
         lines.append(f"init: label {name} (upserted)")
     count = lambda s: sum(1 for a in report["assets"] if a["status"] == s)
     created, unchanged = count("created"), count("unchanged")
-    drifted, upgraded = count("drifted"), count("upgraded")
+    drifted, upgraded, removed = count("drifted"), count("upgraded"), count("removed")
     lines.append(
         f"init: done repo={report['repo']} repo_status={report['repo_status']} "
         f"assets_created={created} assets_unchanged={unchanged} "
         f"assets_drifted={drifted} assets_upgraded={upgraded} "
-        f"labels={len(report['labels'])}"
+        f"assets_removed={removed} labels={len(report['labels'])}"
     )
     # Actionable hint: a plain init only reports drift — point at the repair path.
     if drifted and not report.get("upgrade"):
@@ -1840,191 +1903,238 @@ def render_init(report):
 
 
 
-# --- coordination-repo workflow subcommands ----------------------------------
-# The three logic-bearing workflows (reclaim-stale, requeue-on-reply,
-# validate-task) run their logic here rather than re-implementing the protocol
-# parse in jq/grep/awk — ONE parser, sharing the marker decoder, disclaimer, and
-# label vocabulary (and unit tests) with the worker side. Each workflow is a
-# checkout + a single exec of the matching subcommand below.
+# --- coordination-repo subcommands -------------------------------------------
+# The logic-bearing coordination passes (reconcile, requeue-on-reply,
+# validate-task) live here rather than re-implementing the protocol parse in
+# jq/grep/awk — ONE parser, sharing the marker decoder, disclaimer, and label
+# vocabulary (and unit tests) with the worker side.
 
-# The reaper's default staleness threshold, in hours. A claim ref older than this
-# — or unreadable — belongs to a dead worker and is reclaimed to needs-decision.
-# The workflow passes it through the MAX_HOURS env var.
+# --- the reconciler (PROTOCOL.md §6) -----------------------------------------
+# The claim ref is the lock and its commit date the liveness clock, so the refs
+# and the in-progress projection have to be made to agree. Under protocol/5 the
+# READER does that, not a cron in the coordination repo: a dead worker's claim
+# obstructs exactly one party — the next worker who wants to claim — and there is
+# no other observer of it, so the reconcile rides the claim path (cmd_claim_next)
+# on the queue read it already paid for. `reap` keeps the same pass as an
+# operator-side escape hatch; both go through the pure planner below, so the two
+# entry points can never drift.
+
+# The default staleness threshold, in hours. A claim ref older than this — or
+# unreadable — belongs to a dead worker and is reclaimed to needs-decision.
 REAP_DEFAULT_MAX_HOURS = 6
 
+# Who a stand-alone `reap` attributes its comments to when the operator names no
+# worker. A drain passes its own worker name instead: under protocol/5 the
+# reconciler's comments are posted by a worker's token, so they carry the §4
+# attribution disclaimer like every other worker comment.
+RECONCILER_WORKER = "reconciler"
 
-def stale_claim_body(reason):
-    """The reaper's reclaim comment: human prose plus the stale-claim marker
-    (audit trail). It carries NO attribution disclaimer: the reaper is not a
-    worker but the coordination repo's own automation, authored server-side by
-    the Actions bot (user.type == Bot), which is exactly how requeue-on-reply's
-    Bot gate tells it apart from an operator comment."""
-    marker = make_marker({"type": "stale-claim", "reason": reason})
+
+def reap_max_hours(explicit=None):
+    """The staleness threshold in hours: the explicit value if given, else the
+    MAX_HOURS environment override, else the default. A non-integer override
+    falls back rather than crashing the pass."""
+    if explicit is not None:
+        return explicit
+    try:
+        return int(os.environ.get("MAX_HOURS", REAP_DEFAULT_MAX_HOURS))
+    except ValueError:
+        return REAP_DEFAULT_MAX_HOURS
+
+
+def stale_claim_body(worker, reason):
+    """The reconciler's reclaim comment: the attribution disclaimer, human prose,
+    and the stale-claim marker (audit trail). The disclaimer is required because
+    a worker posts this now — under protocol/4 it was the coordination repo's own
+    Actions bot, which is why it used to carry none."""
     prose = (
         f"The worker has gone silent ({reason}) and likely died. To requeue, "
-        "remove the needs-decision label; or investigate first."
+        "reply on this thread — or remove the needs-decision label by hand."
     )
-    return f"{prose}\n\n{marker}"
+    return compose_comment(
+        worker, prose, {"type": "stale-claim", "reason": reason}
+    )
 
 
-def orphan_projection_body():
+def orphan_projection_body(worker):
     """The reconciler's requeue note for an in-progress label with no claim ref
     behind it — a crashed release, or a claim made before protocol/4. Same
-    Actions-bot authorship as stale_claim_body, same no-disclaimer rule."""
-    marker = make_marker({
-        "type": "stale-claim",
-        "reason": "in-progress label with no claim ref",
-    })
+    authorship and disclaimer rule as stale_claim_body."""
+    reason = "in-progress label with no claim ref"
     prose = (
         "This task carried the in-progress label with no live claim ref behind "
         "it (a crashed release, or a claim from before protocol/4). The label "
         "was removed and the task rejoins the queue."
     )
-    return f"{prose}\n\n{marker}"
+    return compose_comment(worker, prose, {"type": "stale-claim", "reason": reason})
 
 
-def resolve_issue_meta(repo, numbers):
-    """Each issue's open/closed state and label names in one batched GraphQL
-    call (one aliased `iN: issue(number: N)` field per number) — the
-    reconciler's per-ref read, never one call per issue. Returns
-    {number: (is_open, [label names])}, or None on transport failure."""
-    if not numbers:
-        return {}
-    owner, name = repo.split("/", 1)
-    fields = " ".join(
-        f"i{n}: issue(number: {n}) {{ state labels(first: 20) {{ nodes {{ name }} }} }}"
-        for n in numbers
-    )
-    resp = graphql(f'{{ repository(owner: "{owner}", name: "{name}") {{ {fields} }} }}')
-    if resp is None:
-        return None
-    repo_obj = resp["data"]["repository"]
-    meta = {}
-    for n in numbers:
-        obj = repo_obj.get(f"i{n}") or {}
-        is_open = str(obj.get("state", "")).upper() == "OPEN"
-        labels = [l.get("name", "")
-                  for l in (obj.get("labels") or {}).get("nodes", [])]
-        meta[n] = (is_open, labels)
-    return meta
+def reconcile_plan(nodes, claim_refs, commit_meta, now, max_hours):
+    """The reconciler's decision as a PURE function of one queue read — no
+    network, so every rule is unit-testable in isolation (PROTOCOL.md §6):
 
+      1. **orphan lock** — a ref whose issue is not an open task any more, or is
+         already labeled needs-decision/awaiting-merge (a terminal transition
+         whose ref delete was lost): delete the ref, touch nothing else;
+      2. **reclaim** — a ref older than `max_hours`, or whose commit cannot be
+         read (nothing proves the worker alive): move the task to
+         needs-decision with a stale-claim comment, then delete the ref;
+      3. **heal** — a fresh ref on an issue missing its in-progress label (a
+         claim whose label projection never landed): add the label;
+      4. **requeue** — an open in-progress issue with NO ref (a crashed release,
+         or a claim from before protocol/4): remove the label.
 
-def cmd_reap(args):
-    """The reconciler (reclaim-stale.yml). The claim ref is the lock and its
-    commit date the liveness clock, so reap reads every claim ref plus the
-    in-progress projection and makes the two agree (PROTOCOL.md §6):
+    `nodes` is the open-kraken-task walk (repo-wide, before any project filter),
+    so rule 1 needs no per-ref issue read: a ref on an issue absent from that
+    walk is a ref on an issue that is closed, or no longer a task at all —
+    either way it holds a lock over nothing. Nothing on the issue timeline
+    anchors liveness, so an operator poking a dead worker's thread shortens
+    time-to-triage rather than extending the claim.
 
-      1. a ref on a closed or needs-decision/awaiting-merge issue is an orphan
-         lock (a terminal transition crashed before its ref delete) — delete
-         the ref, touch nothing else;
-      2. a ref older than MAX_HOURS — or whose commit cannot be read: nothing
-         proves the worker alive — is a dead worker's claim: post the
-         stale-claim comment, move the task to needs-decision, delete the ref
-         (lock last, so a crashed reap leaves the task held and rule 1 finishes
-         the job next pass);
-      3. a fresh ref on an issue missing its in-progress label is a claim whose
-         projection crashed — heal by adding the label;
-      4. an OPEN in-progress issue with NO ref is an orphan projection (a
-         crashed release, or a claim from before protocol/4) — remove the label
-         so the task requeues, with a bot note saying why.
+    Returns a list of `{"rule", "issue", "reason"}` actions ordered by rule then
+    issue number; an empty list means the projection already agrees with the
+    locks (the overwhelmingly common case, and it costs zero writes)."""
+    open_labels = {n["number"]: set(label_names_of(n)) for n in nodes}
+    plan = []
 
-    Nothing on the issue timeline anchors liveness — an operator poking a dead
-    worker's thread never resets the clock. Exit 0 on success, 20 on any
-    gh/transport failure."""
-    repo = args.repo
-    max_hours = args.max_hours
-    if max_hours is None:
-        try:
-            max_hours = int(os.environ.get("MAX_HOURS", REAP_DEFAULT_MAX_HOURS))
-        except ValueError:
-            max_hours = REAP_DEFAULT_MAX_HOURS
-    now = time.time()
-
-    refs = claim_ref_list(repo)
-    if refs is None:
-        print("reap: gh-failure stage=refs", file=sys.stderr)
-        return EXIT_TRANSPORT
-    commit_meta = resolve_commit_meta(repo, list(refs.values()))
-    if commit_meta is None:
-        print("reap: gh-failure stage=commits", file=sys.stderr)
-        return EXIT_TRANSPORT
-    issue_meta = resolve_issue_meta(repo, sorted(refs))
-    if issue_meta is None:
-        print("reap: gh-failure stage=issues", file=sys.stderr)
-        return EXIT_TRANSPORT
-    progress_nums = open_issue_numbers(repo, "in-progress")
-    if progress_nums is None:
-        print("reap: gh-failure stage=list", file=sys.stderr)
-        return EXIT_TRANSPORT
-
-    reclaimed = orphan_locks = healed = requeued = 0
-    for num in sorted(refs):
-        is_open, labels = issue_meta.get(num, (False, []))
-
-        # 1. Orphan lock: the task already left the claim by a terminal
-        #    transition (or closed); only the ref delete was lost.
-        if not is_open or "needs-decision" in labels or "awaiting-merge" in labels:
-            if not claim_ref_delete(repo, num):
-                print(f"reap: gh-failure stage=ref issue={num}", file=sys.stderr)
-                return EXIT_TRANSPORT
-            print(f"reap: orphan-lock issue={num} — claim ref deleted")
-            orphan_locks += 1
+    for num in sorted(claim_refs):
+        labels = open_labels.get(num)
+        if (labels is None or "needs-decision" in labels
+                or "awaiting-merge" in labels):
+            plan.append({"rule": "orphan-lock", "issue": num,
+                         "reason": "the task already left the claim"})
             continue
 
         anchor_epoch = parse_iso(
-            (commit_meta.get(refs[num]) or {}).get("committedDate") or ""
+            (commit_meta.get(claim_refs[num]) or {}).get("committedDate") or ""
         )
         if anchor_epoch is None:
-            stale = True  # nothing proves the worker alive — infinitely stale
-            reason = "no readable heartbeat on the claim ref"
-        else:
-            age_hours = int((now - anchor_epoch) // 3600)
-            stale = age_hours >= max_hours
-            reason = f"no worker heartbeat for {age_hours}h"
+            # Nothing proves the worker alive — infinitely stale.
+            plan.append({"rule": "reclaim", "issue": num,
+                         "reason": "no readable heartbeat on the claim ref",
+                         "held": "in-progress" in labels})
+            continue
+        age_hours = int((now - anchor_epoch) // 3600)
+        if age_hours >= max_hours:
+            plan.append({"rule": "reclaim", "issue": num,
+                         "reason": f"no worker heartbeat for {age_hours}h",
+                         "held": "in-progress" in labels})
+            continue
 
-        if stale:
-            # 2. Dead worker: reclaim for triage, then release the lock.
+        if "in-progress" not in labels:
+            plan.append({"rule": "heal", "issue": num,
+                         "reason": "in-progress label restored"})
+
+    for num in sorted(open_labels):
+        if num in claim_refs or "in-progress" not in open_labels[num]:
+            continue
+        plan.append({"rule": "requeue", "issue": num,
+                     "reason": "in-progress label with no claim ref"})
+
+    return plan
+
+
+def _reconcile_failure(stage, issue):
+    """One failure shape for the applier: name the stage and the issue on stderr,
+    then answer None so the caller surfaces exit 20."""
+    print(f"reap: gh-failure stage={stage} issue={issue}", file=sys.stderr)
+    return None
+
+
+def apply_reconcile(repo, plan, worker):
+    """Execute a reconcile plan. Returns per-rule counts, or None on the first
+    transport failure. A half-applied pass is safe: every rule is idempotent and
+    ends with the ref delete, so a crash leaves the task HELD and the next
+    reader's rule 1 finishes the job — the task is never observably free while a
+    reclaim is half-applied (§5's ordering rule)."""
+    counts = {"orphan-lock": 0, "reclaim": 0, "heal": 0, "requeue": 0}
+    for action in plan:
+        rule, num = action["rule"], action["issue"]
+
+        if rule == "orphan-lock":
+            if not claim_ref_delete(repo, num):
+                return _reconcile_failure("ref", num)
+            print(f"reap: orphan-lock issue={num} — claim ref deleted")
+
+        elif rule == "reclaim":
             if not swap_labels(
                 repo, num,
-                remove="in-progress" if "in-progress" in labels else None,
+                remove="in-progress" if action["held"] else None,
                 add="needs-decision",
             ):
-                print(f"reap: gh-failure stage=labels issue={num}", file=sys.stderr)
-                return EXIT_TRANSPORT
-            if not post_comment(repo, num, stale_claim_body(reason)):
-                print(f"reap: gh-failure stage=comment issue={num}", file=sys.stderr)
-                return EXIT_TRANSPORT
+                return _reconcile_failure("labels", num)
+            if not post_comment(repo, num,
+                                stale_claim_body(worker, action["reason"])):
+                return _reconcile_failure("comment", num)
             if not claim_ref_delete(repo, num):
-                print(f"reap: gh-failure stage=ref issue={num}", file=sys.stderr)
-                return EXIT_TRANSPORT
-            print(f"reap: reclaimed issue={num} ({reason})")
-            reclaimed += 1
-            continue
+                return _reconcile_failure("ref", num)
+            print(f"reap: reclaimed issue={num} ({action['reason']})")
 
-        # 3. Live claim: heal a label projection that never landed.
-        if "in-progress" not in labels:
+        elif rule == "heal":
             if not swap_labels(repo, num, add="in-progress"):
-                print(f"reap: gh-failure stage=heal issue={num}", file=sys.stderr)
-                return EXIT_TRANSPORT
+                return _reconcile_failure("heal", num)
             print(f"reap: healed issue={num} — in-progress label restored")
-            healed += 1
 
-    # 4. Orphan projection: in-progress with no lock behind it — requeue.
-    for num in progress_nums:
-        if num in refs:
+        elif rule == "requeue":
+            if not swap_labels(repo, num, remove="in-progress"):
+                return _reconcile_failure("requeue", num)
+            if not post_comment(repo, num, orphan_projection_body(worker)):
+                return _reconcile_failure("comment", num)
+            print(f"reap: requeued issue={num} ({action['reason']})")
+
+        counts[rule] += 1
+    return counts
+
+
+def project_reconcile(plan, nodes, claim_refs):
+    """Fold an APPLIED plan back into the in-memory queue read, in place, so the
+    drain that just reconciled classifies the reconciled state without paying for
+    a second fetch. Mirrors exactly what apply_reconcile wrote — nothing more:
+    the refs it deleted and the labels it swapped."""
+    by_number = {n["number"]: n for n in nodes}
+    for action in plan:
+        rule, num = action["rule"], action["issue"]
+        if rule in ("orphan-lock", "reclaim"):
+            claim_refs.pop(num, None)
+        node = by_number.get(num)
+        if node is None:
             continue
-        if not swap_labels(repo, num, remove="in-progress"):
-            print(f"reap: gh-failure stage=requeue issue={num}", file=sys.stderr)
-            return EXIT_TRANSPORT
-        if not post_comment(repo, num, orphan_projection_body()):
-            print(f"reap: gh-failure stage=comment issue={num}", file=sys.stderr)
-            return EXIT_TRANSPORT
-        print(f"reap: requeued issue={num} (in-progress label with no claim ref)")
-        requeued += 1
+        labels = set(label_names_of(node))
+        if rule == "reclaim":
+            labels = (labels - {"in-progress"}) | {"needs-decision"}
+        elif rule == "heal":
+            labels = labels | {"in-progress"}
+        elif rule == "requeue":
+            labels = labels - {"in-progress"}
+        node["labels"] = {"nodes": [{"name": n} for n in sorted(labels)]}
+
+
+def cmd_reap(args):
+    """Run the reconcile pass stand-alone — the operator-side escape hatch for
+    the reconcile a drain performs on its own (PROTOCOL.md §6). One queue read
+    plus one batched commit-date read, then the plan. Exit 0 on success, 20 on
+    any gh/transport failure."""
+    repo = args.repo
+    read = read_queue(repo)
+    if read is None:
+        print("reap: gh-failure stage=list", file=sys.stderr)
+        return EXIT_TRANSPORT
+    nodes, claim_refs = read
+    commit_meta = resolve_commit_meta(repo, list(claim_refs.values()))
+    if commit_meta is None:
+        print("reap: gh-failure stage=commits", file=sys.stderr)
+        return EXIT_TRANSPORT
+
+    plan = reconcile_plan(nodes, claim_refs, commit_meta, time.time(),
+                          reap_max_hours(args.max_hours))
+    counts = apply_reconcile(repo, plan, args.worker)
+    if counts is None:
+        return EXIT_TRANSPORT
 
     print(
-        f"reap: done refs={len(refs)} reclaimed={reclaimed} "
-        f"orphan_locks={orphan_locks} healed={healed} requeued={requeued}"
+        f"reap: done refs={len(claim_refs)} reclaimed={counts['reclaim']} "
+        f"orphan_locks={counts['orphan-lock']} healed={counts['heal']} "
+        f"requeued={counts['requeue']}"
     )
     return EXIT_OK
 
@@ -2416,10 +2526,13 @@ def build_parser():
 
     p = sub.add_parser(
         "reap",
-        help="reclaim-stale.yml: reconcile claim refs with labels — reclaim "
-             "stale claims, delete orphan locks, heal/requeue projections",
+        help="run the §6 reconcile stand-alone — reclaim stale claims, delete "
+             "orphan locks, heal/requeue projections (a drain does this itself)",
     )
     p.add_argument("repo")
+    p.add_argument("worker", nargs="?", default=RECONCILER_WORKER,
+                   help="who the reclaim comments are attributed to "
+                        f"(default: {RECONCILER_WORKER})")
     p.add_argument("--max-hours", type=int, default=None,
                    help="staleness threshold in hours (default: MAX_HOURS env, else 6)")
     p.set_defaults(func=cmd_reap)
