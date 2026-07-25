@@ -835,6 +835,57 @@ class StatusHelperTests(unittest.TestCase):
         self.assertEqual(kraken.format_age(4 * 86400), "4d")
         self.assertEqual(kraken.format_age(None), "unknown")
 
+    def test_parse_github_pr_url_parts(self):
+        self.assertEqual(kraken.parse_github_pr_url("https://github.com/o/r/pull/42"),
+                         ("o", "r", "42"))
+
+    def test_parse_github_pr_url_none_for_non_github_host(self):
+        # #121: a GitLab MR (or any non-GitHub delivery) is a legitimate,
+        # protocol-allowed delivery URL — just one kraken can't ask gh about.
+        gitlab = "https://gitlab.com/group/project/-/merge_requests/2313"
+        self.assertIsNone(kraken.parse_github_pr_url(gitlab))
+
+    def test_parse_github_pr_url_none_when_absent(self):
+        self.assertIsNone(kraken.parse_github_pr_url(None))
+        self.assertIsNone(kraken.parse_github_pr_url(""))
+
+
+class PrIsMergedTests(unittest.TestCase):
+    """pr_is_merged: the orphan heuristic's only transport call. #121 — a
+    non-GitHub delivery URL must read as "not confirmed merged" (False), never
+    as the transport failure (None) that used to abort the whole status read."""
+
+    def setUp(self):
+        self._orig_request = kraken.http_request
+
+    def tearDown(self):
+        kraken.http_request = self._orig_request
+
+    def test_non_github_url_is_false_without_any_gh_call(self):
+        calls = []
+        kraken.http_request = lambda m, p, body=None: (calls.append(1), (500, ""))[1]
+        gitlab = "https://gitlab.com/group/project/-/merge_requests/2313"
+        self.assertFalse(kraken.pr_is_merged(gitlab))
+        self.assertEqual(calls, [], "a non-GitHub URL must never hit gh")
+
+    def test_unparseable_url_is_false(self):
+        self.assertFalse(kraken.pr_is_merged("not a url"))
+        self.assertFalse(kraken.pr_is_merged(None))
+
+    def test_github_transport_failure_is_none(self):
+        kraken.http_request = lambda m, p, body=None: (500, "")
+        self.assertIsNone(kraken.pr_is_merged("https://github.com/o/r/pull/1"))
+
+    def test_github_merged_pr_is_true(self):
+        kraken.http_request = lambda m, p, body=None: (
+            200, json.dumps({"merged_at": "2026-07-01T00:00:00Z"}))
+        self.assertTrue(kraken.pr_is_merged("https://github.com/o/r/pull/1"))
+
+    def test_github_open_pr_is_false(self):
+        kraken.http_request = lambda m, p, body=None: (
+            200, json.dumps({"merged_at": None, "merged": False, "state": "open"}))
+        self.assertFalse(kraken.pr_is_merged("https://github.com/o/r/pull/1"))
+
 
 class StatusComputeTests(unittest.TestCase):
     """compute_status: the whole report assembled from queue nodes, the claim
@@ -931,6 +982,41 @@ class StatusComputeTests(unittest.TestCase):
         flags = {r["number"]: r["orphan"] for r in report["review_queue"]}
         self.assertTrue(flags[88])
         self.assertFalse(flags[91])
+
+    def test_non_github_delivery_url_is_never_a_transport_failure(self):
+        # #121: a GitLab MR delivery must not turn `status` into gh-failure
+        # stage=read — it's neither an orphan nor a transport failure, just
+        # unverifiable. End-to-end through the real kraken.pr_is_merged (not
+        # the injected lambda) so the fix's actual call path is exercised.
+        orig_request = kraken.http_request
+        calls = []
+        kraken.http_request = lambda m, p, body=None: (calls.append(1), (500, ""))[1]
+        try:
+            nodes = [self._node(88, "gitlab delivery",
+                                ["kraken-task", "project:app", "awaiting-merge"])]
+            gitlab_mr = "https://gitlab.com/group/project/-/merge_requests/2313"
+            comments = {88: [{"body": dlv("w", pr=gitlab_mr), "createdAt": "t"}]}
+            report = kraken.compute_status(
+                "o/tasks", "", nodes, self.NOW,
+                claim_refs={}, commit_meta={},
+                comment_reader=lambda r, i: comments.get(i, []),
+                pr_merged=kraken.pr_is_merged,
+                project_lister=lambda r: ["app"])
+        finally:
+            kraken.http_request = orig_request
+        self.assertIsNotNone(report, "a non-GitHub delivery must not be gh-failure")
+        self.assertEqual(report["orphans"], [])
+        self.assertEqual(calls, [], "gh must never be asked about a non-GitHub URL")
+        item = report["review_queue"][0]
+        self.assertFalse(item["orphan"])
+        self.assertTrue(item["merge_state_unknown"])
+
+    def test_merge_state_unknown_false_for_a_verified_github_delivery(self):
+        nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]
+        comments = {88: [{"body": dlv("w", pr="https://github.com/o/r/pull/5"), "createdAt": "t"}]}
+        report = self._call(nodes, comments=comments,
+                            merged={"https://github.com/o/r/pull/5": False}, projects=["app"])
+        self.assertFalse(report["review_queue"][0]["merge_state_unknown"])
 
     def test_awaiting_merge_comment_failure_propagates_none(self):
         nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]

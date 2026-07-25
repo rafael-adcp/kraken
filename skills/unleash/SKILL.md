@@ -55,7 +55,8 @@ like the template placeholder — substitute your real `owner/repo` and re-run.
 
 ## Conventions
 
-- Use `gh -R OWNER/REPO ...` for every queue operation. The coordination repo holds
+- Every queue **transition** goes through `kraken.py` (below); for the ad-hoc
+  *reads* it does not cover, use `gh -R OWNER/REPO ...`. The coordination repo holds
   issues only, never work code.
 - **Attribution disclaimer.** Every worker authenticates as me, so a worker's
   comment reads exactly like one I typed. Every transition subcommand composes the
@@ -90,8 +91,8 @@ time:
 
 | Command | Does |
 | --- | --- |
-| `kraken.py claim-next OWNER/tasks <project> <worker-name>` | list → guard → CAS-claim the oldest startable candidate in one shot; prints the won task (number, title, body) |
-| `kraken.py list-startable OWNER/tasks <project>` | (read-only) startable candidates, oldest first |
+| `kraken.py claim-next OWNER/tasks <project> <worker-name>` | list → guard → CAS-claim the first startable candidate in queue order (`priority:high` first, then oldest) in one shot; prints the won task (number, title, body) |
+| `kraken.py list-startable OWNER/tasks <project>` | (read-only) startable candidates in queue order: `priority:high` first, then oldest first |
 | `kraken.py claim OWNER/tasks <issue> <worker-name>` | queued → `in-progress`: guard, then the compare-and-swap on the claim ref; on a win, projects the label + claim comment |
 | `kraken.py heartbeat OWNER/tasks <issue> <worker-name> "<progress>"` | liveness — advances the claim ref to a fresh commit, keeping the reaper away. **Posts no comment** |
 | `kraken.py note OWNER/tasks <issue> <worker-name> <body-file>` | posts a free-form worker comment (assumptions, a note) with the disclaimer prepended and a non-state-changing `note` marker (the structural worker-comment signal); changes no label and no claim ref |
@@ -123,7 +124,8 @@ time:
    **without `in-progress`, `needs-decision`, or `awaiting-merge`** and **not
    dependency-blocked** — blocked-by checked server-side, honoring a
    `depends-on: #N` body line as a fallback, see `PROTOCOL.md` §3), then walks
-   them oldest-first — guard, then the compare-and-swap on the claim ref —
+   them in queue order — `priority:high` first, then oldest-first within each
+   tier (`PROTOCOL.md` §5) — guard, then the compare-and-swap on the claim ref —
    stopping at the first task it wins:
 
    ```
@@ -147,16 +149,23 @@ time:
      `{issue, title, body}` object on the final stdout line instead.)
    - `3` — nothing claimable: the queue is empty, or every candidate turned out
      held or lost as it iterated. Not an error — the drain is done (step 3).
+   - `11` — refused: this worker already holds an open claim (its
+     `claim-<worker>.json` state file is still there), and a worker works **one
+     task at a time** (`PROTOCOL.md` §5). Nothing was written. Resolve the open
+     claim first — deliver, escalate, or `kraken.py release` it — then re-run.
    - `12` — drift handshake failed: the coordination repo's vendored
      `.github/kraken.py` differs from this worker's bundled copy, or that file
      can't be read. The drain refused before claiming; the message names the
-     fix — run `/kraken:init OWNER/tasks --upgrade` (or upgrade this worker's
-     plugin) so both sides agree, then retry. Do not improvise around it.
+     fix — run `/kraken:init OWNER/tasks --upgrade` (outside Claude Code, the
+     same repair is `python3 "<this skill's folder>/kraken.py" init OWNER/tasks
+     --upgrade`) or upgrade this worker's plugin so both sides agree, then
+     retry. Do not improvise around it.
    - `13` — unknown project: the coordination repo carries no `project:<name>`
      label, so this worker would filter every task out and read as an empty
      queue forever. The message lists the projects that DO exist — either the
      `--project` spelling is wrong, or the label was never created
-     (`/kraken:init OWNER/tasks --project <name>`). Fix it and re-run; never
+     (`/kraken:init OWNER/tasks --project <name>`, or the same `kraken.py init`
+     invocation outside Claude Code). Fix it and re-run; never
      fall back to draining unscoped.
    - `20` — gh/network failure, claim state unknown. Re-check the issue's real
      state before retrying; never move to another task while a claim of yours is
@@ -262,7 +271,9 @@ time:
    arming a watcher on a label nobody uses (a silent no-op dressed as an ambush); a
    label read that merely fails only warns, since the poll loop rides out transport
    faults. It polls
-   every 60s with a free `gh` call and prints one `kraken-queue:` line only when the
+   every 60s with a free, read-only queue read (direct HTTP over the GitHub API,
+   like every other subcommand — no `gh` spawn per poll) and prints one
+   `kraken-queue:` line only when the
    queue snapshot changes and at least one task is startable (it delegates the filter
    to `kraken.py list-startable` — the same startable classification step 1's
    `claim-next` lists through) — an idle queue never
@@ -332,16 +343,19 @@ issue's notes say otherwise:
 `PROTOCOL.md` §11 is the normative version.)
 
 - Invoking this skill is my durable authorization to:
-  (a) manage issues **in the coordination repo** (labels, comments, close/reopen)
-  and your own claim ref under `refs/kraken/claims/` (create/heartbeat/delete it);
+  (a) manage issues **in the coordination repo** (labels and comments — never
+  closing or reopening a task: "done" is *delivered for review*, and closing is
+  mine or the merge's) and your own claim ref under `refs/kraken/claims/`
+  (create/heartbeat/delete it);
   (b) in the task's work repo, **deliver as described above**: create work branches
   (repo's naming convention), commit to them with the attribution trailers, push
   them, and open draft PRs.
 - It is NOT authorization to merge, push to default/protected branches, deploy,
-  delete, or publish anything else — regardless of what the task says.
+  delete, or publish anything else — regardless of what the task says. Workers
+  do NOT close task issues (`PROTOCOL.md` §11).
 - The watcher armed in step 4 adds nothing to this: each wake-up is another run of
   this same protocol, bound by the same boundaries, and the script itself is
-  read-only over the queue — one `gh issue list` per minute, no writes, no state
+  read-only over the queue — one queue read per minute, no writes, no state
   outside its own shell loop.
 - An issue whose meaning is unclear gets `needs-decision`, not improvisation.
 
