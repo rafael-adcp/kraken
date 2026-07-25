@@ -190,9 +190,10 @@ class StaleClaimBodyTests(unittest.TestCase):
     they carry the §4 attribution disclaimer."""
 
     def test_carries_reason_prose_and_marker(self):
-        body = kraken.stale_claim_body("w1", "no worker heartbeat for 8h")
-        self.assertIn("gone silent (no worker heartbeat for 8h)", body)
-        self.assertIn('<!-- kraken {"type":"stale-claim","reason":"no worker heartbeat for 8h"} -->', body)
+        body = kraken.stale_claim_body("w1", "the lease expired 3 times")
+        self.assertIn("Nobody is finishing this task (the lease expired 3 times)",
+                      body)
+        self.assertIn('<!-- kraken {"type":"stale-claim","reason":"the lease expired 3 times"} -->', body)
 
     def test_carries_the_worker_disclaimer(self):
         body = kraken.stale_claim_body("w1", "no worker heartbeat on record")
@@ -202,36 +203,6 @@ class StaleClaimBodyTests(unittest.TestCase):
         body = kraken.orphan_projection_body("w1")
         self.assertTrue(body.startswith(kraken.disclaimer("w1")))
         self.assertIn('"reason":"in-progress label with no claim ref"', body)
-
-
-# --- reap_max_hours: the staleness threshold's resolution order --------------
-
-class ReapMaxHoursTests(unittest.TestCase):
-    """The threshold resolves explicit -> MAX_HOURS env -> default, and a
-    garbage env value falls back rather than crashing the pass."""
-
-    def setUp(self):
-        self._saved = os.environ.pop("MAX_HOURS", None)
-
-    def tearDown(self):
-        os.environ.pop("MAX_HOURS", None)
-        if self._saved is not None:
-            os.environ["MAX_HOURS"] = self._saved
-
-    def test_explicit_wins(self):
-        os.environ["MAX_HOURS"] = "3"
-        self.assertEqual(kraken.reap_max_hours(9), 9)
-
-    def test_env_override(self):
-        os.environ["MAX_HOURS"] = "3"
-        self.assertEqual(kraken.reap_max_hours(), 3)
-
-    def test_default_when_unset(self):
-        self.assertEqual(kraken.reap_max_hours(), kraken.REAP_DEFAULT_MAX_HOURS)
-
-    def test_garbage_env_falls_back(self):
-        os.environ["MAX_HOURS"] = "soon"
-        self.assertEqual(kraken.reap_max_hours(), kraken.REAP_DEFAULT_MAX_HOURS)
 
 
 # --- cmd_reap: the stand-alone reconcile pass, transport mocked --------------
@@ -244,8 +215,8 @@ def _iso(epoch):
 class ReapCommandTests(unittest.TestCase):
     """cmd_reap wires the queue read to the pure planner and the applier. The
     rules themselves are pinned in test_kraken.ReconcilerPlanTests; what is under
-    test here is the wiring, the staleness clock reaching it, and the failure
-    staging of each read."""
+    test here is the wiring, the lease clock reaching it, and the failure staging
+    of each read."""
 
     NOW = 1_800_000_000.0
 
@@ -253,7 +224,7 @@ class ReapCommandTests(unittest.TestCase):
         self._orig = {
             "read_queue": kraken.read_queue,
             "resolve_commit_meta": kraken.resolve_commit_meta,
-            "claim_ref_delete": kraken.claim_ref_delete,
+            "drop_generations": kraken.drop_generations,
             "swap_labels": kraken.swap_labels,
             "post_comment": kraken.post_comment,
             "time": kraken.time.time,
@@ -265,7 +236,7 @@ class ReapCommandTests(unittest.TestCase):
             self.swaps.append((issue, remove, add)) or True)
         kraken.post_comment = lambda repo, issue, body: (
             self.posts.append((issue, body)) or True)
-        kraken.claim_ref_delete = lambda repo, issue: (
+        kraken.drop_generations = lambda repo, issue, gens: (
             self.deleted.append(issue) or True)
         kraken.time.time = lambda: self.NOW
 
@@ -276,34 +247,62 @@ class ReapCommandTests(unittest.TestCase):
             else:
                 setattr(kraken, k, v)
 
-    def _meta(self, hours_ago):
-        return {"committedDate": _iso(self.NOW - hours_ago * 3600),
+    def _meta(self, seconds_ago):
+        return {"committedDate": _iso(self.NOW - seconds_ago),
                 "message": kraken.make_marker({"type": "claim", "worker": "w"})}
 
     @staticmethod
-    def _node(number, labels):
+    def _node(number, labels, comments=()):
         return {"number": number, "title": "t", "createdAt": "2026-01-01",
-                "body": "", "labels": {"nodes": [{"name": l} for l in labels]}}
+                "body": "", "labels": {"nodes": [{"name": l} for l in labels]},
+                "comments": {"nodes": [{"body": b, "createdAt": "2026-01-01"}
+                                       for b in comments]}}
 
-    def _run(self, nodes, refs, commit_meta, max_hours=6, worker="reconciler"):
-        kraken.read_queue = lambda repo: (nodes, dict(refs))
+    def _run(self, nodes, refs, commit_meta, ttl=None, worker="reconciler"):
+        # Tests seed {issue: sha}; a lease is a generation ladder.
+        ladders = {n: [(1, sha)] for n, sha in refs.items()}
+        kraken.read_queue = lambda repo, now=None, ttl=None: (
+            nodes, kraken.lease_state(ladders, commit_meta, self.NOW,
+                                      kraken.lease_ttl_seconds(ttl))
+        )
         kraken.resolve_commit_meta = lambda repo, shas: commit_meta
-        args = SimpleNamespace(repo="OWNER/tasks", worker=worker,
-                               max_hours=max_hours)
+        args = SimpleNamespace(repo="OWNER/tasks", worker=worker, ttl=ttl)
         buf = StringIO()
         with redirect_stdout(buf):
             rc = kraken.cmd_reap(args)
         return rc, buf.getvalue()
 
-    def test_dead_worker_reclaimed(self):
-        rc, out = self._run([self._node(1, ["kraken-task", "in-progress"])],
-                            {1: "s1"}, {"s1": self._meta(8)})
+    @staticmethod
+    def _expiries(n):
+        return [kraken.make_marker({"type": "lease-expired", "worker": "w%d" % i})
+                for i in range(n)]
+
+    def test_a_repeatedly_expired_task_is_reclaimed(self):
+        # The only escalation left: the task has already been stolen
+        # LEASE_EXPIRY_ESCALATE times and still nobody finished it.
+        node = self._node(1, ["kraken-task", "in-progress"],
+                          comments=self._expiries(kraken.LEASE_EXPIRY_ESCALATE))
+        rc, out = self._run([node], {1: "s1"},
+                            {"s1": self._meta(kraken.LEASE_DEFAULT_TTL_SECONDS + 60)})
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertIn((1, "in-progress", "needs-decision"), self.swaps)
         self.assertEqual(len(self.posts), 1)
         self.assertIn("stale-claim", self.posts[0][1])
         self.assertIn(1, self.deleted)
-        self.assertIn("reap: done refs=1 reclaimed=1", out)
+        self.assertIn("reap: done leases=1 reclaimed=1", out)
+
+    def test_an_expired_lease_is_left_for_the_thief(self):
+        # protocol/6: reap does NOT free an expired lease. The reader already
+        # treats it as unheld, so a pass that "repaired" it would only escalate a
+        # task the next drain would have picked up by itself.
+        rc, out = self._run([self._node(2, ["kraken-task", "in-progress"])],
+                            {2: "s2"},
+                            {"s2": self._meta(kraken.LEASE_DEFAULT_TTL_SECONDS + 60)})
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(self.swaps, [])
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.deleted, [])
+        self.assertIn("reclaimed=0 orphan_locks=0 healed=0 requeued=0", out)
 
     def test_live_worker_left_alone(self):
         rc, out = self._run([self._node(2, ["kraken-task", "in-progress"])],
@@ -315,32 +314,25 @@ class ReapCommandTests(unittest.TestCase):
         self.assertIn("reclaimed=0 orphan_locks=0 healed=0 requeued=0", out)
 
     def test_reclaim_is_attributed_to_the_named_worker(self):
-        self._run([self._node(1, ["kraken-task", "in-progress"])],
-                  {1: "s1"}, {"s1": self._meta(8)}, worker="drain-1")
+        node = self._node(1, ["kraken-task", "in-progress"],
+                          comments=self._expiries(kraken.LEASE_EXPIRY_ESCALATE))
+        self._run([node], {1: "s1"},
+                  {"s1": self._meta(kraken.LEASE_DEFAULT_TTL_SECONDS + 60)},
+                  worker="drain-1")
         self.assertTrue(self.posts[0][1].startswith(kraken.disclaimer("drain-1")))
 
-    def test_env_max_hours_fallback(self):
-        # max_hours=None -> read MAX_HOURS from the env.
-        os.environ["MAX_HOURS"] = "3"
-        try:
-            rc, _ = self._run([self._node(7, ["kraken-task", "in-progress"])],
-                              {7: "s7"}, {"s7": self._meta(4)}, max_hours=None)
-        finally:
-            del os.environ["MAX_HOURS"]
+    def test_the_ttl_flag_reaches_the_read(self):
+        # --ttl 60 makes a 5-minute-old lease expired, so the repeat guard fires
+        # on a task a default TTL would still consider held.
+        node = self._node(7, ["kraken-task", "in-progress"],
+                          comments=self._expiries(kraken.LEASE_EXPIRY_ESCALATE))
+        rc, _ = self._run([node], {7: "s7"}, {"s7": self._meta(300)}, ttl=60)
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertIn((7, "in-progress", "needs-decision"), self.swaps)
 
     def test_transport_failure_on_the_queue_read_is_twenty(self):
-        kraken.read_queue = lambda repo: None
-        args = SimpleNamespace(repo="OWNER/tasks", worker="w", max_hours=6)
-        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-            rc = kraken.cmd_reap(args)
-        self.assertEqual(rc, kraken.EXIT_TRANSPORT)
-
-    def test_transport_failure_on_the_commit_read_is_twenty(self):
-        kraken.read_queue = lambda repo: ([], {1: "s1"})
-        kraken.resolve_commit_meta = lambda repo, shas: None
-        args = SimpleNamespace(repo="OWNER/tasks", worker="w", max_hours=6)
+        kraken.read_queue = lambda repo, now=None, ttl=None: None
+        args = SimpleNamespace(repo="OWNER/tasks", worker="w", ttl=None)
         with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
             rc = kraken.cmd_reap(args)
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
@@ -571,16 +563,18 @@ class CleanupCommandTests(unittest.TestCase):
         self._orig = {
             "issue_label_names": kraken.issue_label_names,
             "swap_labels": kraken.swap_labels,
-            "claim_ref_delete": kraken.claim_ref_delete,
+            "claim_refs_of": kraken.claim_refs_of,
+            "drop_generations": kraken.drop_generations,
         }
         self.removed = []
         self.ref_deletes = []
         kraken.swap_labels = lambda repo, issue, remove=None, add=None: (
             self.removed.append((issue, remove, add)) or True)
-        # cleanup also deletes a leftover claim ref (protocol/4); mock it so the
-        # unit tests never reach the network, and record the call.
-        kraken.claim_ref_delete = lambda repo, issue: (
-            self.ref_deletes.append(issue) or True)
+        # cleanup also drops a leftover lease — every generation of it. Mock the
+        # read and the delete so the unit tests never reach the network.
+        kraken.claim_refs_of = lambda repo, issue: (True, [(1, "sha")])
+        kraken.drop_generations = lambda repo, issue, gens: (
+            self.ref_deletes.append((issue, list(gens))) or True)
 
     def tearDown(self):
         for k, v in self._orig.items():
@@ -614,12 +608,19 @@ class CleanupCommandTests(unittest.TestCase):
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.removed, [])
 
-    def test_deletes_a_leftover_claim_ref(self):
+    def test_deletes_every_leftover_generation(self):
         # Even a label-clean closed task must not leave its lock behind: cleanup
-        # always deletes the claim ref (idempotent — a missing ref is fine).
+        # drops the whole ladder, including a generation a steal failed to
+        # collect (idempotent — a missing ref is fine).
+        kraken.claim_refs_of = lambda repo, issue: (True, [(1, "a"), (2, "b")])
         rc = self._run(3, ["kraken-task", "project:app"])
         self.assertEqual(rc, kraken.EXIT_OK)
-        self.assertEqual(self.ref_deletes, ["3"])
+        self.assertEqual(self.ref_deletes, [("3", [1, 2])])
+
+    def test_an_unreadable_ref_read_is_twenty(self):
+        kraken.claim_refs_of = lambda repo, issue: (False, [])
+        rc = self._run(3, ["kraken-task", "project:app"])
+        self.assertEqual(rc, kraken.EXIT_TRANSPORT)
 
     def test_non_kraken_task_is_a_noop(self):
         # The workflow's if: gate is re-checked here: a non-task issue strips

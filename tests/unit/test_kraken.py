@@ -59,6 +59,11 @@ def stale(reason=None):
     return kraken.make_marker(payload)
 
 
+def expired(worker="w2", previous="w1"):
+    return kraken.make_marker({"type": "lease-expired", "worker": worker,
+                               "previous_worker": previous})
+
+
 class MarkerTests(unittest.TestCase):
     """Hidden markers: make_marker/parse_marker round-trip and decoding edge
     cases. Under protocol/4 the same grammar rides a claim ref's commit message
@@ -118,9 +123,19 @@ class RefCasTests(unittest.TestCase):
         kraken.http_request = self._orig_request
         kraken.graphql = self._orig_graphql
 
-    def test_claim_ref_name(self):
-        self.assertEqual(kraken.claim_ref(42), "refs/kraken/claims/42")
-        self.assertEqual(kraken.claim_ref("7"), "refs/kraken/claims/7")
+    def test_claim_ref_name_carries_the_generation(self):
+        # Generation 0 IS the protocol/5 name — never written any more, only
+        # read, so an old queue needs no migration.
+        self.assertEqual(kraken.claim_ref(42, 0), "refs/kraken/claims/42")
+        self.assertEqual(kraken.claim_ref(42, 1), "refs/kraken/claims/42/1")
+        self.assertEqual(kraken.claim_ref("7", 12), "refs/kraken/claims/7/12")
+
+    def test_parse_claim_ref_reads_both_shapes_and_rejects_the_rest(self):
+        self.assertEqual(kraken.parse_claim_ref("refs/kraken/claims/42"), (42, 0))
+        self.assertEqual(kraken.parse_claim_ref("refs/kraken/claims/42/3"), (42, 3))
+        for bad in ("refs/heads/main", "refs/kraken/claims/", "refs/kraken/claims/x",
+                    "refs/kraken/claims/42/x", "refs/kraken/claims/42/1/2"):
+            self.assertIsNone(kraken.parse_claim_ref(bad), bad)
 
     def test_create_claim_commit_is_an_orphan_marker_commit(self):
         captured = {}
@@ -166,53 +181,116 @@ class RefCasTests(unittest.TestCase):
 
     def test_claim_ref_create_maps_the_cas_outcomes(self):
         kraken.http_request = lambda m, p, body=None: (201, "{}")
-        self.assertEqual(kraken.claim_ref_create("o/t", 7, "sha"), "won")
+        self.assertEqual(kraken.claim_ref_create("o/t", 7, 1, "sha"), "won")
 
         # HTTP 422 IS the CAS-lost signal — an integer status, not a stderr scrape.
         kraken.http_request = lambda m, p, body=None: (422, "")
-        self.assertEqual(kraken.claim_ref_create("o/t", 7, "sha"), "lost")
+        self.assertEqual(kraken.claim_ref_create("o/t", 7, 1, "sha"), "lost")
 
         kraken.http_request = lambda m, p, body=None: (500, "")
-        self.assertEqual(kraken.claim_ref_create("o/t", 7, "sha"), "fail")
+        self.assertEqual(kraken.claim_ref_create("o/t", 7, 1, "sha"), "fail")
+
+    def test_advance_lease_creates_the_next_generation(self):
+        # The single contended write behind a claim, a steal AND a renewal: it
+        # always creates gen+1, so all three race on one ref name.
+        created = {}
+
+        def fake_request(method, path, body=None):
+            if path.endswith("/git/commits"):
+                return (201, json.dumps({"sha": "fresh"}))
+            created["ref"] = (body or {}).get("ref")
+            created["sha"] = (body or {}).get("sha")
+            return (201, "{}")
+        kraken.http_request = fake_request
+
+        verdict, gen, sha = kraken.advance_lease(
+            "o/t", 7, 4, {"type": "claim", "worker": "w1"})
+        self.assertEqual((verdict, gen, sha), ("won", 5, "fresh"))
+        self.assertEqual(created["ref"], "refs/kraken/claims/7/5")
+        self.assertEqual(created["sha"], "fresh")
+
+    def test_advance_lease_reports_the_cas_loss(self):
+        def fake_request(method, path, body=None):
+            if path.endswith("/git/commits"):
+                return (201, json.dumps({"sha": "fresh"}))
+            return (422, "")
+        kraken.http_request = fake_request
+        self.assertEqual(kraken.advance_lease("o/t", 7, 1, {"type": "claim"}),
+                         ("lost", None, None))
 
     def test_claim_ref_delete_tolerates_a_missing_ref(self):
         kraken.http_request = lambda m, p, body=None: (204, "")
-        self.assertTrue(kraken.claim_ref_delete("o/t", 7))
+        self.assertTrue(kraken.claim_ref_delete("o/t", 7, 1))
         # Already gone (422) is success — the delete is idempotent.
         kraken.http_request = lambda m, p, body=None: (422, "")
-        self.assertTrue(kraken.claim_ref_delete("o/t", 7))
+        self.assertTrue(kraken.claim_ref_delete("o/t", 7, 1))
         # A real transport fault is not tolerated.
         kraken.http_request = lambda m, p, body=None: (kraken.STATUS_NETWORK_FAILURE, "")
-        self.assertFalse(kraken.claim_ref_delete("o/t", 7))
+        self.assertFalse(kraken.claim_ref_delete("o/t", 7, 1))
 
-    def test_claim_ref_list_parses_matching_refs(self):
+    def test_dropping_generations_reports_a_partial_failure(self):
+        seen = []
+
+        def fake_request(method, path, body=None):
+            seen.append(path)
+            return (204, "") if path.endswith("/1") else (500, "")
+        kraken.http_request = fake_request
+        self.assertFalse(kraken.drop_generations("o/t", 7, [1, 2]))
+        self.assertEqual(len(seen), 2, "a failed delete must not stop the rest")
+
+    def test_claim_ref_list_groups_generations_per_issue(self):
         kraken.http_request = lambda m, p, body=None: (200, json.dumps([
-            {"ref": "refs/kraken/claims/7", "object": {"sha": "sha7"}},
-            {"ref": "refs/kraken/claims/12", "object": {"sha": "sha12"}},
+            {"ref": "refs/kraken/claims/7", "object": {"sha": "sha7g0"}},
+            {"ref": "refs/kraken/claims/7/2", "object": {"sha": "sha7g2"}},
+            {"ref": "refs/kraken/claims/12/1", "object": {"sha": "sha12"}},
+            {"ref": "refs/heads/main", "object": {"sha": "nope"}},
         ]))
-        self.assertEqual(kraken.claim_ref_list("o/t"), {7: "sha7", 12: "sha12"})
+        self.assertEqual(kraken.claim_ref_list("o/t"),
+                         {7: [(0, "sha7g0"), (2, "sha7g2")], 12: [(1, "sha12")]})
+
+    def test_holder_shas_reads_only_the_highest_generation(self):
+        # The lease clock lives on the holder; a superseded generation's date
+        # decides nothing, so the batched commit read stays one per task.
+        refs = {7: [(0, "old"), (2, "holder")], 12: [(1, "solo")]}
+        self.assertEqual(sorted(kraken.holder_shas(refs)), ["holder", "solo"])
+
+    def test_claim_refs_of_filters_the_prefix_match_client_side(self):
+        # matching-refs is a PREFIX match: asking for claims/12 also returns
+        # claims/120. Filtering server-side is not an option, so the client does
+        # it — a neighbouring issue's lease must never read as this issue's.
+        kraken.http_request = lambda m, p, body=None: (200, json.dumps([
+            {"ref": "refs/kraken/claims/12/1", "object": {"sha": "mine"}},
+            {"ref": "refs/kraken/claims/120/9", "object": {"sha": "theirs"}},
+        ]))
+        self.assertEqual(kraken.claim_refs_of("o/t", 12), (True, [(1, "mine")]))
+
+    def test_claim_refs_of_separates_absent_from_unreadable(self):
+        kraken.http_request = lambda m, p, body=None: (200, "[]")
+        self.assertEqual(kraken.claim_refs_of("o/t", 7), (True, []))
+        kraken.http_request = lambda m, p, body=None: (500, "")
+        self.assertEqual(kraken.claim_refs_of("o/t", 7), (False, []))
 
     def test_claim_ref_list_transport_failure_is_none(self):
         kraken.http_request = lambda m, p, body=None: (500, "")
         self.assertIsNone(kraken.claim_ref_list("o/t"))
 
     def test_claim_ref_owner_names_the_ref_holder(self):
-        # The §5 re-check discriminator: a 422 is a real loss only when the ref
-        # belongs to another worker. claim_ref_owner GETs the single claim ref
-        # by exact name (git/ref/, not the matching-refs prefix scan) and reads
-        # its commit marker to name the current holder.
+        # The §5 re-check discriminator: a 422 is a real loss only when the
+        # lease belongs to another worker. claim_ref_owner reads the issue's
+        # generation ladder and takes the HIGHEST one — the holder — then reads
+        # its commit marker to name them.
         def present(m, p, body=None):
-            # Only the exact ref for issue 7 exists; every other issue 404s.
-            if p.endswith("/git/ref/kraken/claims/7"):
+            # Only issue 7 carries a lease; every other issue reads as empty.
+            if "matching-refs/kraken/claims/7" in p:
                 return (200, json.dumps(
-                    {"ref": "refs/kraken/claims/7", "object": {"sha": "sha7"}}))
-            return (404, json.dumps({"message": "Not Found"}))
+                    [{"ref": "refs/kraken/claims/7/1", "object": {"sha": "sha7"}}]))
+            return (200, "[]")
         kraken.http_request = present
         kraken.graphql = lambda q: {"data": {"repository": {
             "c0": {"committedDate": "t", "message": clm("w1")}}}}
         self.assertEqual(kraken.claim_ref_owner("o/t", 7), "w1")
         self.assertEqual(kraken.claim_ref_owner("o/t", "7"), "w1")
-        # Absent ref (404) → None (treated as not-ours by the caller).
+        # No lease at all → None (treated as not-ours by the caller).
         self.assertIsNone(kraken.claim_ref_owner("o/t", 9))
         # Transport failure → None, never a guessed owner — an ambiguous read
         # must never turn a real CAS loss into a false win.
@@ -304,8 +382,16 @@ class ContractCommandTests(unittest.TestCase):
         self.assertEqual(
             set(kraken.MARKER_TYPES),
             {"claim", "heartbeat", "needs-decision", "delivered", "released",
-             "stale-claim", "note"})
+             "stale-claim", "lease-expired", "note"})
         self.assertNotIn("requeue", kraken.MARKER_TYPES)
+
+    def test_lease_clock_is_readable_off_the_contract(self):
+        # SKILL.md and the docs quote the cadence rather than copying it, so the
+        # two fields must answer the live constants — including the derivation.
+        ttl = int(self._run("lease-ttl")[0])
+        renew = int(self._run("lease-renew")[0])
+        self.assertEqual(ttl, kraken.lease_ttl_seconds())
+        self.assertEqual(renew, ttl // kraken.LEASE_RENEW_DIVISOR)
 
     def test_retired_contract_fields_are_gone(self):
         # reset-types / liveness-types belonged to the retired claim-window
@@ -554,7 +640,7 @@ class ClaimNextIterationTests(unittest.TestCase):
         # tests; here they pass over an empty queue read, so only the iteration
         # logic is under test.
         kraken.verify_project = lambda repo, project: (True, "")
-        kraken.read_queue = lambda repo: ([], {})
+        kraken.read_queue = lambda repo, now=None, ttl=None: ([], {})
         kraken.resolve_commit_meta = lambda repo, shas: {}
         self.attempted = []
 
@@ -576,9 +662,12 @@ class ClaimNextIterationTests(unittest.TestCase):
                   "labels": {"nodes": [{"name": "kraken-task"}]},
                   "comments": {"nodes": []},
                   "blockedBy": {"nodes": []}} for r in (rows or [])]
-        kraken.read_queue = lambda repo: None if rows is None else (nodes, {})
+        kraken.read_queue = (
+            lambda repo, now=None, ttl=None: None if rows is None else (nodes, {})
+        )
 
-        def fake_claim_once(repo, issue, worker, allow_held=()):
+        def fake_claim_once(repo, issue, worker, allow_held=(), lease=None,
+                            ttl=None, probe_lease=False):
             self.attempted.append(issue)
             return claim_results[issue]
         kraken._claim_once = fake_claim_once
@@ -721,7 +810,7 @@ class ClaimNextProjectGateTests(unittest.TestCase):
         self._orig_classify = kraken.classify_queue
         self._orig_read_queue = kraken.read_queue
         self._orig_commit_meta = kraken.resolve_commit_meta
-        kraken.read_queue = lambda repo: ([], {})
+        kraken.read_queue = lambda repo, now=None, ttl=None: ([], {})
         kraken.resolve_commit_meta = lambda repo, shas: {}
         self.classified = []
 
@@ -918,13 +1007,17 @@ class StatusComputeTests(unittest.TestCase):
         }
 
     def _call(self, nodes, project="", claim_refs=None, commit_meta=None,
-              comments=None, merged=None, projects=None):
+              comments=None, merged=None, projects=None, ttl=None):
         comments = comments or {}
         merged = merged or {}
+        commit_meta = commit_meta or {}
+        # Tests seed {issue: sha}; the lease view wants the generation ladder.
+        refs = {n: [(1, sha)] for n, sha in (claim_refs or {}).items()}
         return kraken.compute_status(
             "o/tasks", project, nodes, self.NOW,
-            claim_refs=claim_refs or {},
-            commit_meta=commit_meta or {},
+            leases=kraken.lease_state(refs, commit_meta, self.NOW,
+                                      kraken.lease_ttl_seconds(ttl)),
+            commit_meta=commit_meta,
             comment_reader=lambda r, i: comments.get(i, []),
             pr_merged=lambda u: merged.get(u, False),
             project_lister=lambda r: projects if projects is not None else [])
@@ -1014,7 +1107,7 @@ class StatusComputeTests(unittest.TestCase):
             comments = {88: [{"body": dlv("w", pr=gitlab_mr), "createdAt": "t"}]}
             report = kraken.compute_status(
                 "o/tasks", "", nodes, self.NOW,
-                claim_refs={}, commit_meta={},
+                leases={}, commit_meta={},
                 comment_reader=lambda r, i: comments.get(i, []),
                 pr_merged=kraken.pr_is_merged,
                 project_lister=lambda r: ["app"])
@@ -1038,7 +1131,7 @@ class StatusComputeTests(unittest.TestCase):
         nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]
         report = kraken.compute_status(
             "o/tasks", "", nodes, self.NOW,
-            claim_refs={}, commit_meta={},
+            leases={}, commit_meta={},
             comment_reader=lambda r, i: None,  # transport failure
             pr_merged=lambda u: False,
             project_lister=lambda r: [])
@@ -1049,7 +1142,7 @@ class StatusComputeTests(unittest.TestCase):
         comments = {88: [{"body": dlv("w", pr="https://x/pull/5"), "createdAt": "t"}]}
         report = kraken.compute_status(
             "o/tasks", "", nodes, self.NOW,
-            claim_refs={}, commit_meta={},
+            leases={}, commit_meta={},
             comment_reader=lambda r, i: comments.get(i, []),
             pr_merged=lambda u: None,  # transport failure
             project_lister=lambda r: [])
@@ -1105,11 +1198,14 @@ class QueueHygieneTests(unittest.TestCase):
         self.assertEqual([i["number"] for i in kraken.queue_hygiene([a, b])], [4, 9])
 
 
-def _task_node(number, labels):
+def _task_node(number, labels, comments=()):
     """A minimal open-task node the way fetch_open_tasks returns it — the only
-    issue input reconcile_plan reads."""
+    issue input reconcile_plan reads. `comments` is the trailing window the
+    repeat-expiry guard counts `lease-expired` markers in."""
     return {"number": number, "title": "t%d" % number, "createdAt": "2026-01-01",
-            "body": "", "labels": {"nodes": [{"name": l} for l in labels]}}
+            "body": "", "labels": {"nodes": [{"name": l} for l in labels]},
+            "comments": {"nodes": [{"body": b, "createdAt": "2026-01-01"}
+                                   for b in comments]}}
 
 
 def _at(hours_ago):
@@ -1118,16 +1214,151 @@ def _at(hours_ago):
     return {"committedDate": dt.strftime("%Y-%m-%dT%H:%M:%SZ"), "message": clm("w")}
 
 
+def _seconds_ago(seconds, worker="w"):
+    dt = (kraken.datetime.datetime.now(kraken.datetime.timezone.utc)
+          - kraken.datetime.timedelta(seconds=seconds))
+    return {"committedDate": dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "message": clm(worker)}
+
+
+def _leases(**by_issue):
+    """{issue: age-in-seconds-or-None} -> the lease view a reader hands the
+    planner, each task holding a single generation. None models a ref whose
+    commit date could not be read."""
+    refs, meta = {}, {}
+    for key, age in by_issue.items():
+        num = int(key.lstrip("i"))
+        sha = "s%d" % num
+        refs[num] = [(1, sha)]
+        if age is not None:
+            meta[sha] = _seconds_ago(age)
+    return kraken.lease_state(refs, meta, kraken.time.time(),
+                              kraken.LEASE_DEFAULT_TTL_SECONDS)
+
+
+class LeaseStateTests(unittest.TestCase):
+    """The lease clock as a pure decision (PROTOCOL.md §5): the ref's commit date
+    is the lease timestamp, the TTL is how long it holds, and the READER applies
+    the expiry — so this is the one place expiry is decided for every consumer."""
+
+    def test_a_fresh_lease_is_live(self):
+        leases = _leases(i1=10)
+        self.assertTrue(leases[1]["live"])
+        self.assertEqual(leases[1]["worker"], "w")
+        self.assertLess(leases[1]["age"], 60)
+
+    def test_the_holder_is_the_highest_generation(self):
+        # Ownership is the top of the ladder: a superseded generation left
+        # behind by a failed cleanup decides nothing, and its stale date must
+        # not make a live lease read as expired.
+        old, new = "s-old", "s-new"
+        meta = {old: _seconds_ago(kraken.LEASE_DEFAULT_TTL_SECONDS + 600, "w-dead"),
+                new: _seconds_ago(5, "w-live")}
+        leases = kraken.lease_state({1: [(1, old), (2, new)]}, meta,
+                                    kraken.time.time(),
+                                    kraken.LEASE_DEFAULT_TTL_SECONDS)
+        self.assertEqual(leases[1]["gen"], 2)
+        self.assertEqual(leases[1]["worker"], "w-live")
+        self.assertTrue(leases[1]["live"])
+        self.assertEqual(leases[1]["gens"], [1, 2],
+                         "the ladder must stay visible so a release drops it all")
+
+    def test_a_lease_past_the_ttl_is_not_live(self):
+        self.assertFalse(_leases(i1=kraken.LEASE_DEFAULT_TTL_SECONDS + 5)[1]["live"])
+
+    def test_the_ttl_boundary_expires(self):
+        # Exactly at the TTL the lease is over — `age < ttl` is the live test, so
+        # the boundary belongs to the thief, never to a holder that stopped
+        # renewing precisely one TTL ago.
+        self.assertFalse(_leases(i1=kraken.LEASE_DEFAULT_TTL_SECONDS)[1]["live"])
+        self.assertTrue(_leases(i1=kraken.LEASE_DEFAULT_TTL_SECONDS - 5)[1]["live"])
+
+    def test_an_unreadable_commit_fails_open_to_the_steal(self):
+        # Nothing proves the holder alive, so the lease must not hold the task
+        # forever behind a clock nobody can read.
+        lease = _leases(i1=None)[1]
+        self.assertIsNone(lease["age"])
+        self.assertFalse(lease["live"])
+
+    def test_live_leases_keeps_only_the_held_ones(self):
+        leases = _leases(i1=10, i2=kraken.LEASE_DEFAULT_TTL_SECONDS + 60, i3=None)
+        self.assertEqual(kraken.live_leases(leases), {1: "s1"})
+
+
+class LeaseTtlTests(unittest.TestCase):
+    """The TTL's resolution order and the renewal cadence derived from it."""
+
+    def setUp(self):
+        self._saved = os.environ.get("KRAKEN_LEASE_TTL_SECONDS")
+        os.environ.pop("KRAKEN_LEASE_TTL_SECONDS", None)
+
+    def tearDown(self):
+        os.environ.pop("KRAKEN_LEASE_TTL_SECONDS", None)
+        if self._saved is not None:
+            os.environ["KRAKEN_LEASE_TTL_SECONDS"] = self._saved
+
+    def test_default_is_minutes_not_hours(self):
+        # The whole point of the lease: recovery bounded in minutes. A default
+        # that crept back into hours would silently restore protocol/5's latency.
+        self.assertEqual(kraken.lease_ttl_seconds(),
+                         kraken.LEASE_DEFAULT_TTL_SECONDS)
+        self.assertLessEqual(kraken.LEASE_DEFAULT_TTL_SECONDS, 3600)
+
+    def test_explicit_wins(self):
+        os.environ["KRAKEN_LEASE_TTL_SECONDS"] = "60"
+        self.assertEqual(kraken.lease_ttl_seconds(120), 120)
+
+    def test_env_override(self):
+        os.environ["KRAKEN_LEASE_TTL_SECONDS"] = "300"
+        self.assertEqual(kraken.lease_ttl_seconds(), 300)
+
+    def test_garbage_env_falls_back(self):
+        os.environ["KRAKEN_LEASE_TTL_SECONDS"] = "soon"
+        self.assertEqual(kraken.lease_ttl_seconds(),
+                         kraken.LEASE_DEFAULT_TTL_SECONDS)
+
+    def test_a_non_positive_ttl_falls_back(self):
+        # A zero or negative TTL would expire every live lease on the next read
+        # — the one misconfiguration that turns the queue into a stampede.
+        for bad in ("0", "-300"):
+            os.environ["KRAKEN_LEASE_TTL_SECONDS"] = bad
+            self.assertEqual(kraken.lease_ttl_seconds(),
+                             kraken.LEASE_DEFAULT_TTL_SECONDS)
+
+    def test_renewal_is_derived_from_the_ttl(self):
+        self.assertEqual(kraken.lease_renew_seconds(900), 300)
+        os.environ["KRAKEN_LEASE_TTL_SECONDS"] = "600"
+        self.assertEqual(kraken.lease_renew_seconds(), 200)
+
+    def test_renewal_leaves_room_for_two_lost_renewals(self):
+        ttl = kraken.LEASE_DEFAULT_TTL_SECONDS
+        self.assertLessEqual(kraken.lease_renew_seconds(ttl) * 3, ttl)
+
+
+class ExpiryCountTests(unittest.TestCase):
+    """The repeat-expiry guard's counter: how often this task has already been
+    stolen, read off the comment window the queue walk already carries."""
+
+    def test_counts_only_lease_expired_markers(self):
+        node = _task_node(1, ["kraken-task"], comments=[
+            "> prose\n" + expired(), clm("w1"), stale("something else"),
+            "operator reply", expired(previous="w2"),
+        ])
+        self.assertEqual(kraken.expiry_count(node), 2)
+
+    def test_a_clean_thread_counts_zero(self):
+        self.assertEqual(kraken.expiry_count(_task_node(1, ["kraken-task"])), 0)
+
+
 class ReconcilerPlanTests(unittest.TestCase):
     """reconcile_plan's four rules as a PURE decision (PROTOCOL.md §6) — no
     transport at all, because the whole point of protocol/5 is that the rules run
     off the queue read a reader already has. `nodes` carries only OPEN kraken-task
     issues, which is what makes rule 1 free: a ref whose issue is absent from that
-    walk is a lock over a closed (or no-longer-task) issue."""
+    walk is a lock over a closed (or no-longer-task) issue.
 
-    def _plan(self, nodes, refs, commit_meta, max_hours=6):
-        return kraken.reconcile_plan(nodes, refs, commit_meta,
-                                     kraken.time.time(), max_hours)
+    Under protocol/6 an EXPIRED lease is deliberately NOT in here: it is unheld,
+    the claim path steals it, and the reconciler writes nothing."""
 
     def _rules(self, plan):
         return sorted((a["rule"], a["issue"]) for a in plan)
@@ -1135,44 +1366,68 @@ class ReconcilerPlanTests(unittest.TestCase):
     def test_rule1_orphan_lock_on_held_or_absent_issue(self):
         # #4 escalated but its ref lingered; #6 is closed, so it is not in nodes.
         nodes = [_task_node(4, ["kraken-task", "needs-decision"])]
-        plan = self._plan(nodes, {4: "s4", 6: "s6"},
-                          {"s4": _at(0), "s6": _at(0)})
+        plan = kraken.reconcile_plan(nodes, _leases(i4=10, i6=10))
         self.assertEqual(self._rules(plan),
                          [("orphan-lock", 4), ("orphan-lock", 6)])
 
-    def test_rule2_stale_claim(self):
+    def test_an_expired_lease_alone_plans_nothing(self):
+        # THE protocol/6 change: expiry is not a repair. The reader has already
+        # decided the task is free; planning a write here would escalate every
+        # slow worker to the operator.
         nodes = [_task_node(1, ["kraken-task", "in-progress"])]
-        plan = self._plan(nodes, {1: "s1"}, {"s1": _at(8)})
+        expired_age = kraken.LEASE_DEFAULT_TTL_SECONDS + 60
+        self.assertEqual(kraken.reconcile_plan(nodes, _leases(i1=expired_age)), [])
+
+    def test_an_unreadable_lease_alone_plans_nothing(self):
+        nodes = [_task_node(1, ["kraken-task", "in-progress"])]
+        self.assertEqual(kraken.reconcile_plan(nodes, _leases(i1=None)), [])
+
+    def test_rule2_reclaim_after_repeated_expiries(self):
+        # A task nobody can finish: past the threshold it stops circulating and
+        # becomes the operator's call.
+        comments = [expired()] * kraken.LEASE_EXPIRY_ESCALATE
+        nodes = [_task_node(1, ["kraken-task", "in-progress"], comments=comments)]
+        expired_age = kraken.LEASE_DEFAULT_TTL_SECONDS + 60
+        plan = kraken.reconcile_plan(nodes, _leases(i1=expired_age))
         self.assertEqual(self._rules(plan), [("reclaim", 1)])
         self.assertTrue(plan[0]["held"], "the in-progress label must be swapped off")
-        self.assertIn("8h", plan[0]["reason"])
+        self.assertIn(str(kraken.LEASE_EXPIRY_ESCALATE), plan[0]["reason"])
 
-    def test_unreadable_commit_is_infinitely_stale(self):
-        nodes = [_task_node(1, ["kraken-task", "in-progress"])]
-        plan = self._plan(nodes, {1: "s1"}, {})  # no commit meta for the sha
-        self.assertEqual(self._rules(plan), [("reclaim", 1)])
-        self.assertIn("no readable heartbeat", plan[0]["reason"])
+    def test_one_expiry_below_the_threshold_still_gets_stolen(self):
+        comments = [expired()] * (kraken.LEASE_EXPIRY_ESCALATE - 1)
+        nodes = [_task_node(1, ["kraken-task", "in-progress"], comments=comments)]
+        expired_age = kraken.LEASE_DEFAULT_TTL_SECONDS + 60
+        self.assertEqual(kraken.reconcile_plan(nodes, _leases(i1=expired_age)), [])
 
-    def test_boundary_exactly_at_max_hours_is_stale(self):
-        nodes = [_task_node(1, ["kraken-task", "in-progress"])]
-        self.assertEqual(self._rules(self._plan(nodes, {1: "s1"}, {"s1": _at(6)})),
-                         [("reclaim", 1)])
-        self.assertEqual(self._plan(nodes, {1: "s1"}, {"s1": _at(5)}), [])
+    def test_a_live_lease_is_never_reclaimed_however_many_expiries(self):
+        # The count is about a dead task, not a busy one: whoever holds a LIVE
+        # lease is working, and the history of past steals must not evict them.
+        comments = [expired()] * (kraken.LEASE_EXPIRY_ESCALATE + 2)
+        nodes = [_task_node(1, ["kraken-task", "in-progress"], comments=comments)]
+        self.assertEqual(kraken.reconcile_plan(nodes, _leases(i1=10)), [])
 
     def test_rule3_heal_missing_label(self):
         nodes = [_task_node(5, ["kraken-task"])]
-        plan = self._plan(nodes, {5: "s5"}, {"s5": _at(0)})
+        plan = kraken.reconcile_plan(nodes, _leases(i5=10))
         self.assertEqual(self._rules(plan), [("heal", 5)])
 
+    def test_heal_never_re_holds_an_expired_lease(self):
+        # Restoring in-progress for a lease the reader just declared free would
+        # put the task back behind a label with nothing behind IT.
+        nodes = [_task_node(5, ["kraken-task"])]
+        expired_age = kraken.LEASE_DEFAULT_TTL_SECONDS + 60
+        self.assertEqual(kraken.reconcile_plan(nodes, _leases(i5=expired_age)), [])
+
     def test_rule4_requeue_orphan_projection(self):
-        plan = self._plan([_task_node(3, ["kraken-task", "in-progress"])], {}, {})
+        plan = kraken.reconcile_plan(
+            [_task_node(3, ["kraken-task", "in-progress"])], {})
         self.assertEqual(self._rules(plan), [("requeue", 3)])
 
     def test_agreeing_state_plans_nothing(self):
         nodes = [_task_node(2, ["kraken-task", "in-progress"]),
                  _task_node(9, ["kraken-task"]),
                  _task_node(10, ["kraken-task", "awaiting-merge"])]
-        self.assertEqual(self._plan(nodes, {2: "s2"}, {"s2": _at(0)}), [],
+        self.assertEqual(kraken.reconcile_plan(nodes, _leases(i2=10)), [],
                          "a queue that already agrees must cost zero writes")
 
 
@@ -1182,9 +1437,9 @@ class ReconcilerApplyTests(unittest.TestCase):
 
     def setUp(self):
         self._saved = {n: getattr(kraken, n) for n in
-                       ("claim_ref_delete", "swap_labels", "post_comment")}
+                       ("drop_generations", "swap_labels", "post_comment")}
         self.writes = []
-        kraken.claim_ref_delete = lambda repo, n: (
+        kraken.drop_generations = lambda repo, n, gens: (
             self.writes.append(("del-ref", n)) or True)
         kraken.swap_labels = lambda repo, n, remove=None, add=None: (
             self.writes.append(("labels", n, remove, add)) or True)
@@ -1203,8 +1458,8 @@ class ReconcilerApplyTests(unittest.TestCase):
 
     def test_reclaim_deletes_the_ref_last(self):
         counts, _ = self._apply([{"rule": "reclaim", "issue": 1,
-                                  "reason": "no worker heartbeat for 8h",
-                                  "held": True}])
+                                  "reason": "the lease expired 3 times",
+                                  "held": True, "gens": [1]}])
         self.assertEqual(counts["reclaim"], 1)
         kinds = [w[0] for w in self.writes]
         self.assertEqual(kinds, ["labels", "comment", "del-ref"],
@@ -1213,14 +1468,15 @@ class ReconcilerApplyTests(unittest.TestCase):
 
     def test_reclaim_comment_carries_the_worker_disclaimer(self):
         self._apply([{"rule": "reclaim", "issue": 1, "reason": "silent",
-                      "held": True}])
+                      "held": True, "gens": [1]}])
         body = [w for w in self.writes if w[0] == "comment"][0][2]
         self.assertTrue(body.startswith(kraken.disclaimer("w-reaper")),
                         "a worker posts the reclaim now, so §4 attribution applies")
         self.assertIn('"type":"stale-claim"', body)
 
     def test_orphan_lock_touches_nothing_but_the_ref(self):
-        self._apply([{"rule": "orphan-lock", "issue": 4, "reason": "x"}])
+        self._apply([{"rule": "orphan-lock", "issue": 4, "reason": "x",
+                      "gens": [1]}])
         self.assertEqual(self.writes, [("del-ref", 4)])
 
     def test_transport_failure_answers_none(self):
@@ -1237,13 +1493,15 @@ class ReconcilerApplyTests(unittest.TestCase):
         nodes = [_task_node(1, ["kraken-task", "in-progress"]),
                  _task_node(3, ["kraken-task", "in-progress"]),
                  _task_node(5, ["kraken-task"])]
-        refs = {1: "s1", 5: "s5", 6: "s6"}
-        plan = [{"rule": "reclaim", "issue": 1, "reason": "x", "held": True},
+        leases = _leases(i1=10, i5=10, i6=10)
+        plan = [{"rule": "reclaim", "issue": 1, "reason": "x", "held": True,
+                 "gens": [1]},
                 {"rule": "requeue", "issue": 3, "reason": "x"},
                 {"rule": "heal", "issue": 5, "reason": "x"},
-                {"rule": "orphan-lock", "issue": 6, "reason": "x"}]
-        kraken.project_reconcile(plan, nodes, refs)
-        self.assertEqual(refs, {5: "s5"}, "reclaimed/orphan refs must be dropped")
+                {"rule": "orphan-lock", "issue": 6, "reason": "x", "gens": [1]}]
+        kraken.project_reconcile(plan, nodes, leases)
+        self.assertEqual(sorted(leases), [5],
+                         "reclaimed/orphan leases must be dropped")
         labels = {n["number"]: set(kraken.label_names_of(n)) for n in nodes}
         self.assertEqual(labels[1], {"kraken-task", "needs-decision"})
         self.assertEqual(labels[3], {"kraken-task"})

@@ -26,7 +26,7 @@ AI coding agents made each change cheap — but you are still the bus between th
 | Claiming (no race) | Atomic compare-and-swap on a git ref — one creator wins, HTTP 422 to the rest |
 | Dependencies       | Native `blocked-by` relationships — closing a task unblocks |
 | Parallelism        | Capacity = how many workers you launch; 1 task per worker   |
-| Dead workers       | Ref-anchored heartbeats; the next worker to read the queue reclaims the dead claim |
+| Dead workers       | The claim is a **lease** (30 min, renewed as you work); stop renewing and the next worker to read the queue takes the task over |
 | Bad tasks          | The issue form requires Goal + Acceptance; `status` reports what a worker still cannot start |
 | Dashboard          | The GitHub UI — filters, notifications, mobile app          |
 | Audit trail        | The issue timeline: who, when, why, validated how           |
@@ -102,7 +102,7 @@ Five nouns do all the work in Kraken. Keep them straight and the rest follows:
     │  COORDINATION REPO (GitHub Issues) │
     │  labels · claim refs · dependencies│
     └──────────────────┬─────────────────┘
-                       │ claim, heartbeat, release
+                       │ claim, renew, release
                        ▼
     ┌────────────────────────────────────┐
     │  TENTACLES (agent workers)         │
@@ -131,7 +131,7 @@ flowchart LR
     Q -->|claim| P[in-progress]
     P -->|deliver — draft PR or analysis| M[awaiting-merge]
     P -->|blocking question| D[needs-decision]
-    P -->|silent for 6h — the next reader reclaims it| D
+    P -->|lease expires — the next reader steals it| Q
     D -->|you reply — the next reader requeues it| Q
     M -->|review asks changes + remove the label| Q
     M -->|PR merges — the task closes| E(((closed)))
@@ -145,7 +145,7 @@ bouncing) a PR. The tentacles drive everything else.
 
 The coordination contract — task shape, state machine, the machine marker,
 the claim algorithm — is normatively specified in
-[`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/5`); it is agent-agnostic, so any
+[`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/6`); it is agent-agnostic, so any
 tool that follows it can be a tentacle on the same queue. How a Claude Code worker
 executes it — subagents, the watcher, the bundled transition program — lives in
 [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md); the GitHub Copilot CLI
@@ -165,7 +165,7 @@ worker reuses that same skill with the harness deltas in [`AGENTS.md`](AGENTS.md
    <details>
    <summary>Not running the plugin? The same setup by hand</summary>
 
-   **One file.** Under `kraken-protocol/5` the coordination repo runs nothing —
+   **One file.** Under `kraken-protocol/6` the coordination repo runs nothing —
    no workflows, and no vendored copy of the transition program for them to
    exec. Stale claims, an answered task's requeue and queue-entry validation are
    all derived by the reader, on the queue read a worker or `status` performs
@@ -332,7 +332,7 @@ delivered, the result with the acceptance check executed, and the close:
 | **GitHub Copilot coding agent** | Issue assignment (native GitHub) | Hosted sandbox; nothing beyond GitHub Actions | No | Code is on GitHub and the task needs nothing the platform doesn't already give it |
 | **Claude Code cloud / scheduled agents** | A schedule waking a managed sandbox | Zero — the sandbox is managed for you | No | You want scheduled runs with no environment to keep and the sandbox suits the work |
 | **`claude-code-action` in CI** | An event trigger (push / PR / label) | Ephemeral, disposable CI runner | No | Automation is CI-shaped and a fresh runner is the correct environment |
-| **Kraken** | An issue queue drained via [`kraken-protocol/5`](PROTOCOL.md) | Your prepared, long-lived environment | Yes | The environment is the point — work must run where your services, data, and credentials already live, with named, audited workers |
+| **Kraken** | An issue queue drained via [`kraken-protocol/6`](PROTOCOL.md) | Your prepared, long-lived environment | Yes | The environment is the point — work must run where your services, data, and credentials already live, with named, audited workers |
 
 By 2026 the obvious reflex is "doesn't this already exist?" — assigning an issue
 to an agent is native GitHub, Claude Code runs scheduled agents in the cloud, and
@@ -369,7 +369,7 @@ a fresh, ephemeral runner is exactly the clean context you want; nothing here
 beats that, so wire it up. Kraken is for the other case: a queue you drain
 unattended against long-lived services and a toolchain that would cost minutes
 to rebuild on every runner. And because a tentacle speaks the agent-agnostic
-[`kraken-protocol/5`](PROTOCOL.md), the queue isn't wed to one vendor's action —
+[`kraken-protocol/6`](PROTOCOL.md), the queue isn't wed to one vendor's action —
 any tool that follows the protocol can drain it. **Prefer `claude-code-action`
 when** your automation is CI-shaped and a disposable runner is the correct
 environment; prefer Kraken when the environment is the point and you want no
@@ -431,11 +431,26 @@ nothing is blocked, closed, or relabelled.
 <details>
 <summary><b>A worker died mid-task — is the queue stuck?</b></summary>
 
-No. Workers heartbeat by advancing their claim ref, and the coordination repo's
-reconciler workflow drags any claim whose ref has been silent for 6h to
-`needs-decision` for you to triage — relaunch or investigate. (It also cleans up
-after itself: an orphaned lock is deleted, and an `in-progress` label with no
-claim behind it is requeued.)
+No, and you don't have to do anything. A claim is a **lease**: the worker holds
+it by renewing its claim ref every few minutes while it works, and the ref's
+commit date is the clock. Stop renewing — crash, kill, closed laptop, dead
+container — and the lease **expires 30 minutes later**. The next worker to read
+the queue sees an expired lease, takes the task over (leaving a note saying it
+did), and carries on from the existing branch and thread. No cron, nothing
+installed in the coordination repo, and the same behaviour in every harness.
+
+The dead worker cannot come back and stomp on it either: every write it might
+attempt — deliver, escalate, release, even its next renewal — first checks the
+lease is still its own, and refuses if it is not.
+
+You only hear about it if a task defeats **three** workers in a row: at that
+point stealing it again would just burn a fourth, so it goes to
+`needs-decision` for you to triage. (The same read also cleans up after itself:
+an orphaned lock is deleted, and an `in-progress` label with no lease behind it
+is requeued.)
+
+Want a different clock? `KRAKEN_LEASE_TTL_SECONDS` sets the TTL; the renewal
+interval is always a third of it (`kraken.py contract lease-renew`).
 
 </details>
 
@@ -459,11 +474,10 @@ limit lasts each retry fails for free, and the first one after the window resets
 wakes the worker, which re-claims the task and continues on the existing branch
 with the whole thread in hand. No operator gesture needed.
 
-The reconciler stays the backstop for the residue — the hook itself failing, or a
-hard kill: 6h of silence still moves the task to `needs-decision` with a
-`stale-claim` comment, and removing that label requeues it, as ever. The manual
-shortcut also still works: remove `in-progress` from a stuck issue and it is
-startable again immediately.
+The lease is the backstop for the residue — the hook itself failing, or a hard
+kill: 30 minutes without a renewal and the task is free for the next worker
+regardless, no hook involved. The manual shortcut also still works: remove
+`in-progress` from a stuck issue and it is startable again immediately.
 
 </details>
 
@@ -485,13 +499,13 @@ its watcher live inside a Claude Code session. But a **graceful** exit now
 self-heals: a bundled `SessionEnd` hook fires when you close the terminal or
 `/exit`, and if the worker was still holding a claim it runs `kraken.py release`
 for you — `released: <worker>` / `reason: session ended`, then drops `in-progress`,
-so the task is back on the queue in seconds instead of waiting out the 6h
-staleness threshold. That covers a graceful end only; a usage-limit pause never
-fires `SessionEnd` either, but its own `StopFailure` hook releases the claim
-there (see the limit FAQ above). A hard kill / crash / power loss fires neither
-hook, so the **reconcile stays the backstop** for hard death: the next worker to
-read the queue reclaims a claim that has gone silent past the threshold (§6) —
-no server-side job, so it needs nothing running anywhere. And the watcher is no
+so the task is back on the queue in seconds instead of at the end of its lease.
+That covers a graceful end only; a usage-limit pause never fires `SessionEnd`
+either, but its own `StopFailure` hook releases the claim there (see the limit
+FAQ above). A hard kill / crash / power loss fires neither hook — and it does not
+matter: the **lease expires on its own** 30 minutes later and the next worker to
+read the queue takes the task over (§5). The hooks only make that immediate; no
+server-side job, so it needs nothing running anywhere. And the watcher is no
 escape hatch: it is **step 4 of `unleash`**, armed inside the same session — not
 a command of its own — so it dies with it. Moving the poll out of the model is
 what [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) already does, though it
@@ -504,27 +518,29 @@ GitHub Actions) is open work —
 <details>
 <summary><b>Is the Copilot CLI worker as self-healing as the Claude Code one?</b></summary>
 
-At the protocol layer, yes — **"agent-agnostic"** in [PROTOCOL.md](PROTOCOL.md)
-means the **wire contract**: the labels, the claim-ref CAS, the hidden markers,
-and the attribution disclaimer are identical for every harness. It does **not**
-promise identical failure-recovery latency, because the recovery machinery is
-harness-specific: the bundled `SessionEnd`/`StopFailure` hooks are **Claude Code
-hook events** and never fire around a `copilot` process.
+Yes — and as of `kraken-protocol/6` that includes recovery **latency**, which is
+the part that used to differ. A claim is a **lease** that expires 30 minutes
+after its last renewal, and expiry is applied by whoever reads the queue. So a
+worker that dies in any harness, in any way, frees its task within one TTL with
+nothing installed. The bundled `SessionEnd`/`StopFailure` hooks are **Claude Code
+hook events** and still never fire around a `copilot` process — they are now an
+optimization (seconds instead of minutes), not the mechanism.
 
-The Copilot harness gets its equivalent from
-[`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) itself: `kraken.py claim`
-records the open claim in `~/.kraken/claim-<worker>.json` and every terminal
-transition (deliver/escalate/release) removes it, so when the `copilot` process
-exits with that file still present the drain provably died holding the claim —
-crash, kill, or a rate-limit abort — and the loop runs `kraken.py release` on
-the spot. Its exit/Ctrl-C trap does the same when the loop itself is stopped
-mid-drain. The release is scoped to the loop's own `--worker-name`, so a
-co-located worker's live claim is never touched.
+[`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) carries the same optimization
+for Copilot: `kraken.py claim` records the open claim in
+`~/.kraken/claim-<worker>.json` and every terminal transition
+(deliver/escalate/release) removes it, so when the `copilot` process exits with
+that file still present the drain provably died holding the lease — crash, kill,
+or a rate-limit abort — and the loop runs `kraken.py release` on the spot. Its
+exit/Ctrl-C trap does the same when the loop itself is stopped mid-drain. The
+release is scoped to the loop's own `--worker-name`, and `release` refuses (exit
+10) on a lease that is no longer this worker's, so a co-located or successor
+worker's live lease is never touched.
 
-The asymmetry that remains: a **bare** `copilot -p …` invocation outside the
-loop has no supervisor, so a death there waits for the ~6h reconciler — just
-like a hard kill / power loss does on either harness. If you drain with
-Copilot, run it through the loop.
+A **bare** `copilot -p …` invocation outside the loop is therefore no longer a
+correctness gap, just a slower one: its task comes back in minutes rather than
+seconds — exactly like a hard kill / power loss on either harness. Run it
+through the loop anyway: it also skips the model entirely on an idle queue.
 
 </details>
 

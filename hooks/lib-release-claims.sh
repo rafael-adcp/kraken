@@ -8,7 +8,9 @@
 # `kraken.py release` for every claim-*.json still present (in practice one; the
 # glob also self-heals any straggler and needs no session->worker mapping).
 #
-# Best-effort: a failed release falls back to the reaper, never fails the caller.
+# Best-effort: a failed release falls back to the lease expiring on its own
+# (PROTOCOL.md §5) — it never fails the caller. Everything here is an
+# OPTIMIZATION over that expiry, not a precondition for recovery.
 
 # CLAUDE_PLUGIN_ROOT is set when Claude Code runs a hook; the dirname fallback
 # keeps the scripts runnable standalone (tests).

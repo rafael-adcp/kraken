@@ -39,6 +39,12 @@ TRIPWIRE_DIR = os.path.join(GH_STUB_DIR, "no-gh")
 sys.path.insert(0, GH_STUB_DIR)
 import server as stub_server  # noqa: E402  (path set above)
 
+# The program under test still runs as a SUBPROCESS — that is the whole point of
+# this suite. This import exists only to read its constants (the lease clock), so
+# no test hardcodes a number kraken.py owns.
+sys.path.insert(0, SCRIPTS)
+import kraken as kraken_module  # noqa: E402  (path set above)
+
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -48,9 +54,23 @@ def iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def ago_iso(hours):
-    """ISO timestamp `hours` hours in the past (lib.sh's ago_iso)."""
-    return iso(utcnow() - timedelta(hours=hours))
+def ago_iso(hours=0, seconds=0):
+    """ISO timestamp `hours`/`seconds` in the past. The lease clock is measured
+    in minutes (PROTOCOL.md §5), so seconds is the resolution that matters now;
+    hours stays for the tests that predate it."""
+    return iso(utcnow() - timedelta(hours=hours, seconds=seconds))
+
+
+def lease_ttl():
+    """The default lease TTL, read off the program under test rather than
+    hardcoded, so retuning the clock never means editing a pile of tests."""
+    return kraken_module.LEASE_DEFAULT_TTL_SECONDS
+
+
+def expiry_marker(worker="w-thief", previous="w-dead"):
+    """A `lease-expired` comment body — what a steal leaves behind, and what the
+    repeat-expiry guard (§6) counts."""
+    return kraken_module.lease_expired_body(worker, {"worker": previous, "age": 99})
 
 
 def now_iso():
@@ -99,6 +119,7 @@ class KrakenConformanceTest(unittest.TestCase):
         the stub shares this process, so they are set on `self.knobs` here."""
         self.knobs.set_fail(mapping.get("GH_STUB_FAIL"))
         self.knobs.set_barrier(mapping.get("GH_STUB_BARRIER") or 0)
+        self.knobs.set_cas_barrier(mapping.get("GH_STUB_CAS_BARRIER") or 0)
 
     def base_env(self, extra=None):
         env = dict(os.environ)
@@ -226,30 +247,60 @@ class KrakenConformanceTest(unittest.TestCase):
     def mk_repo(self, slug):
         self._write(os.path.join(self.state, "repo", "nameWithOwner"), slug + "\n")
 
-    def mk_claim_ref(self, n, worker, age_hours=0, msg=None, mtype="claim"):
-        """Seed a live claim ref for issue `n` — the protocol/4 lock: the
-        STATE/refs/<n> file plus its commit object, committedDate backdated by
-        `age_hours` (the reaper's clock). The commit message is the standard
-        kraken marker, exactly as create_claim_commit writes it. Returns the
-        seeded sha."""
+    def mk_claim_ref(self, n, worker, age_hours=0, msg=None, mtype="claim",
+                     age_seconds=0, orphan_commit=False, gen=1):
+        """Seed a claim ref for issue `n` — the lock, and its LEASE: the
+        refs file for generation `gen` plus its commit object, committedDate
+        backdated by `age_hours`/`age_seconds` (the lease clock, PROTOCOL.md §5).
+        The commit message is the standard kraken marker, exactly as
+        create_claim_commit writes it. Returns the seeded sha.
+
+        `gen=0` seeds the bare protocol/5 ref name, which readers take as the
+        lowest generation — the shape a queue predating protocol/6 carries.
+
+        `orphan_commit=True` writes the ref WITHOUT its commit object — a lease
+        whose clock cannot be read, which §5 requires readers to treat as
+        expired (fail open to the steal) rather than as holding forever."""
         payload = {"type": mtype, "worker": worker}
         if msg is not None:
             payload["msg"] = msg
-        sha = hashlib.sha1(("seed-%s-%s" % (n, worker)).encode("utf-8")).hexdigest()
-        self._write(os.path.join(self.state, "objects", sha + ".json"),
-                    json.dumps({"message": make_marker(payload),
-                                "committedDate": ago_iso(age_hours)}))
-        self._write(os.path.join(self.state, "refs", str(n)), sha + "\n")
+        sha = hashlib.sha1(
+            ("seed-%s-%s-%s" % (n, worker, gen)).encode("utf-8")).hexdigest()
+        if not orphan_commit:
+            self._write(os.path.join(self.state, "objects", sha + ".json"),
+                        json.dumps({"message": make_marker(payload),
+                                    "committedDate": ago_iso(age_hours,
+                                                             age_seconds)}))
+        name = str(n) if int(gen) == 0 else "%d-%d" % (int(n), int(gen))
+        self._write(os.path.join(self.state, "refs", name), sha + "\n")
         return sha
 
+    def mk_expired_lease(self, n, worker, **kwargs):
+        """A lease seeded just past the TTL — the steal's precondition."""
+        return self.mk_claim_ref(n, worker, age_seconds=lease_ttl() + 60, **kwargs)
+
+    def claim_generations(self, n):
+        """[(generation, sha), …] for issue `n`, sorted — the lease ladder."""
+        rdir = os.path.join(self.state, "refs")
+        if not os.path.isdir(rdir):
+            return []
+        out = []
+        for name in os.listdir(rdir):
+            issue, _, gen = name.partition("-")
+            if not issue.isdigit() or int(issue) != int(n):
+                continue
+            if gen and not gen.isdigit():
+                continue
+            with open(os.path.join(rdir, name), encoding="utf-8") as f:
+                out.append((int(gen or 0), f.read().strip()))
+        return sorted(out)
+
     def claim_ref(self, n):
-        """The sha the live claim ref for issue `n` points at, or None when no
-        ref exists (the task is unlocked)."""
-        path = os.path.join(self.state, "refs", str(n))
-        if not os.path.isfile(path):
-            return None
-        with open(path, encoding="utf-8") as f:
-            return f.read().strip()
+        """The sha of the ref that HOLDS issue `n` — its highest generation — or
+        None when the task is unlocked. Ownership is the top of the ladder, so
+        this is what every assertion about "who has the lease" reads."""
+        refs = self.claim_generations(n)
+        return refs[-1][1] if refs else None
 
     def claim_ref_exists(self, n):
         return self.claim_ref(n) is not None
@@ -306,6 +357,18 @@ class KrakenConformanceTest(unittest.TestCase):
         with open(os.path.join(self.issue_dir(n), "comments", "%04d.md" % c),
                   encoding="utf-8") as f:
             return f.read().rstrip("\n")
+
+    def comment_bodies(self, n):
+        """Every comment on the issue, oldest first — for the transitions that
+        write more than one (a steal posts its audit note and then its claim)."""
+        cdir = os.path.join(self.issue_dir(n), "comments")
+        if not os.path.isdir(cdir):
+            return []
+        bodies = []
+        for name in sorted(f for f in os.listdir(cdir) if f.endswith(".md")):
+            with open(os.path.join(cdir, name), encoding="utf-8") as f:
+                bodies.append(f.read().rstrip("\n"))
+        return bodies
 
     def claim_state_file(self, worker):
         return os.path.join(self.kraken_state_dir, "claim-%s.json" % worker)
