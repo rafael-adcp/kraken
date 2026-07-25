@@ -26,7 +26,7 @@ AI coding agents made each change cheap — but you are still the bus between th
 | Claiming (no race) | Atomic compare-and-swap on a git ref — one creator wins, HTTP 422 to the rest |
 | Dependencies       | Native `blocked-by` relationships — closing a task unblocks |
 | Parallelism        | Capacity = how many workers you launch; 1 task per worker   |
-| Dead workers       | Ref-anchored heartbeats + an hourly reconciler workflow      |
+| Dead workers       | Ref-anchored heartbeats; the next worker to read the queue reclaims the dead claim |
 | Bad tasks          | A queue-entry validator flags a missing label/Goal/Acceptance |
 | Dashboard          | The GitHub UI — filters, notifications, mobile app          |
 | Audit trail        | The issue timeline: who, when, why, validated how           |
@@ -86,7 +86,7 @@ Five nouns do all the work in Kraken. Keep them straight and the rest follows:
 
 | Concept | What it is | What it is *not* | Lives on |
 | --- | --- | --- | --- |
-| **Coordination repo** | The kraken's head — a private repo whose **Issues are the queue**; also holds the labels (the state machine), the reaper workflow, and the dependency graph | A place for code — it holds none | **GitHub** (required) |
+| **Coordination repo** | The kraken's head — a private repo whose **Issues are the queue**; also holds the labels (the state machine), the claim refs, and the dependency graph | A place for code — it holds none | **GitHub** (required) |
 | **Work repo** | Where the code lives; workers push branches + open draft PRs here | The queue — it holds no tasks | **Anywhere** (GitHub, GitLab, private) |
 | **`project:<name>` label** | A task's **canonical identity** — `--project` filters on it, and it says which prepared environment the task belongs to | Optional — a task without it is invisible to every worker | Coordination repo |
 | **Worker (tentacle)** | A **named** agent session (Claude Code, Copilot CLI, ...) draining the queue **one task at a time**, inside one prepared environment | A pool — capacity is just how many you launch | Your machine / container / clone |
@@ -100,7 +100,7 @@ Five nouns do all the work in Kraken. Keep them straight and the rest follows:
                       ▼
     ┌────────────────────────────────────┐
     │  COORDINATION REPO (GitHub Issues) │
-    │  labels · reaper · dependencies    │
+    │  labels · claim refs · dependencies│
     └──────────────────┬─────────────────┘
                        │ claim, heartbeat, release
                        ▼
@@ -131,7 +131,7 @@ flowchart LR
     Q -->|claim| P[in-progress]
     P -->|deliver — draft PR or analysis| M[awaiting-merge]
     P -->|blocking question| D[needs-decision]
-    P -->|silent for 6h — the reaper| D
+    P -->|silent for 6h — the next reader reclaims it| D
     D -->|you reply — the requeue workflow drops the label| Q
     M -->|review asks changes + remove the label| Q
     M -->|PR merges — the task closes| E(((closed)))
@@ -145,7 +145,7 @@ bouncing) a PR. The tentacles drive everything else.
 
 The coordination contract — task shape, state machine, the machine marker,
 the claim algorithm — is normatively specified in
-[`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/4`); it is agent-agnostic, so any
+[`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/5`); it is agent-agnostic, so any
 tool that follows it can be a tentacle on the same queue. How a Claude Code worker
 executes it — subagents, the watcher, the bundled transition program — lives in
 [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md); the GitHub Copilot CLI
@@ -165,21 +165,22 @@ worker reuses that same skill with the harness deltas in [`AGENTS.md`](AGENTS.md
    <details>
    <summary>Not running the plugin? The same setup by hand</summary>
 
-   The six assets land at `.github/ISSUE_TEMPLATE/task.yml`, the vendored
+   The five assets land at `.github/ISSUE_TEMPLATE/task.yml`, the vendored
    transition program `.github/kraken.py` (which the coordination workflows
-   exec), and the four `.github/workflows/` files (`reclaim-stale.yml`,
-   `cleanup-closed.yml`, `requeue-on-reply.yml`, `validate-task.yml`):
+   exec), and the three `.github/workflows/` files (`cleanup-closed.yml`,
+   `requeue-on-reply.yml`, `validate-task.yml`). There is **no** reconciler
+   workflow: under `kraken-protocol/5` the worker reconciles stale claims on the
+   queue read it performs before every claim (PROTOCOL.md §6).
 
    ```bash
    gh repo create OWNER/tasks --private --clone && cd tasks
    mkdir -p .github/ISSUE_TEMPLATE .github/workflows
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/task-template.yml -o .github/ISSUE_TEMPLATE/task.yml
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/kraken.py -o .github/kraken.py
-   curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/reclaim-stale.yml -o .github/workflows/reclaim-stale.yml
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/cleanup-closed.yml -o .github/workflows/cleanup-closed.yml
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/requeue-on-reply.yml -o .github/workflows/requeue-on-reply.yml
    curl -sL https://raw.githubusercontent.com/rafael-adcp/kraken/main/skills/unleash/validate-task.yml -o .github/workflows/validate-task.yml
-   git add -A && git commit -m "chore: kraken task template, transition program, reaper, cleanup, requeue, and validator" && git push
+   git add -A && git commit -m "chore: kraken task template, transition program, cleanup, requeue, and validator" && git push
 
    gh -R OWNER/tasks label create kraken-task
    gh -R OWNER/tasks label create in-progress
@@ -335,7 +336,7 @@ delivered, the result with the acceptance check executed, and the close:
 | **GitHub Copilot coding agent** | Issue assignment (native GitHub) | Hosted sandbox; nothing beyond GitHub Actions | No | Code is on GitHub and the task needs nothing the platform doesn't already give it |
 | **Claude Code cloud / scheduled agents** | A schedule waking a managed sandbox | Zero — the sandbox is managed for you | No | You want scheduled runs with no environment to keep and the sandbox suits the work |
 | **`claude-code-action` in CI** | An event trigger (push / PR / label) | Ephemeral, disposable CI runner | No | Automation is CI-shaped and a fresh runner is the correct environment |
-| **Kraken** | An issue queue drained via [`kraken-protocol/4`](PROTOCOL.md) | Your prepared, long-lived environment | Yes | The environment is the point — work must run where your services, data, and credentials already live, with named, audited workers |
+| **Kraken** | An issue queue drained via [`kraken-protocol/5`](PROTOCOL.md) | Your prepared, long-lived environment | Yes | The environment is the point — work must run where your services, data, and credentials already live, with named, audited workers |
 
 By 2026 the obvious reflex is "doesn't this already exist?" — assigning an issue
 to an agent is native GitHub, Claude Code runs scheduled agents in the cloud, and
@@ -372,7 +373,7 @@ a fresh, ephemeral runner is exactly the clean context you want; nothing here
 beats that, so wire it up. Kraken is for the other case: a queue you drain
 unattended against long-lived services and a toolchain that would cost minutes
 to rebuild on every runner. And because a tentacle speaks the agent-agnostic
-[`kraken-protocol/4`](PROTOCOL.md), the queue isn't wed to one vendor's action —
+[`kraken-protocol/5`](PROTOCOL.md), the queue isn't wed to one vendor's action —
 any tool that follows the protocol can drain it. **Prefer `claude-code-action`
 when** your automation is CI-shaped and a disposable runner is the correct
 environment; prefer Kraken when the environment is the point and you want no
@@ -484,11 +485,13 @@ its watcher live inside a Claude Code session. But a **graceful** exit now
 self-heals: a bundled `SessionEnd` hook fires when you close the terminal or
 `/exit`, and if the worker was still holding a claim it runs `kraken.py release`
 for you — `released: <worker>` / `reason: session ended`, then drops `in-progress`,
-so the task is back on the queue in seconds instead of waiting ~6h for the
-reaper. That covers a graceful end only; a usage-limit pause never fires
-`SessionEnd` either, but its own `StopFailure` hook releases the claim there
-(see the limit FAQ above). A hard kill / crash / power loss fires neither hook,
-so the **reaper stays the backstop** for hard death. And the watcher is no
+so the task is back on the queue in seconds instead of waiting out the 6h
+staleness threshold. That covers a graceful end only; a usage-limit pause never
+fires `SessionEnd` either, but its own `StopFailure` hook releases the claim
+there (see the limit FAQ above). A hard kill / crash / power loss fires neither
+hook, so the **reconcile stays the backstop** for hard death: the next worker to
+read the queue reclaims a claim that has gone silent past the threshold (§6) —
+no server-side job, so it needs nothing running anywhere. And the watcher is no
 escape hatch: it is **step 4 of `unleash`**, armed inside the same session — not
 a command of its own — so it dies with it. Moving the poll out of the model is
 what [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) already does, though it
@@ -539,7 +542,7 @@ run is always a deliberate release.
 
 Nothing that runs. `/plugin uninstall kraken@kraken` removes the skills — the
 only thing Kraken ever installs on a machine. The queue is just a private repo
-of issues you own (the reaper and cleanup workflows live inside it): keep it,
+of issues you own (the cleanup and validator workflows live inside it): keep it,
 archive it, or delete it. No service to stop, no daemon to kill, no state
 anywhere else.
 

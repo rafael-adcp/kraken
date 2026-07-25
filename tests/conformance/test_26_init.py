@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """init conformance: the bootstrap kraken.py init mechanizes — verify or create
 the coordination repo PRIVATE, install the bundled assets via the contents API
-(create / skip-unchanged / flag-drifted), and upsert the canonical labels —
-proven against the gh stub with no LLM."""
+(create / skip-unchanged / flag-drifted), PRUNE the assets this protocol
+revision retired, and upsert the canonical labels — proven against the gh stub
+with no LLM."""
 import filecmp
 import json
 import os
@@ -10,16 +11,18 @@ import unittest
 
 from harness import KrakenConformanceTest, SCRIPTS
 
-ASSET_SRCS = ["task-template.yml", "kraken.py", "reclaim-stale.yml",
+ASSET_SRCS = ["task-template.yml", "kraken.py",
               "cleanup-closed.yml", "requeue-on-reply.yml", "validate-task.yml"]
 ASSET_DSTS = [
     ".github/ISSUE_TEMPLATE/task.yml",
     ".github/kraken.py",
-    ".github/workflows/reclaim-stale.yml",
     ".github/workflows/cleanup-closed.yml",
     ".github/workflows/requeue-on-reply.yml",
     ".github/workflows/validate-task.yml",
 ]
+# protocol/5 retired the scheduled reconciler; init deletes the copy an earlier
+# release installed instead of keeping it in sync.
+RETIRED_DST = ".github/workflows/reclaim-stale.yml"
 
 
 class InitTests(KrakenConformanceTest):
@@ -64,16 +67,58 @@ class InitTests(KrakenConformanceTest):
         #        overwritten (a plain run never writes over an existing file) ---
         self.truncate_log()
         custom = os.path.join(self.state, "custom.yml")
-        self._write(custom, "name: my hand-edited reaper\n")
-        self.mk_content(".github/workflows/reclaim-stale.yml", custom)
+        self._write(custom, "name: my hand-edited validator\n")
+        self.mk_content(".github/workflows/validate-task.yml", custom)
         r = self.kraken("init", "OWNER/tasks")
         self.assertEqual(r.rc, 0, "create-only exit")
-        self.assertIn("init: asset .github/workflows/reclaim-stale.yml (drifted)", r.out,
+        self.assertIn("init: asset .github/workflows/validate-task.yml (drifted)", r.out,
                       "drifted asset not flagged")
-        self.assertTrue(filecmp.cmp(self._contents(".github/workflows/reclaim-stale.yml"), custom, shallow=False),
+        self.assertTrue(filecmp.cmp(self._contents(".github/workflows/validate-task.yml"), custom, shallow=False),
                         "plain init overwrote a drifted asset — create-only violated")
         self.assertNotIn("PUT ", self.log_text(),
                          "a PUT was issued during a plain run where every asset already exists")
+
+    def test_init_prunes_the_retired_reconciler_workflow(self):
+        """Re-running init on a repo stood up by an older release is the
+        migration: the retired workflow is deleted, so no cron keeps mutating
+        labels under semantics the workers no longer implement."""
+        self.mk_repo("OWNER/tasks")
+        vendored = os.path.join(self.state, "old-reaper.yml")
+        # The bytes an older init installed: the bundled header is the sentinel
+        # that proves the file is kraken's own to delete.
+        self._write(vendored,
+                    "# Reaper for kraken. Installed by `init` into the "
+                    "coordination repo as\n# .github/workflows/reclaim-stale.yml"
+                    "\nname: Reclaim stale claims\n")
+        self.mk_content(RETIRED_DST, vendored)
+
+        r = self.kraken("init", "OWNER/tasks")
+        self.assertEqual(r.rc, 0, "init exit with a retired asset present")
+        self.assertIn("init: asset %s (removed)" % RETIRED_DST, r.out,
+                      "the retired workflow was not reported removed")
+        self.assertFalse(os.path.isfile(self._contents(RETIRED_DST)),
+                         "the retired workflow survived the prune")
+        self.assertIn("assets_removed=1", r.out)
+
+        # Idempotent: a second run finds nothing to prune and says removed=0.
+        r = self.kraken("init", "OWNER/tasks")
+        self.assertEqual(r.rc, 0, "second init exit")
+        self.assertIn("assets_removed=0", r.out, "the prune is not idempotent")
+
+    def test_prune_spares_a_file_that_is_not_krakens(self):
+        """The prune is gated on kraken's own header. An operator who wrote their
+        own workflow at that path keeps it — a bootstrap command must never
+        delete something it did not install."""
+        self.mk_repo("OWNER/tasks")
+        mine = os.path.join(self.state, "mine.yml")
+        self._write(mine, "name: my own nightly job\non:\n  schedule: []\n")
+        self.mk_content(RETIRED_DST, mine)
+
+        r = self.kraken("init", "OWNER/tasks")
+        self.assertEqual(r.rc, 0, "init exit")
+        self.assertIn("assets_removed=0", r.out)
+        self.assertTrue(filecmp.cmp(self._contents(RETIRED_DST), mine, shallow=False),
+                        "init deleted a workflow it did not install")
 
 
 if __name__ == "__main__":

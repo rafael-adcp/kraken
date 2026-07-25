@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""The reconciler (kraken.py reap) makes the claim refs (the lock) and the
-in-progress labels (the projection) agree. Staleness is anchored to the claim
-ref's commit date — nothing on the issue timeline resets it — and the four
-rules (reclaim stale, delete orphan lock, heal missing label, requeue orphan
-projection) each get a scenario. Drives the real kraken.py reap through the
-gh-stub."""
+"""The reconcile pass run STAND-ALONE (kraken.py reap) — the operator-side escape
+hatch for what a drain does on its own read (that path is pinned in
+test_34_claim_next_reconcile.py). It makes the claim refs (the lock) and the
+in-progress labels (the projection) agree: staleness is anchored to the claim
+ref's commit date — nothing on the issue timeline resets it — and the four rules
+(reclaim stale, delete orphan lock, heal missing label, requeue orphan
+projection) each get a scenario."""
 import unittest
 
 from harness import KrakenConformanceTest
