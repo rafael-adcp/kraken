@@ -61,8 +61,10 @@ import datetime
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -1440,18 +1442,23 @@ def verify_project(repo, project):
             % (repo, project, configured, repo, project))
 
 
-def cmd_claim_next(args):
-    """Collapse the deterministic claim loop into one invocation: read the queue,
-    reconcile it (§6), then list startable candidates oldest-first and guard + CAS
-    each in turn, stopping at the first win. Losses (10/11) move to the next
-    candidate; a transport fault (20) stops with state-unknown; an exhausted queue
-    is EXIT_NONE. Never retries a lost CAS on the same issue (PROTOCOL.md §5) — it
-    iterates forward, never back."""
-    repo, project, worker = args.repo, args.project, args.worker
+def claim_next(repo, project, worker, label="claim-next"):
+    """The deterministic claim loop, as a function: read the queue, reconcile it
+    (§6), then list startable candidates in queue order and guard + CAS each in
+    turn, stopping at the first win. Losses (10/11) move to the next candidate; a
+    transport fault (20) stops with state-unknown; an exhausted queue is
+    EXIT_NONE. Never retries a lost CAS on the same issue (PROTOCOL.md §5) — it
+    iterates forward, never back.
 
+    Returns `(exit_code, node)`, where `node` is the FULL queue node of the task
+    won (labels, comment window and blocked-by included) or None. Both the
+    `claim-next` subcommand and the `work` supervisor go through here: one is a
+    printer over it, the other briefs an agent from the node — so the contended
+    sequence can never drift between an interactive worker and a supervised
+    one."""
     refused = refuse_second_claim(worker)
     if refused is not None:
-        return refused
+        return (refused, None)
 
     # Project preflight: before the queue is read and before any write,
     # because a worker scoped to a project label the repo does not carry is deaf,
@@ -1459,16 +1466,16 @@ def cmd_claim_next(args):
     ok, message = verify_project(repo, project)
     if ok is None:
         print(message)
-        return EXIT_TRANSPORT
+        return (EXIT_TRANSPORT, None)
     if not ok:
         print(message)
-        return EXIT_UNKNOWN_PROJECT
+        return (EXIT_UNKNOWN_PROJECT, None)
 
     ttl = lease_ttl_seconds()
     read = read_queue(repo, ttl=ttl)
     if read is None:
-        print("claim-next: gh-failure stage=list")
-        return EXIT_TRANSPORT
+        print(f"{label}: gh-failure stage=list")
+        return (EXIT_TRANSPORT, None)
     nodes, leases = read
 
     # Reconcile before classifying (PROTOCOL.md §6). A dead worker's lease
@@ -1483,18 +1490,18 @@ def cmd_claim_next(args):
         if apply_reconcile(repo, plan, worker) is None:
             # Writes of ours may have half-landed — same state-unknown rule as a
             # failed claim: re-check before retrying, never push on.
-            print("claim-next: gh-failure stage=reconcile — state unknown, re-check")
-            return EXIT_TRANSPORT
+            print(f"{label}: gh-failure stage=reconcile — state unknown, re-check")
+            return (EXIT_TRANSPORT, None)
         project_reconcile(plan, nodes, leases)
 
     rows = classify_queue(repo, project, include_body=True, read=read)
     if rows is None:
-        print("claim-next: gh-failure stage=list")
-        return EXIT_TRANSPORT
+        print(f"{label}: gh-failure stage=list")
+        return (EXIT_TRANSPORT, None)
 
     by_number = {n["number"]: n for n in nodes}
     live = live_leases(leases)
-    for number, title, _created, state, body in rows:  # priority-first, then FIFO
+    for number, title, _created, state, _body in rows:  # priority-first, then FIFO
         if state != "startable":
             continue
         # Re-derive the requeue verdict from the same node the filter used — a
@@ -1506,23 +1513,33 @@ def cmd_claim_next(args):
         rc = _claim_once(repo, number, worker, allow_held=allow_held,
                          lease=leases.get(number), ttl=ttl)
         if rc == EXIT_OK:
-            if args.json:
-                print(json.dumps({"issue": number, "title": title, "body": body}))
-            else:
-                print(f"claim-next: claimed issue={number} worker={worker}")
-                print(f"{number}\t{title}")
-                print()
-                print(body)
-            return EXIT_OK
+            return (EXIT_OK, by_number[number])
         if rc == EXIT_TRANSPORT:
             # State is now ambiguous — do NOT move on to another candidate while
             # a write of ours may have half-landed. Re-check before any retry.
-            print(f"claim-next: gh-failure issue={number} — state unknown, re-check")
-            return EXIT_TRANSPORT
+            print(f"{label}: gh-failure issue={number} — state unknown, re-check")
+            return (EXIT_TRANSPORT, None)
         # EXIT_LOST (10) / EXIT_NOT_CLEAR (11): back off, try the next candidate.
 
-    print(f"claim-next: none project:{project}")
-    return EXIT_NONE
+    print(f"{label}: none project:{project}")
+    return (EXIT_NONE, None)
+
+
+def cmd_claim_next(args):
+    """The `claim-next` subcommand: the shared claim loop above, printed."""
+    rc, node = claim_next(args.repo, args.project, args.worker)
+    if rc != EXIT_OK:
+        return rc
+    number, title = node["number"], node.get("title", "")
+    body = node.get("body") or ""
+    if args.json:
+        print(json.dumps({"issue": number, "title": title, "body": body}))
+    else:
+        print(f"claim-next: claimed issue={number} worker={args.worker}")
+        print(f"{number}\t{title}")
+        print()
+        print(body)
+    return EXIT_OK
 
 
 # --- subcommand: heartbeat ---------------------------------------------------
@@ -1834,6 +1851,425 @@ def cmd_watch(args):
                 last_emit = time.time()
             prev = snapshot
         time.sleep(poll_seconds)
+
+
+# --- subcommand: work — the supervisor ---------------------------------------
+#
+# THE INVERSION. Through protocol/6 the worker's life cycle lived in prose: a
+# skill told the model to claim, to renew, to deliver in the right order, and to
+# release if it died — plus a second document per harness for the parts that
+# differ, and two implementations of the same self-heal. Prose that must be
+# obeyed for the protocol to hold is load-bearing prose, and a model is not a
+# reliable executor of it.
+#
+# `work` owns the life cycle in CODE and calls the agent for exactly one thing:
+# judgement. It claims (§5), renews the lease on a thread, hands the task to
+# `--agent` as a directory of files, reads the verdict the agent leaves behind,
+# performs the terminal transition itself, and releases on the way out of every
+# exit path there is — return, exception, SIGINT, SIGTERM.
+#
+# What that buys: porting to another agent is a flag, not a document; the
+# self-heal is the same code for every harness; and the ordering rules stop
+# depending on anyone remembering them.
+#
+# What it deliberately does NOT do: parse the agent's stdout. The verdict travels
+# by file (see `read_verdict`), so the stream is free to be pure narration — the
+# same reason protocol/3 stopped parsing comment prose for machine state.
+
+WORK_DEFAULT_TIMEOUT_SECONDS = 3600
+WORK_DEFAULT_POLL_SECONDS = 60
+# The three verdicts an agent may return, each mapping to one terminal
+# transition. Anything else — a missing file, junk, a crash, a timeout — resolves
+# to `released`, because silence is never success (see `resolve_verdict`).
+WORK_VERDICTS = ("delivered", "needs-decision", "released")
+
+
+def task_dir_for(repo, issue):
+    """Where one task's briefing, result and log live. Under the state dir
+    rather than a temp dir, and never cleaned up automatically: `agent.log` is
+    the only record of what an unattended agent actually did, and deleting it on
+    success would throw away the evidence exactly when things look fine."""
+    slug = repo.replace("/", "-")
+    stamp = datetime.datetime.now(
+        datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return os.path.join(state_dir(), "work", f"{slug}-{issue}-{stamp}")
+
+
+def render_briefing(node, repo, project, worker):
+    """The task as the agent receives it: `(payload, markdown)`.
+
+    Everything here came free with the queue read the claim already paid for —
+    labels, the resolved blocked-by, and the trailing comment window — so a
+    complete briefing costs no extra request. The comment window is the part
+    that is easy to forget and expensive to miss: a REVIEW BOUNCE requeues a
+    task whose feedback exists only on the thread, and a supervised agent may
+    have no `gh` and no access to the coordination repo at all."""
+    number = node["number"]
+    labels = sorted(label_names_of(node))
+    comments = [
+        {"body": rec.get("body") or "", "createdAt": rec.get("createdAt") or ""}
+        for rec in comment_nodes_of(node)
+    ]
+    blocked = [
+        {"number": b.get("number"), "state": b.get("state")}
+        for b in (node.get("blockedBy") or {}).get("nodes", [])
+    ]
+    payload = {
+        "repo": repo,
+        "issue": number,
+        "title": node.get("title", ""),
+        "body": node.get("body") or "",
+        "project": project,
+        "worker": worker,
+        "labels": labels,
+        "blocked_by": blocked,
+        "comments": comments,
+        "lease_ttl_seconds": lease_ttl_seconds(),
+        "lease_renew_seconds": lease_renew_seconds(),
+    }
+
+    lines = [
+        f"# {repo}#{number} — {payload['title']}",
+        "",
+        f"You are kraken worker `{worker}`, working project `{project}`.",
+        "",
+        "## Task", "",
+        payload["body"] or "_(the task has an empty body)_",
+        "",
+    ]
+    if comments:
+        lines += ["## Thread (oldest first)", "",
+                  "The task may have been requeued after a review or a decision "
+                  "— if so, what to do next is in here.", ""]
+        for rec in comments:
+            lines += [f"- {rec['createdAt']}:", ""]
+            lines += ["  " + l for l in rec["body"].split("\n")]
+            lines.append("")
+    lines += [
+        "## What to return", "",
+        "Write your result to `$KRAKEN_TASK_DIR/result.md` and your verdict to",
+        "`$KRAKEN_TASK_DIR/verdict.json`:", "",
+        "```json",
+        '{"verdict": "delivered", "pr": "https://github.com/owner/repo/pull/1"}',
+        "```", "",
+        "- `delivered` — the work is done and pushed as a draft PR; `pr` is its URL.",
+        "- `needs-decision` — blocked on a call only the operator can make; put the",
+        "  question, the options and your recommendation in `result.md`.",
+        "- `released` — you could not do it; say why in `result.md`.", "",
+        "Do not change labels or claim refs yourself: the supervisor performs the",
+        "transition from your verdict, in the order the protocol requires.",
+    ]
+    return payload, "\n".join(lines) + "\n"
+
+
+def write_briefing(path, node, repo, project, worker):
+    """Materialise the briefing. Returns the payload, or None if the directory
+    cannot be written — a task we cannot brief must not be executed."""
+    payload, markdown = render_briefing(node, repo, project, worker)
+    try:
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "task.json"), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+        with open(os.path.join(path, "task.md"), "w", encoding="utf-8") as fh:
+            fh.write(markdown)
+    except OSError:
+        return None
+    return payload
+
+
+class LeaseRenewer(threading.Thread):
+    """Renews the lease every TTL/3 while the agent works (PROTOCOL.md §6).
+
+    A DAEMON THREAD, deliberately. What a renewer must get right is not
+    concurrency but LIFETIME: it has to die when the worker dies, or it keeps a
+    dead worker's lease alive forever and rebuilds the eternal lock protocol/6
+    just removed. A thread inherits that binding from the process — SIGKILL the
+    supervisor and the renewals stop, so the lease expires on schedule. A
+    detached subprocess would have to reconstruct it by watching a parent PID,
+    and get that right on every platform.
+
+    It also watches for the one answer that means stop: a renewal refused
+    because the lease was stolen (§6 — exit 10). `lost` then goes true and the
+    supervisor aborts the agent, because every write it could still make would
+    be refused anyway (§5.3) and the task now belongs to someone else."""
+
+    def __init__(self, repo, issue, worker, interval=None):
+        super().__init__(daemon=True)
+        self.repo, self.issue, self.worker = repo, issue, worker
+        self.interval = max(1, interval or lease_renew_seconds())
+        self.lost = False
+        self._stop = threading.Event()
+
+    def run(self):
+        while not self._stop.wait(self.interval):
+            rc = cmd_heartbeat(argparse.Namespace(
+                repo=self.repo, issue=self.issue, worker=self.worker,
+                message="supervised by kraken.py work",
+            ))
+            if rc == EXIT_LOST:
+                self.lost = True
+                return
+            # A transport failure is not a loss: the next tick tries again, and
+            # the TTL is sized so two lost renewals still leave the lease held.
+
+    def stop(self):
+        self._stop.set()
+
+
+def run_agent(command, task_dir, timeout, log_path, abort=None):
+    """Run the operator's `--agent` command with the briefing in its environment.
+
+    Returns `(status, exit_code)` where status is "ok", "timeout" or "aborted".
+
+    Three things it must do, and one it must not:
+
+    - **Tee.** Every line goes to this process's stdout AND to `agent.log`.
+      Capture-only would make an agent that has printed nothing for forty
+      minutes indistinguishable from a hung one, and the log is the operator's
+      only window into an unattended run; stream-only would leave the record
+      scrollback-dependent.
+    - **Its own process group** (`start_new_session`), so a timeout kills the
+      agent's children too. An agent that spawns a build and is merely SIGTERMed
+      leaves the build holding the machine.
+    - **Escalate on timeout**: SIGTERM, a grace period, then SIGKILL.
+    - **Never** be parsed for a verdict. The stream is narration; the verdict is
+      a file.
+
+    `abort` is a predicate polled while waiting — it is how the renewer's
+    stolen-lease discovery stops work that has become someone else's."""
+    env = dict(os.environ)
+    env["KRAKEN_TASK_DIR"] = task_dir
+    env["KRAKEN_RESULT_FILE"] = os.path.join(task_dir, "result.md")
+    env["KRAKEN_VERDICT_FILE"] = os.path.join(task_dir, "verdict.json")
+
+    proc = subprocess.Popen(
+        command, shell=True, cwd=os.getcwd(), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, start_new_session=True,
+    )
+
+    def pump():
+        try:
+            with open(log_path, "w", encoding="utf-8") as log:
+                for line in proc.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    log.write(line)
+                    log.flush()
+        except (OSError, ValueError):
+            pass
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+
+    deadline = time.time() + timeout if timeout else None
+    status = "ok"
+    while True:
+        try:
+            proc.wait(timeout=1)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if abort is not None and abort():
+            status = "aborted"
+            break
+        if deadline is not None and time.time() > deadline:
+            status = "timeout"
+            break
+
+    if status != "ok":
+        _kill_process_group(proc)
+    reader.join(timeout=5)
+    return (status, proc.returncode)
+
+
+def _kill_process_group(proc):
+    """SIGTERM the agent's whole process group, then SIGKILL what survives."""
+    for sig, grace in ((signal.SIGTERM, 10), (signal.SIGKILL, 5)):
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except (OSError, ProcessLookupError):
+            return
+        try:
+            proc.wait(timeout=grace)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def read_verdict(task_dir):
+    """The agent's verdict, or None when it did not leave a usable one.
+
+    A file, never stdout. The agent's stream is also its log and models emit
+    prose, so a sentinel in it could be forged by the work itself — the same
+    prefix-collision class protocol/3 removed from comments, and not worth
+    reintroducing at this boundary."""
+    try:
+        with open(os.path.join(task_dir, "verdict.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    verdict = data.get("verdict")
+    if verdict not in WORK_VERDICTS:
+        return None
+    return data
+
+
+def resolve_verdict(repo, issue, worker, task_dir, status, exit_code):
+    """Turn what the agent did into the terminal transition, and perform it.
+
+    The resolution order is where honesty is enforced:
+
+      1. the claim state file is GONE — the agent performed its own terminal
+         transition (the interactive skill still does, and so may any
+         kraken-aware agent). Respect it and write nothing;
+      2. a valid verdict — perform it;
+      3. non-zero exit, no verdict — release, naming the exit code;
+      4. zero exit, no verdict — release. **Silence is never success**: this is
+         the case that would otherwise let a model that did nothing look exactly
+         like one that delivered;
+      5. timed out or aborted — release, naming why.
+
+    Every degraded case lands on `release`, which is the honest outcome: the
+    task requeues with a `released` marker on the thread, and any branch or PR
+    the agent pushed is still there for whoever picks it up."""
+    if open_claim(worker) is None:
+        print(f"work: agent resolved issue={issue} itself — nothing to do")
+        return EXIT_OK
+
+    result_file = os.path.join(task_dir, "result.md")
+    verdict = read_verdict(task_dir) if status == "ok" else None
+
+    if verdict is None:
+        if status == "timeout":
+            reason = f"the agent exceeded its {int(_last_timeout[0])}s timeout"
+        elif status == "aborted":
+            reason = "the lease was taken over while the agent was working"
+        elif exit_code not in (0, None):
+            reason = f"the agent exited {exit_code} without a verdict"
+        else:
+            reason = "the agent produced no verdict"
+        return _work_release(repo, issue, worker, reason)
+
+    if not os.path.isfile(result_file):
+        # A verdict with nothing behind it: the transitions all need a body, and
+        # inventing one would put words on the thread nobody wrote.
+        return _work_release(
+            repo, issue, worker,
+            f"the agent returned '{verdict['verdict']}' but wrote no result")
+
+    kind = verdict["verdict"]
+    if kind == "delivered":
+        return cmd_deliver(argparse.Namespace(
+            repo=repo, issue=issue, worker=worker,
+            result_file=result_file, pr_url=str(verdict.get("pr") or "")))
+    if kind == "needs-decision":
+        return cmd_escalate(argparse.Namespace(
+            repo=repo, issue=issue, worker=worker, question_file=result_file))
+    return _work_release(repo, issue, worker, read_body_file(result_file))
+
+
+# The timeout in force, so `resolve_verdict` can name it in a release reason
+# without threading the value through every call site.
+_last_timeout = [WORK_DEFAULT_TIMEOUT_SECONDS]
+
+
+def _work_release(repo, issue, worker, reason):
+    return cmd_release(argparse.Namespace(
+        repo=repo, issue=issue, worker=worker, reason=reason))
+
+
+def work_once(repo, project, worker, agent, timeout):
+    """Claim one task, run the agent on it, resolve the outcome. Returns the
+    exit code: 0 delivered/escalated/released honestly, 3 nothing startable,
+    10/11/13/20 as the claim reports them."""
+    rc, node = claim_next(repo, project, worker, label="work")
+    if rc != EXIT_OK:
+        return rc
+
+    issue = node["number"]
+    task_dir = task_dir_for(repo, issue)
+    if write_briefing(task_dir, node, repo, project, worker) is None:
+        print(f"work: cannot write the briefing to {task_dir} — releasing "
+              f"issue={issue}", file=sys.stderr)
+        return _work_release(repo, issue, worker,
+                             "the supervisor could not write the task briefing")
+
+    print(f"work: claimed issue={issue} worker={worker} dir={task_dir}")
+    renewer = LeaseRenewer(repo, issue, worker)
+    renewer.start()
+    try:
+        status, exit_code = run_agent(
+            agent, task_dir, timeout, os.path.join(task_dir, "agent.log"),
+            abort=lambda: renewer.lost,
+        )
+    finally:
+        renewer.stop()
+
+    if renewer.lost:
+        # The lease was stolen while this agent worked. Do NOT release: the ref
+        # is someone else's now, and `release` would refuse anyway (§5.3).
+        clear_claim_state(worker)
+        print(f"work: lost-lease issue={issue} — another worker holds the task")
+        return EXIT_LOST
+
+    rc = resolve_verdict(repo, issue, worker, task_dir, status, exit_code)
+    if rc == EXIT_OK:
+        print(f"work: resolved issue={issue} worker={worker} dir={task_dir}")
+    return rc
+
+
+def release_open_claim(repo, worker, reason):
+    """Release whatever claim this worker still holds — the supervisor's
+    exit path, and the reason `work` needs no lifecycle hook on any harness.
+
+    Best-effort by construction: if it cannot land, the lease expires on its own
+    within one TTL (§5), so this is the fast path rather than the mechanism."""
+    issue = open_claim(worker)
+    if issue is None:
+        return
+    print(f"work: releasing issue={issue} on the way out ({reason})")
+    _work_release(repo, issue, worker, reason)
+
+
+def cmd_work(args):
+    """The supervisor: own the life cycle, call the agent only for judgement."""
+    repo, project, worker = args.repo, args.project, args.worker
+    timeout = args.timeout if args.timeout is not None else WORK_DEFAULT_TIMEOUT_SECONDS
+    poll = args.poll if args.poll is not None else WORK_DEFAULT_POLL_SECONDS
+    _last_timeout[0] = timeout
+
+    # SIGINT/SIGTERM become exceptions so the `finally` below runs. Without this
+    # a Ctrl-C or a `docker stop` would leave the claim held until its TTL —
+    # correct, but slower than it needs to be.
+    def _signal_exit(signum, _frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _signal_exit)
+        except (ValueError, OSError):
+            pass  # not the main thread, or a platform without it
+
+    try:
+        while True:
+            rc = work_once(repo, project, worker, args.agent, timeout)
+            if args.once:
+                return rc
+            if rc in (EXIT_UNKNOWN_PROJECT, EXIT_USAGE):
+                return rc          # misconfiguration: polling cannot fix it
+            if rc == EXIT_TRANSPORT:
+                # State unknown. Back off rather than hammering a repo we cannot
+                # read — and never claim again while our own writes are in doubt.
+                print("work: transport failure — backing off", file=sys.stderr)
+            time.sleep(poll)
+    except KeyboardInterrupt as exc:
+        print(f"\nwork: stopping ({exc})")
+        return EXIT_OK
+    finally:
+        release_open_claim(repo, worker, "the supervisor exited")
 
 
 # --- subcommand: status ------------------------------------------------------
@@ -2964,6 +3400,30 @@ def build_parser():
     p.add_argument("repo")
     p.add_argument("project")
     p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser(
+        "work",
+        help="the supervisor: claim, renew the lease, run --agent on the task, "
+             "perform the transition from its verdict, release on the way out",
+    )
+    p.add_argument("repo")
+    p.add_argument("--project", required=True,
+                   help="only take project:<name> tasks")
+    p.add_argument("--worker-name", dest="worker", required=True,
+                   help="this worker's identity in every claim and comment")
+    p.add_argument("--agent", required=True,
+                   help="the command that does the work. It is given "
+                        "$KRAKEN_TASK_DIR holding task.json/task.md, and leaves "
+                        "result.md + verdict.json behind. The task never reaches "
+                        "this string — a task body is untrusted input")
+    p.add_argument("--once", action="store_true",
+                   help="drain one task and exit (no polling loop)")
+    p.add_argument("--poll", type=int, default=None,
+                   help=f"seconds between polls (default {WORK_DEFAULT_POLL_SECONDS})")
+    p.add_argument("--timeout", type=int, default=None,
+                   help="seconds before the agent is killed and the task "
+                        f"released (default {WORK_DEFAULT_TIMEOUT_SECONDS})")
+    p.set_defaults(func=cmd_work)
 
     p = sub.add_parser(
         "reap",

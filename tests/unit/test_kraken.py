@@ -656,9 +656,11 @@ class ClaimNextIterationTests(unittest.TestCase):
             lambda repo, project, include_body=False, read=None: rows
         )
         # claim-next re-derives each candidate's requeue verdict off the node the
-        # filter used, so the read has to carry a node per row.
+        # filter used, and returns that same node to its caller, so the read has
+        # to carry a node per row — carrying the row's own body, exactly as
+        # classify_queue does in production (the row body IS node["body"]).
         # rows=None models a failed queue read, which now surfaces at read_queue.
-        nodes = [{"number": r[0], "title": r[1], "createdAt": r[2], "body": "",
+        nodes = [{"number": r[0], "title": r[1], "createdAt": r[2], "body": r[4],
                   "labels": {"nodes": [{"name": "kraken-task"}]},
                   "comments": {"nodes": []},
                   "blockedBy": {"nodes": []}} for r in (rows or [])]

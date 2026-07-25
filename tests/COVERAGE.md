@@ -129,6 +129,24 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 | §12 nothing is installed | Nothing is installed into the coordination repo for the protocol to work: `init` commits the issue form and the labels, there is no vendored copy of the program and therefore no version handshake | ✅ pinned | `tests/conformance/test_26_init.py` pins the asset set down to the one template, proves every retired workflow AND the vendored program are deleted from a repo an older release set up, and that the prune spares a file kraken did not write; `tests/conformance/test_34_claim_next_reconcile.py` `test_the_drain_no_longer_reads_the_vendored_program` proves a drain reads no `.github/kraken.py` and does not refuse when it is absent, and `test_a_drain_costs_no_more_than_it_did_before` pins the per-drain call budget against protocol/4's. |
 | L409 | Matching the exit-code contract (`0`/`10`/`11`/`20`) is **RECOMMENDED**; the wire contract is what conformance means | ✅ pinned | `0` success: `tests/conformance/test_02_claim_clear.py`; `10` lost CAS: `tests/conformance/test_04_claim_race.py`, `tests/conformance/test_05_claim_thread_independence.py`; `11` no longer clear: `tests/conformance/test_03_claim_held.py`; `20` transport failure: `tests/conformance/test_07_gh_failure.py`, `tests/conformance/test_11_write_transition_failures.py`. |
 
+## Reference-implementation ergonomics (outside the wire contract)
+
+`kraken.py work` is a supervisor, not a protocol clause: it performs the same
+transitions any conforming worker does, in the order `PROTOCOL.md` already
+requires, so a queue cannot tell a supervised worker from an interactive one.
+What it adds is that the ordering stops depending on a model obeying prose. The
+rows below pin that supervision, not new wire rules.
+
+| Behaviour | Why it matters | Pinned by |
+| --- | --- | --- |
+| The agent's verdict travels by FILE, never by parsing its stdout | The agent's stream is also its log and models emit prose; a stdout sentinel could be forged by the work itself — the prefix-collision class protocol/3 removed from comments | `tests/conformance/test_39_work_supervisor.py`: delivered / needs-decision / released verdicts each perform their transition, and a junk `verdict.json` releases instead of being guessed at |
+| Every degraded outcome resolves to an honest `release`, never a false delivery | An agent that exits 0 having done nothing must not be indistinguishable from one that delivered | `test_39_work_supervisor.py`: a crash (naming the exit code), a silent exit ("no verdict"), a junk verdict, and a verdict with no result file — each lands on `released` with the reason on the thread, and none reaches `awaiting-merge` |
+| A hanging agent is killed at `--timeout` and the task freed | Lease expiry **cannot** catch a hang: the supervisor is renewing the lease, so to the queue it looks alive. The supervisor is the only thing that can | `test_39_work_supervisor.py::test_a_hanging_agent_is_killed_at_the_timeout_and_the_task_freed`. The repeat-hang loop is a known gap, filed as personal-tasks#74 |
+| The claim is released on the way out of every exit path | This is what makes the harness-specific self-heal (`hooks/`, `kraken-loop.sh`) redundant rather than load-bearing | `test_39_work_supervisor.py::test_sigterm_mid_task_releases_the_claim` sends a real SIGTERM (what `docker stop` sends) mid-task and asserts the `released` marker, the dropped label and the freed lease |
+| The lease is renewed while the agent works, and a stolen lease aborts it | A task that outlives its TTL must not be stolen from a working agent; and once it IS stolen, continuing would burn a task someone else owns | `test_39_work_supervisor.py::test_the_lease_is_renewed_while_the_agent_works` (the ladder climbs mid-run and the superseded rung is collected). The abort path rides §5.3's check, pinned by `test_37_write_after_expiry.py` |
+| The briefing reaches the agent by file, thread included, and the task body never reaches the `--agent` shell string | `SECURITY.md` treats a task body as untrusted input; and a review bounce's feedback exists only on the thread, which a supervised agent may have no `gh` to read | `test_39_work_supervisor.py`: the briefing test asserts body, labels, project, worker and the comment window all arrive; the injection test seeds a body full of shell substitutions and asserts none of it executed |
+| An agent that performs its own transition is respected | The interactive skill still drives its own transitions; the supervisor must not write a second time | `test_39_work_supervisor.py::test_an_agent_that_transitions_itself_is_respected` (exactly one `delivered` comment) |
+
 ## Open gaps (follow-up issues)
 
 **No open gaps: every mechanically pinnable clause is pinned.** The two gaps this
