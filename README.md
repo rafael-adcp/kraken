@@ -13,6 +13,41 @@
 > GitHub does the tracking. Your coding agent does the coding. **Kraken is just the
 > [protocol](PROTOCOL.md) between them** — it ships nothing you have to operate.
 
+## In 30 seconds
+
+**What it is.** A task queue for AI coding agents, where the queue is GitHub
+Issues in a private repo you own. You write tasks; named agent workers claim
+them one at a time, do the work in *your* prepared environment, and open draft
+PRs. You review and merge.
+
+**What you run.**
+
+```
+/plugin marketplace add rafael-adcp/kraken
+/plugin install kraken@kraken
+/kraken:init OWNER/tasks --project my_app                 # once
+/kraken:unleash OWNER/tasks --worker-name env-1 --project my_app
+```
+
+Launch that last line in *N* terminals and you have *N* workers. There is no
+server, no database, no daemon — the coordination state is issue labels plus a
+git ref, and the dashboard is the GitHub UI you already have.
+
+**Why it might be for you.** You have more agent-sized tasks than attention:
+you're the bus between a task list and a row of terminals, and things get
+dropped. Kraken takes you out of that loop without moving your work off the
+machine where your services, data and credentials already live.
+
+**Why it might not be.** If your code is on GitHub and the task needs nothing
+your platform doesn't already give it, Copilot's coding agent or
+`claude-code-action` in CI is less to run — see [Why not just use
+X?](#why-not-just-use-x) for the honest cut.
+
+Everything below is detail. The [walkthrough](#the-full-walkthrough) is the
+next stop if you want to run it; [`PROTOCOL.md`](PROTOCOL.md) is the spec if
+you want to build a worker, and [`HISTORY.md`](HISTORY.md) is how that spec got
+the shape it has.
+
 ## Why?
 
 Kraken treats AI coding prompts the way a CI server treats builds: you push
