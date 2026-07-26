@@ -1912,7 +1912,11 @@ def cmd_claim_next(args: argparse.Namespace) -> int:
 
 
 def acquire_next(api: Api, project: str, worker: Worker,
-                 ttl: int | None = None) -> tuple[int, Json | None]:
+                 ttl: int | None = None, *,
+                 read: Callable[..., Any] | None = None,
+                 classify: Callable[..., Any] | None = None,
+                 claim_step: Callable[..., Any] | None = None,
+                 ) -> tuple[int, Json | None]:
     """The whole acquisition — one-task-at-a-time guard, project preflight, queue
     read, §6 reconcile, then guard + CAS down the candidate list — as DATA rather
     than as printed output: returns `(exit_code, won)` where `won` is
@@ -1921,7 +1925,16 @@ def acquire_next(api: Api, project: str, worker: Worker,
     `claim-next` and `next-action` are both thin renderings of this, which is
     what keeps the deterministic claim loop from drifting between them: there is
     one implementation and two presentations. Diagnostics go through `diag`, so
-    `next-action` can push them to stderr and keep stdout pure JSON."""
+    `next-action` can push them to stderr and keep stdout pure JSON.
+
+    `read`, `classify` and `claim_step` default to the real thing and exist so
+    the ITERATION — skip-on-held, skip-on-lost, forward-only, stop-on-transport —
+    can be tested against a scripted queue, candidate list and claim outcomes.
+    All three are expensive collaborators with their own tests; a caller in
+    production passes none of them."""
+    read_fn = read or read_queue
+    classify = classify or classify_queue
+    claim_step = claim_step or _claim_once
     refused = refuse_second_claim(worker)
     if refused is not None:
         return (refused, None)
@@ -1938,7 +1951,7 @@ def acquire_next(api: Api, project: str, worker: Worker,
         return (EXIT_UNKNOWN_PROJECT, None)
 
     ttl = lease_ttl_seconds(ttl)
-    read = read_queue(api, ttl=ttl)
+    read = read_fn(api, ttl=ttl)
     if read is None:
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)
@@ -1960,7 +1973,7 @@ def acquire_next(api: Api, project: str, worker: Worker,
             return (EXIT_TRANSPORT, None)
         project_reconcile(plan, nodes, leases)
 
-    rows = classify_queue(api, project, include_body=True, read=read)
+    rows = classify(api, project, include_body=True, read=read)
     if rows is None:
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)
@@ -1976,8 +1989,8 @@ def acquire_next(api: Api, project: str, worker: Worker,
         allow_held = requeued_labels(by_number[number], live)
         # Hand the claim the lease this read already saw: it decides which
         # generation the CAS starts from, and whether this is a steal at all.
-        rc = _claim_once(api, number, worker, allow_held=allow_held,
-                         lease=leases.get(number, NO_LEASE), ttl=ttl)
+        rc = claim_step(api, number, worker, allow_held=allow_held,
+                       lease=leases.get(number, NO_LEASE), ttl=ttl)
         if rc == EXIT_OK:
             return (EXIT_OK, {"issue": number, "title": title, "body": body})
         if rc == EXIT_TRANSPORT:
@@ -2619,7 +2632,16 @@ def watch_failure_action(
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
-    api, project = args.api, args.project
+    return watch(args.api, args.project)
+
+
+def watch(api: Api, project: str, *,
+          snapshot_reader: Callable[..., Any] | None = None) -> int:
+    """The ambush loop. `snapshot_reader` defaults to the real queue snapshot and
+    is injectable so the loop's own behaviour — the edge-triggered emit gate, the
+    consecutive-failure warn/die ladder, the lost-wake retry — can be scripted
+    without a queue behind it. `cmd_watch` is the argv-shaped entry point."""
+    snapshot_reader = snapshot_reader or snapshot_state
     poll_seconds = int(os.environ.get("KRAKEN_WATCH_POLL_SECONDS", "60"))
     retry_seconds = int(os.environ.get("KRAKEN_WATCH_RETRY_SECONDS", "300"))
     max_failures = int(
@@ -2644,7 +2666,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     last_emit = time.time()
     failures = 0
     while True:
-        snapshot = snapshot_state(api, project)
+        snapshot = snapshot_reader(api, project)
         if snapshot is None:
             # Fail loud. The read never landed, so `prev` stays untouched (the
             # edge-triggered gate is not corrupted by an outage) — but silence
@@ -3460,6 +3482,31 @@ def project_reconcile(plan: Sequence[ReconcileAction], nodes: list[Node],
             node["labels"] = {"nodes": [{"name": n} for n in sorted(labels)]}
 
 
+def reconcile_pass(api: Api, worker: Worker, ttl: int | None = None, *,
+                   read: Callable[..., Any] | None = None,
+                   ) -> tuple[int, Json | None]:
+    """The reconcile pass as DATA: `(exit_code, counts)`, where counts is None on
+    any transport failure. `cmd_reap` is its line-oriented rendering, the same
+    split `acquire_next`/`cmd_claim_next` use.
+
+    `read` defaults to the real queue read and is injectable so the wiring —
+    which failure stages which exit, whether the lease clock reaches the plan —
+    can be tested against a scripted queue. The rules themselves are pure and
+    tested through `reconcile_plan` directly."""
+    read = read or read_queue
+    got = read(api, ttl=ttl)
+    if got is None:
+        print("reap: gh-failure stage=list", file=sys.stderr)
+        return (EXIT_TRANSPORT, None)
+    nodes, leases = got
+
+    plan = reconcile_plan(nodes, leases)
+    counts = apply_reconcile(api, plan, worker)
+    if counts is None:
+        return (EXIT_TRANSPORT, None)
+    return (EXIT_OK, {"leases": len(leases), **counts})
+
+
 def cmd_reap(args: argparse.Namespace) -> int:
     """Run the reconcile pass stand-alone — the operator-side escape hatch for
     the reconcile a drain performs on its own (PROTOCOL.md §6). One queue read
@@ -3472,23 +3519,15 @@ def cmd_reap(args: argparse.Namespace) -> int:
     claims next steals it. And it does not touch the in-progress label
     (protocol/7): the label is write-only (§3), so a task wearing a stale one is
     already startable and there is nothing to repair."""
-    api = args.api
-    read = read_queue(api, ttl=args.ttl)
-    if read is None:
-        print("reap: gh-failure stage=list", file=sys.stderr)
-        return EXIT_TRANSPORT
-    nodes, leases = read
-
-    plan = reconcile_plan(nodes, leases)
-    counts = apply_reconcile(api, plan, args.worker)
+    rc, counts = reconcile_pass(args.api, args.worker, args.ttl)
     if counts is None:
-        return EXIT_TRANSPORT
+        return rc
 
     print(
-        f"reap: done leases={len(leases)} reclaimed={counts['reclaim']} "
+        f"reap: done leases={counts['leases']} reclaimed={counts['reclaim']} "
         f"orphan_locks={counts['orphan-lock']}"
     )
-    return EXIT_OK
+    return rc
 
 
 # The issue-form headings the bundled task-template produces, and the placeholder

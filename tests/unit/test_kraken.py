@@ -618,75 +618,57 @@ class CommentRecordsPaginationTests(unittest.TestCase):
 
 
 class ClaimNextIterationTests(unittest.TestCase):
-    """cmd_claim_next's loop, isolated from any transport: classify_queue and the
-    per-candidate _claim_once are both mocked, so only the iteration logic —
-    skip-on-held, skip-on-lost, forward-only, stop-on-transport, honest-empty —
-    is under test."""
+    """The deterministic claim loop in `acquire_next`: skip-on-held,
+    skip-on-lost, forward-only, stop-on-transport, honest-empty.
+
+    The subject is the ITERATION, so the two expensive collaborators — the
+    candidate list and the per-candidate CAS — are passed in, and the queue read
+    behind them is an empty FakeApi. `acquire_next` answers `(rc, won)` as data;
+    how `claim-next` PRINTS that is not this class's business and is pinned
+    end-to-end in tests/conformance/test_claim_next.py, against the real binary."""
 
     def setUp(self):
-        self._orig_classify = kraken.classify_queue
-        self._orig_claim_once = kraken._claim_once
-        self._orig_verify_project = kraken.verify_project
-        self._orig_read_queue = kraken.read_queue
-        self._orig_commit_meta = kraken.resolve_commit_meta
-        # The project preflight and the §6 reconcile are exercised by their own
-        # tests; here they pass over an empty queue read, so only the iteration
-        # logic is under test.
-        kraken.verify_project = lambda repo, project: (True, "")
-        kraken.read_queue = lambda repo, now=None, ttl=None: ([], {})
-        kraken.resolve_commit_meta = lambda repo, shas: {}
         self.attempted = []
 
-    def tearDown(self):
-        kraken.classify_queue = self._orig_classify
-        kraken._claim_once = self._orig_claim_once
-        kraken.verify_project = self._orig_verify_project
-        kraken.read_queue = self._orig_read_queue
-        kraken.resolve_commit_meta = self._orig_commit_meta
-
-    def _run(self, rows, claim_results, json_mode=False):
-        kraken.classify_queue = (
-            lambda repo, project, include_body=False, read=None: rows
-        )
+    def _run(self, rows, claim_results):
         # claim-next re-derives each candidate's requeue verdict off the node the
         # filter used, so the read has to carry a node per row.
-        # rows=None models a failed queue read, which now surfaces at read_queue.
+        # rows=None models a failed queue read, which surfaces at read_queue.
         nodes = [{"number": r[0], "title": r[1], "createdAt": r[2], "body": "",
                   "labels": {"nodes": [{"name": "kraken-task"}]},
                   "comments": {"nodes": []},
                   "blockedBy": {"nodes": []}} for r in (rows or [])]
-        kraken.read_queue = (
-            lambda repo, now=None, ttl=None: None if rows is None else (nodes, {})
-        )
 
-        def fake_claim_once(repo, issue, worker, allow_held=(), lease=None,
+        def fake_claim_step(api, issue, worker, allow_held=(), lease=None,
                             ttl=None, probe_lease=False):
             self.attempted.append(issue)
             return claim_results[issue]
-        kraken._claim_once = fake_claim_once
 
-        args = SimpleNamespace(repo="OWNER/tasks", project="app", api=FakeApi(),
-                               worker="w1", json=json_mode)
+        # The preflight reads the repo's label set; the queue read is scripted.
+        api = FakeApi(paginated=lambda path: [{"name": "project:app"}])
         buf = StringIO()
         with redirect_stdout(buf):
-            rc = kraken.cmd_claim_next(args)
-        return rc, buf.getvalue()
+            rc, won = kraken.acquire_next(
+                api, "app", "w1",
+                read=lambda a, now=None, ttl=None: (
+                    None if rows is None else (nodes, {})),
+                classify=lambda a, p, include_body=False, read=None: rows,
+                claim_step=fake_claim_step)
+        return rc, won, buf.getvalue()
 
     def test_claims_first_startable(self):
         rows = [(7, "oldest", "t1", "startable", "body-7")]
-        rc, out = self._run(rows, {7: kraken.EXIT_OK})
+        rc, won, _ = self._run(rows, {7: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.attempted, [7])
-        self.assertIn("claim-next: claimed issue=7 worker=w1", out)
-        self.assertIn("7\toldest", out)
-        self.assertIn("body-7", out)
+        self.assertEqual(won, {"issue": 7, "title": "oldest", "body": "body-7"})
 
     def test_skips_held_rows_without_attempting_them(self):
         rows = [
             (5, "held one", "t1", "held", "b5"),
             (7, "startable", "t2", "startable", "b7"),
         ]
-        rc, out = self._run(rows, {7: kraken.EXIT_OK})
+        rc, _, _ = self._run(rows, {7: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.attempted, [7])
 
@@ -697,24 +679,25 @@ class ClaimNextIterationTests(unittest.TestCase):
             (7, "lost this", "t1", "startable", "b7"),
             (9, "win this", "t2", "startable", "b9"),
         ]
-        rc, out = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_OK})
+        rc, won, _ = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.attempted, [7, 9])
         self.assertEqual(self.attempted.count(7), 1)
-        self.assertIn("claim-next: claimed issue=9 worker=w1", out)
+        self.assertEqual(won["issue"], 9)
 
     def test_skip_on_held_since_listing_moves_to_next(self):
         rows = [
             (7, "now held", "t1", "startable", "b7"),
             (9, "clear", "t2", "startable", "b9"),
         ]
-        rc, out = self._run(rows, {7: kraken.EXIT_NOT_CLEAR, 9: kraken.EXIT_OK})
+        rc, _, _ = self._run(rows, {7: kraken.EXIT_NOT_CLEAR, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.attempted, [7, 9])
 
     def test_empty_queue_is_honest_none(self):
-        rc, out = self._run([], {})
+        rc, won, out = self._run([], {})
         self.assertEqual(rc, kraken.EXIT_NONE)
+        self.assertIsNone(won)
         self.assertEqual(self.attempted, [])
         self.assertIn("claim-next: none project:app", out)
 
@@ -723,8 +706,9 @@ class ClaimNextIterationTests(unittest.TestCase):
             (7, "a", "t1", "startable", "b7"),
             (9, "b", "t2", "startable", "b9"),
         ]
-        rc, out = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_NOT_CLEAR})
+        rc, won, _ = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_NOT_CLEAR})
         self.assertEqual(rc, kraken.EXIT_NONE)
+        self.assertIsNone(won)
         self.assertEqual(self.attempted, [7, 9])
 
     def test_transport_during_claim_stops_immediately(self):
@@ -732,25 +716,18 @@ class ClaimNextIterationTests(unittest.TestCase):
             (7, "ambiguous", "t1", "startable", "b7"),
             (9, "untouched", "t2", "startable", "b9"),
         ]
-        rc, out = self._run(rows, {7: kraken.EXIT_TRANSPORT, 9: kraken.EXIT_OK})
+        rc, won, out = self._run(rows, {7: kraken.EXIT_TRANSPORT, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
+        self.assertIsNone(won)
         self.assertEqual(self.attempted, [7])
         self.assertIn("state unknown", out)
 
     def test_transport_during_listing_is_twenty(self):
-        rc, out = self._run(None, {})
+        rc, won, out = self._run(None, {})
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
+        self.assertIsNone(won)
         self.assertEqual(self.attempted, [])
         self.assertIn("claim-next: gh-failure stage=list", out)
-
-    def test_json_mode_emits_structured_win(self):
-        rows = [(7, "the title", "t1", "startable", "### Goal\ndo it")]
-        rc, out = self._run(rows, {7: kraken.EXIT_OK}, json_mode=True)
-        self.assertEqual(rc, kraken.EXIT_OK)
-        import json as _json
-        payload = _json.loads(out.strip().splitlines()[-1])
-        self.assertEqual(payload, {"issue": 7, "title": "the title",
-                                   "body": "### Goal\ndo it"})
 
 
 class VerifyProjectTests(unittest.TestCase):
@@ -760,17 +737,14 @@ class VerifyProjectTests(unittest.TestCase):
     forever. The check refuses on a genuinely absent label, and never declares a
     project missing from a label read that merely failed."""
 
-    def setUp(self):
-        self._orig_list = kraken.list_projects
-
-    def tearDown(self):
-        kraken.list_projects = self._orig_list
-
     def _verify(self, projects, project="app"):
-        # `list_projects` is still a module-level seam — Api owns the transport,
-        # not the queue reads built on it.
-        kraken.list_projects = lambda api: projects
-        return kraken.verify_project(FakeApi(), project)
+        # Faked at the Api, not at `list_projects`: the real label read and the
+        # real `project:` stripping stay under test, and a failed read is a
+        # `paginated` answering None — what the transport actually does.
+        labels = (None if projects is None
+                  else [{"name": f"project:{p}"} for p in projects])
+        api = FakeApi(paginated=lambda path: labels)
+        return kraken.verify_project(api, project)
 
     def test_configured_project_passes(self):
         ok, message = self._verify(["app", "docs"])
@@ -797,52 +771,42 @@ class VerifyProjectTests(unittest.TestCase):
 
 
 class ClaimNextProjectGateTests(unittest.TestCase):
-    """cmd_claim_next's project preflight: an unconfigured project refuses with
+    """The drain's project preflight: an unconfigured project refuses with
     EXIT_UNKNOWN_PROJECT before the queue is read and before any write."""
 
     def setUp(self):
-        self._orig_verify_project = kraken.verify_project
-        self._orig_classify = kraken.classify_queue
-        self._orig_read_queue = kraken.read_queue
-        self._orig_commit_meta = kraken.resolve_commit_meta
-        kraken.read_queue = lambda repo, now=None, ttl=None: ([], {})
-        kraken.resolve_commit_meta = lambda repo, shas: {}
         self.classified = []
 
-        def spy_classify(repo, project, include_body=False, read=None):
-            self.classified.append(project)
-            return []
-        kraken.classify_queue = spy_classify
+    def _classify(self, api, project, include_body=False, read=None):
+        self.classified.append(project)
+        return []
 
-    def tearDown(self):
-        kraken.verify_project = self._orig_verify_project
-        kraken.classify_queue = self._orig_classify
-        kraken.read_queue = self._orig_read_queue
-        kraken.resolve_commit_meta = self._orig_commit_meta
-
-    def _run(self, verdict):
-        kraken.verify_project = lambda repo, project: verdict
-        args = SimpleNamespace(repo="OWNER/tasks", project="app", api=FakeApi(),
-                               worker="w-gate", json=False)
+    def _run(self, labels):
+        # The verdict comes from the real preflight over a scripted label set:
+        # a list of names, [] for a repo with none, None for a failed read.
+        api = FakeApi(paginated=lambda path: labels)
         buf = StringIO()
         with redirect_stdout(buf):
-            rc = kraken.cmd_claim_next(args)
+            rc, _won = kraken.acquire_next(
+                api, "app", "w-gate",
+                read=lambda a, now=None, ttl=None: ([], {}),
+                classify=self._classify)
         return rc, buf.getvalue()
 
     def test_unknown_project_refuses_before_reading_the_queue(self):
-        rc, out = self._run((False, "unknown project: no project:app label"))
+        rc, out = self._run([{"name": "project:other"}])
         self.assertEqual(rc, kraken.EXIT_UNKNOWN_PROJECT)
         self.assertEqual(self.classified, [], "a refused drain still read the queue")
         self.assertIn("unknown project", out)
 
     def test_transport_failure_during_the_check_is_twenty(self):
-        rc, out = self._run((None, "claim-next: gh-failure stage=project"))
+        rc, out = self._run(None)
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
         self.assertEqual(self.classified, [], "an unverified project still read the queue")
         self.assertIn("gh-failure", out)
 
     def test_configured_project_proceeds_to_the_queue(self):
-        rc, out = self._run((True, ""))
+        rc, out = self._run([{"name": "project:app"}])
         self.assertEqual(rc, kraken.EXIT_NONE)
         self.assertEqual(self.classified, ["app"])
 
@@ -854,44 +818,37 @@ class WatchProjectGateTests(unittest.TestCase):
     already tolerates transport faults, so the watcher warns and arms anyway."""
 
     def setUp(self):
-        self._orig_verify_project = kraken.verify_project
-        self._orig_snapshot = kraken.snapshot_state
         self.polled = []
 
-        def spy_snapshot(repo, project):
-            # The poll loop is infinite; the first poll is all this needs to see.
-            self.polled.append(project)
-            raise KeyboardInterrupt
-        kraken.snapshot_state = spy_snapshot
+    def _snapshot(self, api, project):
+        # The poll loop is infinite; the first poll is all this needs to see.
+        self.polled.append(project)
+        raise KeyboardInterrupt
 
-    def tearDown(self):
-        kraken.verify_project = self._orig_verify_project
-        kraken.snapshot_state = self._orig_snapshot
-
-    def _run(self, verdict):
-        kraken.verify_project = lambda repo, project: verdict
-        args = SimpleNamespace(repo="OWNER/tasks", project="app", api=FakeApi())
+    def _run(self, labels):
+        # The verdict comes from the real preflight over a scripted label set.
+        api = FakeApi(paginated=lambda path: labels)
         out, err = StringIO(), StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             try:
-                rc = kraken.cmd_watch(args)
+                rc = kraken.watch(api, "app", snapshot_reader=self._snapshot)
             except KeyboardInterrupt:
                 rc = "polled"
         return rc, err.getvalue()
 
     def test_unknown_project_refuses_to_arm(self):
-        rc, err = self._run((False, "unknown project: no project:app label"))
+        rc, err = self._run([{"name": "project:other"}])
         self.assertEqual(rc, kraken.EXIT_UNKNOWN_PROJECT)
         self.assertEqual(self.polled, [], "a refused watcher still polled the queue")
         self.assertIn("unknown project", err)
 
     def test_configured_project_arms(self):
-        rc, err = self._run((True, ""))
+        rc, err = self._run([{"name": "project:app"}])
         self.assertEqual(rc, "polled")
         self.assertEqual(self.polled, ["app"])
 
     def test_transport_failure_warns_but_still_arms(self):
-        rc, err = self._run((None, "watch: gh-failure stage=project"))
+        rc, err = self._run(None)
         self.assertEqual(rc, "polled", "a failed label read must not kill the watcher")
         self.assertIn("gh-failure", err)
 
@@ -1623,19 +1580,19 @@ class ReconcilerApplyTests(unittest.TestCase):
 
     def setUp(self):
         self.writes = []
-        # The label and comment writes are the Api's; the ref delete is still a
-        # module-level seam (the CAS layer is not part of the transport object).
-        self._saved_drop = kraken.drop_generations
-        kraken.drop_generations = lambda api, n, gens: (
-            self.writes.append(("del-ref", n)) or True)
         self.api = self._api()
 
-    def tearDown(self):
-        kraken.drop_generations = self._saved_drop
-
     def _api(self, swap=None):
+        def request(method, path, body=None):
+            # The ref delete goes through the real CAS helper, so it shows up
+            # here as the DELETE it actually is rather than as a faked function.
+            issue, _gen = kraken.parse_claim_ref(path.split("/git/", 1)[1])
+            self.writes.append(("del-ref", issue))
+            return (204, "")
+
         return FakeApi(
             "o/tasks",
+            request=request,
             swap_labels=swap or (lambda n, remove=None, add=None: (
                 self.writes.append(("labels", n, remove, add)) or True)),
             post_comment=lambda n, body: (
@@ -1759,38 +1716,33 @@ class WatchFailureActionTests(unittest.TestCase):
 
 
 class WatchFailureLoopTests(unittest.TestCase):
-    """cmd_watch's poll loop around that gate: a failed read is counted and
-    reported on stderr (never on stdout, which is the wake channel), the counter
-    resets on the first successful read, and the ceiling exits non-zero."""
-
-    def setUp(self):
-        orig_snapshot = kraken.snapshot_state
-        self.addCleanup(setattr, kraken, "snapshot_state", orig_snapshot)
+    """The poll loop around that gate: a failed read is counted and reported on
+    stderr (never on stdout, which is the wake channel), the counter resets on
+    the first successful read, and the ceiling exits non-zero."""
 
     def _setenv(self, name, value):
         os.environ[name] = value
         self.addCleanup(os.environ.pop, name, None)
 
     def _run(self, snapshots, env=None):
-        """Drive the loop over a scripted snapshot_state sequence; the loop is
+        """Drive the loop over a scripted snapshot sequence; the loop is
         infinite, so an exhausted script interrupts it."""
         pending = list(snapshots)
 
-        def scripted(repo, project):
+        def scripted(api, project):
             if not pending:
                 raise KeyboardInterrupt
             return pending.pop(0)
-        kraken.snapshot_state = scripted
 
         self._setenv("KRAKEN_WATCH_POLL_SECONDS", "0")  # no real waiting
         for name, value in (env or {}).items():
             self._setenv(name, value)
 
-        args = SimpleNamespace(repo="OWNER/tasks", project="app", api=FakeApi())
+        api = FakeApi(paginated=lambda path: [{"name": "project:app"}])
         out, err = StringIO(), StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             try:
-                rc = kraken.cmd_watch(args)
+                rc = kraken.watch(api, "app", snapshot_reader=scripted)
             except KeyboardInterrupt:
                 rc = "polling"
         return rc, out.getvalue(), err.getvalue()
