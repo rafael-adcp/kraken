@@ -70,7 +70,9 @@ def lease_ttl():
 def expiry_marker(worker="w-thief", previous="w-dead"):
     """A `lease-expired` comment body — what a steal leaves behind, and what the
     repeat-expiry guard (§6) counts."""
-    return kraken_module.lease_expired_body(worker, {"worker": previous, "age": 99})
+    stale = kraken_module.Lease(gen=1, sha="stale", worker=previous, epoch=None,
+                                gens=(1,), age=99)
+    return kraken_module.lease_expired_body(worker, stale)
 
 
 def now_iso():

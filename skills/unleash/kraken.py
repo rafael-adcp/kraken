@@ -58,9 +58,17 @@ Exit-code contract (PROTOCOL.md §12), preserved verbatim from the scripts:
     2   bad invocation (missing file / unknown mode)
 """
 
+# Annotations are strings at runtime, so `X | None` and builtin generics are
+# free to appear in signatures without pinning a minimum Python beyond what the
+# program already needs. Nothing here is checked at run time — the annotations
+# document the shapes the docstrings used to carry alone, and let an editor
+# catch `lease.liv` before the queue does.
+from __future__ import annotations
+
 import argparse
 import base64
 import contextlib
+import dataclasses
 import datetime
 import json
 import os
@@ -71,6 +79,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Any, Callable, Iterable, Iterator, Sequence, TypedDict
 
 # Exit codes — the agent branches on these; keep them identical to the scripts.
 EXIT_OK = 0
@@ -80,6 +89,72 @@ EXIT_UNKNOWN_PROJECT = 13  # drain refused: the repo has no project:<name> label
 EXIT_TRANSPORT = 20
 EXIT_NONE = 3  # claim-next: nothing startable to claim (not empty-vs-error ambiguous)
 EXIT_USAGE = 2
+
+# --- the vocabulary the signatures below are written in ----------------------
+# Names for the values that travel furthest, so a reader can tell an issue
+# number from a generation and a repo slug from a worker name without tracing
+# the call. These are aliases, not new types: nothing enforces them at runtime.
+Repo = str          # "OWNER/name" — a coordination or work repo slug
+Worker = str        # a worker's declared identity, e.g. "env-1"
+Issue = int         # a coordination-repo issue number
+Gen = int           # a claim ref's generation (the lease ladder's rung)
+Sha = str           # a git object id
+Epoch = float       # seconds since the unix epoch, as time.time() reports them
+
+# GitHub payloads cross the boundary as decoded JSON and are consumed
+# key-by-key. They stay dicts on purpose: they are foreign data this program
+# does not own the shape of, and pinning them to a class would only move the
+# guesswork.
+Json = dict[str, Any]
+Node = Json         # one issue node off the GraphQL queue walk
+CommentRecord = Json  # one {author, body, createdAt} record off a thread
+CommitMeta = dict[Sha, Json]  # sha -> {committedDate, message}
+
+
+class ClaimRecord(TypedDict):
+    """The `claim-<worker>.json` scratch file, as `open_claim_record` returns
+    it. `issue` is a STRING because the file is written by shell as well as by
+    this program; the readers that need arithmetic convert at the edge."""
+
+    repo: str
+    issue: str
+    worker: str
+
+
+class _EnvelopeRequired(TypedDict):
+    action: str      # the verdict a consumer branches on
+    repo: Repo
+    worker: Worker
+
+
+class Envelope(_EnvelopeRequired, total=False):
+    """The single JSON object `next-action` prints on stdout.
+
+    A TypedDict rather than a dataclass on purpose: this IS the wire format,
+    every optional key is present only when it has meaning, and the conformance
+    suite pins the emitted bytes. A class with defaults would serialize absent
+    keys as nulls and change that.
+    """
+
+    issue: Issue
+    resumed: bool
+    reason: str      # a stable machine slug — branch on this
+    detail: str      # the human sentence — read this, never match on it
+    holding: Json    # {"repo", "issue"} of a claim that must be resolved first
+    brief: Json      # the task briefing (title / goal / acceptance)
+    lease: Json      # the renewal contract: expires_at, renew_every_seconds, …
+    then: dict[str, str]  # fully-interpolated commands for the legal next writes
+
+
+class ReconcileAction(TypedDict, total=False):
+    """One repair `reconcile_plan` decided on and `apply_reconcile` executes.
+    `held` rides only the `reclaim` rule (whether to also clear a stale badge)."""
+
+    rule: str        # "orphan-lock" | "reclaim"
+    issue: Issue
+    reason: str
+    gens: list[Gen]  # every rung to delete
+    held: bool
 
 # A task carrying either of these is held, never startable. Both are
 # operator-facing states with no lock behind them, which is exactly why a label
@@ -120,7 +195,7 @@ PLUGIN_VERSION_UNKNOWN = "unknown"
 SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def plugin_version(manifest=PLUGIN_MANIFEST):
+def plugin_version(manifest: str = PLUGIN_MANIFEST) -> str:
     """Plugin version from the bundled `.claude-plugin/plugin.json`, or
     ``"unknown"`` if it is missing or unreadable."""
     try:
@@ -143,13 +218,13 @@ def plugin_version(manifest=PLUGIN_MANIFEST):
 _DIAG_STREAM = None  # None -> sys.stdout, resolved per call so tests can capture
 
 
-def diag(text):
+def diag(text: str) -> None:
     """Print one diagnostic line to the current diagnostic sink."""
     print(text, file=_DIAG_STREAM if _DIAG_STREAM is not None else sys.stdout)
 
 
 @contextlib.contextmanager
-def diagnostics_on_stderr():
+def diagnostics_on_stderr() -> Iterator[None]:
     """Route `diag` to stderr while stdout carries a machine payload."""
     global _DIAG_STREAM
     previous = _DIAG_STREAM
@@ -184,12 +259,12 @@ MARKER_TYPES = ("claim", "heartbeat", "needs-decision", "delivered",
                 "released", "stale-claim", "lease-expired", "note")
 
 
-def make_marker(payload):
+def make_marker(payload: Json) -> str:
     """Render a machine payload dict as the hidden marker (compact, ASCII-only)."""
     return MARKER_PREFIX + json.dumps(payload, separators=(",", ":")) + MARKER_SUFFIX
 
 
-def parse_marker(line):
+def parse_marker(line: str) -> Json | None:
     """Decode the kraken marker payload on a line, or None if it carries none.
     A body that is not a dict with a string "type" is treated as absent."""
     m = MARKER_RE.search(line)
@@ -213,7 +288,7 @@ def parse_marker(line):
 DISCLAIMER = "> 🐙 **Kraken worker `{worker}`** — automated comment from a kraken tentacle, not a human."
 
 
-def disclaimer(worker):
+def disclaimer(worker: Worker) -> str:
     return DISCLAIMER.format(worker=worker)
 
 
@@ -224,7 +299,7 @@ def disclaimer(worker):
 TASK_TRAILER = "Kraken-Task: {repo}#{issue} (worker: {worker}, kraken@{version})"
 
 
-def task_trailer(repo, issue, worker):
+def task_trailer(repo: Repo, issue: Issue, worker: Worker) -> str:
     """Compose the authoritative `Kraken-Task:` commit trailer, stamping the live
     plugin version so `kraken@<version>` is never guessed."""
     return TASK_TRAILER.format(
@@ -233,7 +308,7 @@ def task_trailer(repo, issue, worker):
 
 
 
-def compose_comment(worker, prose, payload):
+def compose_comment(worker: Worker, prose: str, payload: Json) -> str:
     """Assemble a state-changing comment: disclaimer, human-facing prose, then the
     one hidden marker, blank-line separated so GitHub keeps them distinct."""
     parts = [disclaimer(worker)]
@@ -244,7 +319,7 @@ def compose_comment(worker, prose, payload):
     return "\n\n".join(parts)
 
 
-def compose_note(worker, prose):
+def compose_note(worker: Worker, prose: str) -> str:
     """A free-form worker comment (assumptions, progress prose): the attribution
     disclaimer, the prose, then a single non-state-changing `note` marker
     (PROTOCOL.md §4), blank-line separated so GitHub keeps them distinct. The
@@ -274,14 +349,14 @@ PER_PAGE = 100
 _TOKEN_CACHE = {"resolved": False, "token": ""}
 
 
-def api_base():
+def api_base() -> str:
     """The API root every request is made against. GITHUB_API_URL is both the
     GitHub Actions convention (set on every runner, GHES included) and the
     conformance seam (tests point it at a local stub server)."""
     return (os.environ.get("GITHUB_API_URL") or DEFAULT_API_URL).rstrip("/")
 
 
-def github_token():
+def github_token() -> str:
     """The API token: GH_TOKEN, then GITHUB_TOKEN, then ONE `gh auth token`
     spawn, memoized for the process lifetime — a startup cost, never a per-call
     one. Empty when nothing yields a token (requests then go out
@@ -303,7 +378,9 @@ def github_token():
     return _TOKEN_CACHE["token"]
 
 
-def http_request(method, path, body=None):
+def http_request(
+    method: str, path: str, body: Json | None = None,
+) -> tuple[int, str]:
     """One API call: return (status, text). `path` starts with "/"; a dict
     `body` is sent as JSON. Never raises — a request that got no HTTP answer at
     all comes back as (STATUS_NETWORK_FAILURE, ""), and a non-2xx answer keeps
@@ -330,7 +407,7 @@ def http_request(method, path, body=None):
         return STATUS_NETWORK_FAILURE, ""
 
 
-def http_json(method, path, body=None):
+def http_json(method: str, path: str, body: Json | None = None) -> Any | None:
     """Parsed JSON from a 2xx response, or None on any failure (non-2xx,
     network fault, undecodable body) — the exit-20 mapping for plain reads."""
     status, text = http_request(method, path, body)
@@ -342,7 +419,7 @@ def http_json(method, path, body=None):
         return None
 
 
-def http_paginated(path):
+def http_paginated(path: str) -> list[Json] | None:
     """Every element of a paginated list endpoint, concatenated across
     per_page/page requests (a page shorter than PER_PAGE is the last).
     Returns a list, or None on transport failure."""
@@ -359,12 +436,12 @@ def http_paginated(path):
         page += 1
 
 
-def quote_path(segment):
+def quote_path(segment: str) -> str:
     """URL-quote one path segment (a label name, a contents path component)."""
     return urllib.parse.quote(segment, safe="")
 
 
-def graphql(query):
+def graphql(query: str) -> Json | None:
     """POST a GraphQL query; return the parsed {"data": ...} envelope, or None
     on transport / decode / GraphQL-error failure."""
     resp = http_json("POST", "/graphql", {"query": query})
@@ -375,7 +452,7 @@ def graphql(query):
     return resp
 
 
-def comment_records(repo, issue):
+def comment_records(repo: Repo, issue: Issue) -> list[CommentRecord] | None:
     """Every comment as a {"body", "createdAt"} record, in server order —
     paginated past 100 via the REST comments endpoint (a single-page read
     would silently truncate a long thread). `status` and the validator's
@@ -430,13 +507,13 @@ LEGACY_CLAIM_GEN = 0
 EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
-def claim_ref(issue, gen):
+def claim_ref(issue: Issue, gen: Gen) -> str:
     if gen == LEGACY_CLAIM_GEN:
         return f"{CLAIM_REF_PREFIX}{issue}"
     return f"{CLAIM_REF_PREFIX}{issue}/{gen}"
 
 
-def parse_claim_ref(ref):
+def parse_claim_ref(ref: str) -> tuple[Issue, Gen] | None:
     """`(issue, generation)` for a claim ref name, or None for anything else.
 
     Both shapes are accepted: `…/claims/12` is the protocol/5 ref, read as
@@ -454,7 +531,7 @@ def parse_claim_ref(ref):
     return None
 
 
-def _head_tree_sha(repo):
+def _head_tree_sha(repo: Repo) -> Sha | None:
     """The default branch's tree SHA — the fallback tree for hosts that reject
     the well-known empty-tree object. None on transport failure."""
     obj = http_json("GET", f"/repos/{repo}/commits/HEAD")
@@ -465,7 +542,7 @@ def _head_tree_sha(repo):
     return sha if isinstance(sha, str) and sha else None
 
 
-def create_claim_commit(repo, payload):
+def create_claim_commit(repo: Repo, payload: Json) -> Sha | None:
     """Create the orphan commit a claim ref points at: empty tree, no parents,
     message = the kraken marker for `payload`. The server stamps the date, so the
     liveness clock is server-side. Returns the SHA, or None on transport failure."""
@@ -490,7 +567,7 @@ def create_claim_commit(repo, payload):
     return None
 
 
-def claim_ref_create(repo, issue, gen, sha):
+def claim_ref_create(repo: Repo, issue: Issue, gen: Gen, sha: Sha) -> str:
     """The CAS itself: create generation `gen` of issue `issue`'s claim ref.
     Returns "won" (created — this worker is now the holder), "lost" (HTTP 422:
     somebody else created this generation first), or "fail" (transport — state
@@ -511,7 +588,7 @@ def claim_ref_create(repo, issue, gen, sha):
     return "fail"
 
 
-def claim_ref_delete(repo, issue, gen):
+def claim_ref_delete(repo: Repo, issue: Issue, gen: Gen) -> bool:
     """Delete one generation of a claim ref. An already-missing ref (HTTP 422)
     counts as success: it is gone either way, and the delete stays idempotent
     under retries."""
@@ -521,7 +598,7 @@ def claim_ref_delete(repo, issue, gen):
     return 200 <= status < 300 or status == 422
 
 
-def drop_generations(repo, issue, gens):
+def drop_generations(repo: Repo, issue: Issue, gens: Iterable[Gen]) -> bool:
     """Delete a set of generations — how a lease is released (every generation
     of it) and how a superseded one is collected after an advance. True only if
     all of them went; a leftover generation is untidy, never a held lease,
@@ -533,7 +610,7 @@ def drop_generations(repo, issue, gens):
     return ok
 
 
-def _parse_ref_items(items):
+def _parse_ref_items(items: Iterable[Json]) -> list[tuple[Issue, Gen, Sha]]:
     """[(issue, gen, sha)] out of a matching-refs payload, dropping anything
     that is not a claim ref — matching-refs is a prefix match, so the filter is
     on the parsed name, never on the prefix that was asked for."""
@@ -548,7 +625,7 @@ def _parse_ref_items(items):
     return out
 
 
-def claim_ref_list(repo):
+def claim_ref_list(repo: Repo) -> dict[Issue, list[tuple[Gen, Sha]]] | None:
     """Every live claim ref as {issue_number: [(generation, sha), …]}, in one
     paginated matching-refs read. Returns a dict (empty when none), or None on
     transport failure. Generations are not collapsed here: the holder is the
@@ -562,7 +639,9 @@ def claim_ref_list(repo):
     return refs
 
 
-def claim_refs_of(repo, issue):
+def claim_refs_of(
+    repo: Repo, issue: Issue,
+) -> tuple[bool, list[tuple[Gen, Sha]]]:
     """One issue's claim refs as `(ok, [(generation, sha), …])` — the sorted
     generation ladder, empty when the task is unclaimed. `ok` is False on a
     transport failure, and only then, so 'nobody holds it' is never confused
@@ -578,7 +657,7 @@ def claim_refs_of(repo, issue):
                          if i == int(issue)))
 
 
-def resolve_commit_meta(repo, shas):
+def resolve_commit_meta(repo: Repo, shas: Sequence[Sha]) -> CommitMeta | None:
     """Resolve each claim commit's {committedDate, message} in one batched
     GraphQL call (one aliased `object(oid:)` field per distinct SHA), never one
     call per ref — the resolve_depends_on pattern. Returns
@@ -606,16 +685,16 @@ def resolve_commit_meta(repo, shas):
     return meta
 
 
-def claim_ref_head(repo, issue):
+def claim_ref_head(repo: Repo, issue: Issue) -> tuple[str, Lease | None]:
     """The head of one issue's lease — the read every ownership question goes
     through: which generation holds it, whose it is, and since when.
 
     Returns `(state, head)`, and the three states are kept apart on purpose
     because they demand different answers:
-      - `("ok", {"gen", "sha", "worker", "epoch", "gens"})` — the highest
-        generation, plus `gens`, every generation present (so a caller that is
-        releasing knows what to delete and one that is advancing knows what to
-        collect);
+      - `("ok", Lease)` — the highest generation, plus `gens`, every generation
+        present (so a caller that is releasing knows what to delete and one that
+        is advancing knows what to collect). `age`/`live` are left undecided:
+        this read knows no TTL, and ownership is what its callers ask about;
       - `("absent", None)` — no claim ref at all, the task is unclaimed;
       - `("error", None)` — the read did not land, so the answer is *unknown*
         and no caller may write on the strength of it.
@@ -632,16 +711,18 @@ def claim_ref_head(repo, issue):
         return ("error", None)
     entry = meta.get(sha) or {}
     payload = parse_marker(entry.get("message") or "") or {}
-    return ("ok", {
-        "gen": gen,
-        "sha": sha,
-        "worker": payload.get("worker") or None,
-        "epoch": parse_iso(entry.get("committedDate") or ""),
-        "gens": [g for g, _s in refs],
-    })
+    return ("ok", Lease(
+        gen=gen,
+        sha=sha,
+        worker=payload.get("worker") or None,
+        epoch=parse_iso(entry.get("committedDate") or ""),
+        gens=tuple(g for g, _s in refs),
+    ))
 
 
-def advance_lease(repo, issue, gen, payload):
+def advance_lease(
+    repo: Repo, issue: Issue, gen: Gen, payload: Json,
+) -> tuple[str, Gen | None, Sha | None]:
     """Take (or keep) the lease by creating the generation ABOVE `gen` — the one
     contended write, shared by the steal and the renewal (PROTOCOL.md §5.2).
 
@@ -662,7 +743,7 @@ def advance_lease(repo, issue, gen, payload):
             sha if verdict == "won" else None)
 
 
-def claim_ref_owner(repo, issue):
+def claim_ref_owner(repo: Repo, issue: Issue) -> Worker | None:
     """The worker named in the claim commit the ref for `issue` currently points
     at, or None when the ref is absent or unreadable. This is how a lost CAS
     (HTTP 422) is told apart: a 422 is a genuine loss only when the ref belongs
@@ -671,7 +752,7 @@ def claim_ref_owner(repo, issue):
     None (transport/absent) is treated by the caller as 'not mine', so an
     ambiguous read never turns a real loss into a false win."""
     state, head = claim_ref_head(repo, issue)
-    return (head or {}).get("worker") if state == "ok" else None
+    return head.worker if state == "ok" and head is not None else None
 
 
 # --- the lease: how long a claim ref holds -----------------------------------
@@ -703,7 +784,42 @@ LEASE_RENEW_DIVISOR = 3
 LEASE_EXPIRY_ESCALATE = 3
 
 
-def lease_ttl_seconds(explicit=None):
+@dataclasses.dataclass(frozen=True)
+class Lease:
+    """What one task's claim-ref ladder says about who holds it, and until when.
+
+    Every reader — the startable filter, the reconciler, the claim path, the
+    status console — decides from this one object, so expiry cannot be computed
+    two ways. Built by `lease_state` from the ladder plus the batched commit
+    read, and by `claim_ref_head` for a single issue.
+
+    Frozen because a lease is an *observation* of a moment: `now` is baked into
+    `age` and `live` when it is built. A reader that wants a fresh verdict
+    re-reads the ref; it never edits the answer in place.
+
+    `epoch`/`age` are None when the ref's commit (or its date) could not be
+    read, and such a lease is **not live** — nothing proves the holder alive, so
+    it fails OPEN toward the steal rather than holding the task forever behind
+    an unreadable clock.
+    """
+
+    gen: Gen                 # the highest generation seen — the holder's rung
+    sha: Sha                 # the commit that rung points at
+    worker: Worker | None    # who the rung's marker names, None if unreadable
+    epoch: Epoch | None      # the commit's server-stamped date; None = unreadable
+    gens: tuple[Gen, ...]    # every rung present, ascending — the lower ones are
+                             # superseded and a reader may collect them
+    # The expiry verdict, and it is only meaningful once a reader has applied a
+    # TTL. `claim_ref_head` reports ownership and the clock but knows no TTL, so
+    # it leaves these at the defaults; `lease_state` and `probe_lease_state`
+    # decide them. The defaults are the fail-open answer — an undecided lease is
+    # not evidence anybody is alive — and §5.3 never consults `live` anyway: an
+    # expired lease that is still OURS may finish its transition.
+    age: int | None = None   # seconds since `epoch` at read time
+    live: bool = False       # age is known AND below the TTL
+
+
+def lease_ttl_seconds(explicit: int | None = None) -> int:
     """The lease TTL in seconds: the explicit value if given, else the
     KRAKEN_LEASE_TTL_SECONDS environment override, else the default. A
     non-integer or non-positive override falls back rather than crashing the
@@ -717,22 +833,25 @@ def lease_ttl_seconds(explicit=None):
     return ttl if ttl > 0 else LEASE_DEFAULT_TTL_SECONDS
 
 
-def lease_renew_seconds(ttl=None):
+def lease_renew_seconds(ttl: int | None = None) -> int:
     """How often a worker holding a lease must renew it: TTL/3."""
     return (lease_ttl_seconds() if ttl is None else ttl) // LEASE_RENEW_DIVISOR
 
 
-def lease_state(claim_refs, commit_meta, now, ttl):
+def lease_state(
+    claim_refs: dict[Issue, list[tuple[Gen, Sha]]],
+    commit_meta: CommitMeta,
+    now: Epoch,
+    ttl: int,
+) -> dict[Issue, Lease]:
     """The lease view of a queue read, as a PURE function — the one place expiry
     is decided, so every reader (the startable filter, the reconciler, the claim
     path, the status console) applies the same clock.
 
     `claim_refs` is {issue: [(generation, sha), …]} — the holder is the HIGHEST
-    generation, and the lower ones are superseded refs a reader may collect.
-    Returns {issue: {"gen", "sha", "worker", "epoch", "age", "live", "gens"}}. A
-    ref whose commit date cannot be read has `epoch`/`age` None and is **not
-    live**: nothing proves the holder alive, so the lease fails OPEN to the steal
-    rather than holding the task forever behind an unreadable clock."""
+    generation, and the lower ones are superseded refs a reader may collect. See
+    `Lease` for what each field means, including why an unreadable clock is not
+    live."""
     leases = {}
     for issue, refs in claim_refs.items():
         gen, sha = max(refs)
@@ -740,32 +859,34 @@ def lease_state(claim_refs, commit_meta, now, ttl):
         epoch = parse_iso(entry.get("committedDate") or "")
         payload = parse_marker(entry.get("message") or "") or {}
         age = None if epoch is None else max(0, int(now - epoch))
-        leases[issue] = {
-            "gen": gen,
-            "sha": sha,
-            "worker": payload.get("worker") or None,
-            "epoch": epoch,
-            "age": age,
-            "live": age is not None and age < ttl,
-            "gens": sorted(g for g, _s in refs),
-        }
+        leases[issue] = Lease(
+            gen=gen,
+            sha=sha,
+            worker=payload.get("worker") or None,
+            epoch=epoch,
+            age=age,
+            live=age is not None and age < ttl,
+            gens=tuple(sorted(g for g, _s in refs)),
+        )
     return leases
 
 
-def holder_shas(claim_refs):
+def holder_shas(claim_refs: dict[Issue, list[tuple[Gen, Sha]]]) -> list[Sha]:
     """Only the SHAs the lease clock is read from — the highest generation of
     each issue. A superseded generation's commit date decides nothing, so the
     batched commit read stays one entry per claimed task, not per ref."""
     return [max(refs)[1] for refs in claim_refs.values() if refs]
 
 
-def live_leases(leases):
+def live_leases(leases: dict[Issue, Lease]) -> dict[Issue, Sha]:
     """Just the still-held leases, in the {issue: sha} shape the readers that
     only ask "is this task locked?" already consume."""
-    return {issue: l["sha"] for issue, l in leases.items() if l["live"]}
+    return {issue: l.sha for issue, l in leases.items() if l.live}
 
 
-def hold_lease(command, repo, issue, worker):
+def hold_lease(
+    command: str, repo: Repo, issue: Issue, worker: Worker,
+) -> tuple[int | None, Lease | None]:
     """The write-after-expiry check (PROTOCOL.md §5.3): prove this worker still
     holds the lease BEFORE any write of a transition. Returns `(code, head)` —
     `code` None when the lease is ours and the caller may proceed (with `head`
@@ -793,8 +914,8 @@ def hold_lease(command, repo, issue, worker):
         print(f"{command}: lost-lease issue={issue} — the lease is gone, "
               "re-claim the task before writing to it")
         return (EXIT_LOST, None)
-    if head["worker"] != worker:
-        holder = head["worker"] or "another worker"
+    if head.worker != worker:
+        holder = head.worker or "another worker"
         print(f"{command}: lost-lease issue={issue} — the lease is held by {holder}")
         return (EXIT_LOST, None)
     return (None, head)
@@ -802,17 +923,17 @@ def hold_lease(command, repo, issue, worker):
 
 # --- claim state file --------------------------------------------------------
 
-def state_dir():
+def state_dir() -> str:
     return os.environ.get("KRAKEN_STATE_DIR") or os.path.join(
         os.path.expanduser("~"), ".kraken"
     )
 
 
-def claim_state_path(worker):
+def claim_state_path(worker: Worker) -> str:
     return os.path.join(state_dir(), f"claim-{worker}.json")
 
 
-def write_claim_state(repo, issue, worker):
+def write_claim_state(repo: Repo, issue: Issue, worker: Worker) -> None:
     """Record the open claim so the SessionEnd hook can auto-release it if the
     worker's session ends before a terminal transition. Best-effort: a state dir
     we cannot write is never worth failing a won claim over — the reaper backs
@@ -827,7 +948,7 @@ def write_claim_state(repo, issue, worker):
         pass
 
 
-def clear_claim_state(worker):
+def clear_claim_state(worker: Worker) -> None:
     """Drop the claim state file on a terminal transition (deliver / escalate /
     release), so a later graceful exit does not re-release a claim we no longer
     hold. Best-effort."""
@@ -837,7 +958,7 @@ def clear_claim_state(worker):
         pass
 
 
-def open_claim_record(worker):
+def open_claim_record(worker: Worker) -> ClaimRecord | None:
     """The whole claim-<worker>.json record — `{"repo", "issue", "worker"}` with
     `issue` normalized to a string — or None when this worker holds no open
     claim. The file's *presence* is the signal that a claim is unresolved: every
@@ -866,7 +987,7 @@ def open_claim_record(worker):
     }
 
 
-def open_claim(worker):
+def open_claim(worker: Worker) -> str | None:
     """The issue number (as a string) of an open claim this worker still holds,
     or None when there is none — the one field the one-task-at-a-time guard
     needs, read off open_claim_record so there is a single parse of the file."""
@@ -874,7 +995,9 @@ def open_claim(worker):
     return None if record is None else record["issue"]
 
 
-def refuse_second_claim(worker, issue=None):
+def refuse_second_claim(
+    worker: Worker, issue: Issue | None = None,
+) -> int | None:
     """PROTOCOL.md §5: a worker MUST work one task at a time and MUST NOT claim a
     second task while it holds a claim. If a claim-<worker>.json state file marks
     an open claim, refuse — writing nothing — and return EXIT_NOT_CLEAR; return
@@ -896,11 +1019,11 @@ def refuse_second_claim(worker, issue=None):
     return EXIT_NOT_CLEAR
 
 
-def wake_retry_flag_path():
+def wake_retry_flag_path() -> str:
     return os.path.join(state_dir(), "wake-retry")
 
 
-def wake_retry_mtime():
+def wake_retry_mtime() -> float | None:
     """mtime of the wake-retry flag the StopFailure hook stamps when a usage
     limit kills a turn on this machine (hooks/stop-failure-release.sh), or None
     when no flag exists. The watcher compares it against its own last emission
@@ -913,14 +1036,15 @@ def wake_retry_mtime():
 
 # --- comment composition -----------------------------------------------------
 
-def post_comment(repo, issue, body):
+def post_comment(repo: Repo, issue: Issue, body: str) -> bool:
     status, _text = http_request(
         "POST", f"/repos/{repo}/issues/{issue}/comments", {"body": body}
     )
     return 200 <= status < 300
 
 
-def swap_labels(repo, issue, remove=None, add=None):
+def swap_labels(repo: Repo, issue: Issue, remove: str | None = None,
+                add: str | None = None) -> bool:
     """Remove and/or add one label on an issue. A remove of a label the issue
     no longer carries (HTTP 404) counts as success, so the swap stays
     idempotent under retries and reaper races — the same tolerance `gh issue
@@ -941,13 +1065,13 @@ def swap_labels(repo, issue, remove=None, add=None):
     return True
 
 
-def issue_detail(repo, issue):
+def issue_detail(repo: Repo, issue: Issue) -> Json | None:
     """The live issue object (labels, body, state, ...), or None on transport
     failure — one GET serves both the label and body readers."""
     return http_json("GET", f"/repos/{repo}/issues/{issue}")
 
 
-def issue_label_names(repo, issue):
+def issue_label_names(repo: Repo, issue: Issue) -> list[str] | None:
     """The label names currently on an issue, live. Returns a list, or None on
     transport failure — the coordination workflows read labels off the live
     issue (a labeled/edited event may have just changed them)."""
@@ -957,7 +1081,7 @@ def issue_label_names(repo, issue):
     return [lbl.get("name", "") for lbl in obj.get("labels", [])]
 
 
-def issue_body(repo, issue):
+def issue_body(repo: Repo, issue: Issue) -> str | None:
     """The issue's body text, live. Returns a string ("" when the body is empty
     or null), or None on transport failure."""
     obj = issue_detail(repo, issue)
@@ -987,7 +1111,7 @@ QUEUE_COMMENT_WINDOW = 25
 COMMENT_HYDRATE_CHUNK = 50
 
 
-def fetch_open_tasks(repo):
+def fetch_open_tasks(repo: Repo) -> list[Node] | None:
     """Every OPEN kraken-task issue in the repo, across all projects — number,
     title, createdAt, body, labels and native blocked-by — in one paginated
     GraphQL walk. Returns the node list, or None on transport failure.
@@ -1022,7 +1146,9 @@ def fetch_open_tasks(repo):
         cursor = page["pageInfo"]["endCursor"]
 
 
-def resolve_depends_on(repo, targets):
+def resolve_depends_on(
+    repo: Repo, targets: Iterable[Issue],
+) -> dict[Issue, str] | None:
     """Resolve every `depends-on: #N` fallback target's open/closed state in
     one batched GraphQL call (one aliased `iN: issue(number: N) { state }`
     field per distinct target), never one call per candidate. Returns
@@ -1041,7 +1167,9 @@ def resolve_depends_on(repo, targets):
     }
 
 
-def fetch_comment_windows(repo, numbers):
+def fetch_comment_windows(
+    repo: Repo, numbers: Iterable[Issue],
+) -> dict[Issue, list[Json]] | None:
     """The trailing comment window of the named issues, `{number: [nodes]}`, in
     batched aliased GraphQL calls (`iN: issue(number: N) { comments(last: …) }`)
     — the same shape `resolve_depends_on` uses, for the same reason: a fan-out
@@ -1093,7 +1221,7 @@ def fetch_comment_windows(repo, numbers):
 # coincide and one name is enough.
 
 
-def is_worker_comment(body):
+def is_worker_comment(body: str) -> bool:
     """Whether a comment was posted by a worker — the requeue derivation's
     discriminator (PROTOCOL.md §4). **Structural**: a worker comment is one that
     carries a hidden kraken marker on ANY line. Every worker-posted comment wears
@@ -1121,7 +1249,7 @@ def is_worker_comment(body):
     return first_line.startswith(prefix)
 
 
-def has_requeue_directive(body):
+def has_requeue_directive(body: str) -> bool:
     """Whether a comment carries an EXPLICIT, STRUCTURED requeue directive — the
     only thing that bounces a DELIVERED (awaiting-merge) task back for rework, so
     a prose sentence merely starting a line with "requeue:" no longer bounces a
@@ -1139,7 +1267,7 @@ def has_requeue_directive(body):
     return False
 
 
-def comment_nodes_of(node):
+def comment_nodes_of(node: Node) -> list[Json]:
     """A task node's trailing comment window, oldest-first — empty for a node the
     hydration pass did not fill.
 
@@ -1151,7 +1279,9 @@ def comment_nodes_of(node):
     return (node.get("comments") or {}).get("nodes") or []
 
 
-def comment_hungry(nodes, leases):
+def comment_hungry(
+    nodes: Sequence[Node], leases: dict[Issue, Lease],
+) -> set[Issue]:
     """The issue numbers whose comment window a read of this queue actually needs
     — the set `hydrate_comment_windows` fetches, as a pure function so the
     fetch's scope is testable without transport.
@@ -1179,12 +1309,13 @@ def comment_hungry(nodes, leases):
             hungry.add(number)
     walked = {node["number"] for node in nodes}
     for number, lease in leases.items():
-        if not lease["live"] and number in walked:
+        if not lease.live and number in walked:
             hungry.add(number)
     return hungry
 
 
-def hydrate_comment_windows(repo, nodes, leases):
+def hydrate_comment_windows(repo: Repo, nodes: list[Node],
+                            leases: dict[Issue, Lease]) -> list[Node] | None:
     """Attach the trailing comment window to the queue nodes that need one, in
     place, and answer the nodes back — or None on transport failure, which the
     callers propagate exactly like a failed walk.
@@ -1204,7 +1335,7 @@ def hydrate_comment_windows(repo, nodes, leases):
     return nodes
 
 
-def requeue_verdict(held, comments):
+def requeue_verdict(held: str, comments: Sequence[Json]) -> bool:
     """Whether an operator reply has requeued a task held by `held` labels — a
     PURE read of the thread (PROTOCOL.md §6), so it is decided identically by
     every reader and needs no write to become true.
@@ -1232,7 +1363,7 @@ def requeue_verdict(held, comments):
     return True
 
 
-def requeued_labels(node, live):
+def requeued_labels(node: Node, live: dict[Issue, Sha]) -> tuple[str, ...]:
     """The held labels this task carries that an operator reply has already
     lifted — a tuple, empty when the task is genuinely held. Pure, so the
     classification and the claim that follows it reach the same verdict from the
@@ -1253,7 +1384,9 @@ def requeued_labels(node, live):
     return held if requeue_verdict(held, comment_nodes_of(node)) else ()
 
 
-def read_queue(repo, now=None, ttl=None):
+def read_queue(
+    repo: Repo, now: Epoch | None = None, ttl: int | None = None,
+) -> tuple[list[Node], dict[Issue, Lease]] | None:
     """One queue read: every open kraken-task node (repo-wide, BEFORE any project
     filter) plus the LEASE state of every claim ref. The single fetch the
     reconciler (§6), the startable classification and the claim path all consume,
@@ -1285,7 +1418,9 @@ def read_queue(repo, now=None, ttl=None):
     return (nodes, leases)
 
 
-def classify_queue(repo, project, include_body=False, read=None):
+def classify_queue(repo: Repo, project: str, include_body: bool = False,
+                   read: tuple[list[Node], dict[Issue,
+                   Lease]] | None = None) -> list[tuple] | None:
     """The shared startable/held classification list-startable and watch's
     snapshot both read — one code path so the filter can't drift between them.
     Returns a list of (number, title, createdAt, "startable"|"held") ordered
@@ -1376,7 +1511,7 @@ def classify_queue(repo, project, include_body=False, read=None):
     return [(n, t, c, s) for n, t, c, s, _ in rows]
 
 
-def cmd_list_startable(args):
+def cmd_list_startable(args: argparse.Namespace) -> int:
     rows = classify_queue(args.repo, args.project)
     if rows is None:
         return EXIT_TRANSPORT
@@ -1393,13 +1528,13 @@ def cmd_list_startable(args):
 
 # --- subcommand: claim -------------------------------------------------------
 
-def lease_expired_body(worker, stale):
+def lease_expired_body(worker: Worker, stale: Lease) -> str:
     """The thief's audit comment: who held the lease, how long it had been
     silent, and who took it. Two jobs — it is the only human-readable trace that
     a task changed hands, and its `lease-expired` marker is what §6's repeat
     guard counts, so one comment per steal, never one per read."""
-    previous = stale.get("worker") or "an unnamed worker"
-    age = stale.get("age")
+    previous = stale.worker or "an unnamed worker"
+    age = stale.age
     silence = "its clock could not be read" if age is None \
         else f"it had been silent for {format_age(age)}"
     prose = (
@@ -1408,17 +1543,18 @@ def lease_expired_body(worker, stale):
         "and stop before writing anything."
     )
     payload = {"type": "lease-expired", "worker": worker,
-               "previous_worker": stale.get("worker") or ""}
+               "previous_worker": stale.worker or ""}
     if age is not None:
         payload["age_seconds"] = age
     return compose_comment(worker, prose, payload)
 
 
-def probe_lease_state(repo, issue, ttl):
-    """Read one issue's lease into the same record shape a queue read produces —
-    `{"gen", "sha", "worker", "age", "live", "gens"}` — or None when the task
-    carries no claim ref at all. `False` (the sentinel) on a transport failure,
-    so 'unclaimed' is never confused with 'unknown'.
+def probe_lease_state(
+    repo: Repo, issue: Issue, ttl: int,
+) -> Lease | None | bool:
+    """Read one issue's lease into the same `Lease` a queue read produces, or
+    None when the task carries no claim ref at all. `False` (the sentinel) on a
+    transport failure, so 'unclaimed' is never confused with 'unknown'.
 
     A drain never needs this: the queue read already carries every lease. It is
     the named-claim path's equivalent, and a slightly stale answer is safe by
@@ -1431,14 +1567,17 @@ def probe_lease_state(repo, issue, ttl):
         return False
     if state == "absent":
         return None
-    age = None if head["epoch"] is None else max(0, int(time.time() - head["epoch"]))
-    return {"gen": head["gen"], "sha": head["sha"], "worker": head["worker"],
-            "age": age, "live": age is not None and age < ttl,
-            "gens": head["gens"]}
+    # `claim_ref_head` cannot know the TTL, so it reports the clock and leaves
+    # the verdict open; re-deciding `age`/`live` here against `now` is the whole
+    # difference between the two.
+    age = None if head.epoch is None else max(0, int(time.time() - head.epoch))
+    return dataclasses.replace(head, age=age,
+                               live=age is not None and age < ttl)
 
 
-def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
-                probe_lease=False):
+def _claim_once(repo: Repo, issue: Issue, worker: Worker,
+                allow_held: Sequence[str] = (), lease: Lease | None = None,
+                ttl: int | None = None, probe_lease: bool = False) -> int:
     """The one contended claim sequence — guard, CAS, projection — executed
     identically every time (PROTOCOL.md §5). Returns an exit code and prints a
     `claim:` diagnostic line. Shared by `claim` and `claim-next` so they can never
@@ -1469,7 +1608,7 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
     ttl = lease_ttl_seconds(ttl)
 
     def _stealing(l):
-        return l is not None and not l["live"] and l["worker"] != worker
+        return l is not None and not l.live and l.worker != worker
 
     # 1. Guard — re-fetch labels; a held task is skipped with zero writes.
     label_names = issue_label_names(repo, issue)
@@ -1500,7 +1639,7 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
     # CAS and reading its 422; the generation ladder makes that attempt worse
     # than useless — creating the next generation would SUCCEED and take a live
     # lease — so the read answers it instead, with the same verdict.
-    if lease is not None and lease["live"] and lease["worker"] != worker:
+    if lease is not None and lease.live and lease.worker != worker:
         diag(f"claim: lost-cas issue={issue} — another worker holds the claim ref")
         return EXIT_LOST
 
@@ -1515,7 +1654,7 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
     #    renewal — produce exactly one winner and nothing to undo. Nothing is
     #    deleted to make room, so the task is never observably free mid-steal and
     #    no interleaving can hand two workers the same lease.
-    from_gen = lease["gen"] if lease is not None else LEGACY_CLAIM_GEN
+    from_gen = lease.gen if lease is not None else LEGACY_CLAIM_GEN
     outcome, gen, _sha = advance_lease(
         repo, issue, from_gen, {"type": "claim", "worker": worker})
     if outcome.startswith("fail"):
@@ -1533,7 +1672,7 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
     # The generations we climbed past are garbage now — the holder is the highest
     # one, so a delete that fails leaves a stray ref, never a second lease.
     if lease is not None and gen is not None:
-        drop_generations(repo, issue, [g for g in lease["gens"] if g < gen])
+        drop_generations(repo, issue, [g for g in lease.gens if g < gen])
 
     # 3. Projection. State file FIRST so lifecycle hooks can release the claim even
     #    if the writes below fail; then the in-progress label and claim comment. A
@@ -1566,7 +1705,7 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
     return EXIT_OK
 
 
-def cmd_claim(args):
+def cmd_claim(args: argparse.Namespace) -> int:
     refused = refuse_second_claim(args.worker, args.issue)
     if refused is not None:
         return refused
@@ -1577,7 +1716,7 @@ def cmd_claim(args):
 
 # --- subcommand: claim-next --------------------------------------------------
 
-def verify_project(repo, project):
+def verify_project(repo: Repo, project: str) -> tuple[bool | None, str]:
     """Check that the coordination repo actually carries the `project:<name>`
     label this worker was pointed at. Returns (ok, message): True when the label
     exists, False (with a message naming the configured projects and the fix)
@@ -1601,7 +1740,7 @@ def verify_project(repo, project):
             % (repo, project, configured, repo, project))
 
 
-def cmd_claim_next(args):
+def cmd_claim_next(args: argparse.Namespace) -> int:
     """Collapse the deterministic claim loop into one invocation: read the queue,
     reconcile it (§6), then list startable candidates oldest-first and guard + CAS
     each in turn, stopping at the first win. Losses (10/11) move to the next
@@ -1624,7 +1763,8 @@ def cmd_claim_next(args):
     return rc
 
 
-def acquire_next(repo, project, worker, ttl=None):
+def acquire_next(repo: Repo, project: str, worker: Worker,
+                 ttl: int | None = None) -> tuple[int, Json | None]:
     """The whole acquisition — one-task-at-a-time guard, project preflight, queue
     read, §6 reconcile, then guard + CAS down the candidate list — as DATA rather
     than as printed output: returns `(exit_code, won)` where `won` is
@@ -1737,14 +1877,15 @@ NEXT_ACTION_EXIT = {
 }
 
 
-def format_iso(epoch):
+def format_iso(epoch: Epoch) -> str:
     """Epoch seconds as an ISO-8601 UTC timestamp (…Z) — `parse_iso`'s inverse,
     so a timestamp this program emits is one it can read back."""
     return datetime.datetime.fromtimestamp(
         epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def then_commands(repo, issue, worker, script=None):
+def then_commands(repo: Repo, issue: Issue, worker: Worker,
+                  script: str | None = None) -> dict[str, str]:
     """The exact command lines this worker may run next, fully interpolated —
     the script's own absolute path, the repo, the issue and the worker name
     already filled in, with only the parts that are the agent's to write left as
@@ -1764,7 +1905,10 @@ def then_commands(repo, issue, worker, script=None):
     }
 
 
-def lease_block(epoch, now, ttl, generation=None, source="claim-ref"):
+def lease_block(
+    epoch: Epoch | None, now: Epoch, ttl: int,
+    generation: Gen | None = None, source: str = "claim-ref",
+) -> Json:
     """The renewal contract as numbers instead of as an instruction to remember:
     when this lease dies, how long is left, and how often to renew.
 
@@ -1786,7 +1930,7 @@ def lease_block(epoch, now, ttl, generation=None, source="claim-ref"):
     }
 
 
-def task_brief(title, body):
+def task_brief(title: str, body: str) -> Json:
     """The task as the agent needs it: the issue-form sections split out, plus
     the raw body for a hand-written issue that carries no headings. An empty or
     `_No response_` section reads as "" rather than as the placeholder text."""
@@ -1803,9 +1947,15 @@ def task_brief(title, body):
     }
 
 
-def next_action_envelope(action, repo, worker, *, issue=None, resumed=None,
-                         brief=None, lease=None, reason=None, detail=None,
-                         holding=None, script=None):
+def next_action_envelope(action: str, repo: Repo, worker: Worker, *,
+                         issue: Issue | None = None,
+                         resumed: bool | None = None,
+                         brief: Json | None = None,
+                         lease: Json | None = None,
+                         reason: str | None = None,
+                         detail: str | None = None,
+                         holding: Json | None = None,
+                         script: str | None = None) -> Envelope:
     """The one JSON shape next-action emits. `action` is the verdict, `reason` a
     stable machine slug for it, and `detail` the human sentence — so a consumer
     branches on the slug and a human reads the sentence, never the other way
@@ -1844,7 +1994,7 @@ def next_action_envelope(action, repo, worker, *, issue=None, resumed=None,
     return env
 
 
-def issue_is_finished(issue_obj):
+def issue_is_finished(issue_obj: Json | None) -> bool:
     """Whether an issue has left the state where "keep executing" makes sense:
     closed, or carrying a terminal held label. A worker whose state file still
     names such a task already finished with it — the transition landed and only
@@ -1855,7 +2005,10 @@ def issue_is_finished(issue_obj):
     return bool(names & {"needs-decision", "awaiting-merge"})
 
 
-def resume_verdict(record, repo, worker, ref_state, head, issue_obj, now, ttl):
+def resume_verdict(
+    record: ClaimRecord, repo: Repo, worker: Worker, ref_state: str | None,
+    head: Lease | None, issue_obj: Json | None, now: Epoch, ttl: int,
+) -> tuple[str, Json]:
     """Decide what a recorded open claim is worth, as a pure function of what was
     observed. Returns `(verdict, detail)` where verdict is one of:
 
@@ -1891,7 +2044,7 @@ def resume_verdict(record, repo, worker, ref_state, head, issue_obj, now, ttl):
                           "detail": "the task issue did not read — re-check "
                                     "before writing anything"})
 
-    ours = ref_state == "ok" and (head or {}).get("worker") == worker
+    ours = ref_state == "ok" and head is not None and head.worker == worker
     if not ours:
         if issue_is_finished(issue_obj):
             # Whether this worker's own terminal transition deleted the ref or
@@ -1899,7 +2052,7 @@ def resume_verdict(record, repo, worker, ref_state, head, issue_obj, now, ttl):
             # right move is the same either way: the task is not ours and not in
             # the queue, so keep draining rather than report a loss.
             return ("resolved", {"reason": "already-resolved"})
-        holder = (head or {}).get("worker")
+        holder = head.worker if head is not None else None
         if ref_state == "absent":
             return ("abandon", {"reason": "lease-gone",
                                 "detail": "the claim ref is gone — re-claim the "
@@ -1914,11 +2067,14 @@ def resume_verdict(record, repo, worker, ref_state, head, issue_obj, now, ttl):
         # it). Nothing to resume; the lease frees itself within one TTL.
         return ("resolved", {"reason": "task-finished"})
 
-    return ("execute", {"generation": (head or {}).get("gen"),
-                        "epoch": (head or {}).get("epoch")})
+    return ("execute", {"generation": head.gen if head is not None else None,
+                        "epoch": head.epoch if head is not None else None})
 
 
-def _resume(record, repo, worker, ttl, now, script):
+def _resume(
+    record: ClaimRecord, repo: Repo, worker: Worker, ttl: int, now: Epoch,
+    script: str | None,
+) -> tuple[int | None, Envelope | None]:
     """Fetch what `resume_verdict` needs and turn its verdict into an envelope.
     Returns `(exit_code, envelope)`, or `(None, None)` when the recorded claim is
     resolved and the caller should go acquire a new task."""
@@ -1978,7 +2134,9 @@ def _resume(record, repo, worker, ttl, now, script):
         lease=lease, script=script))
 
 
-def next_action(repo, project, worker, ttl=None, now=None, script=None):
+def next_action(repo: Repo, project: str, worker: Worker,
+                ttl: int | None = None, now: Epoch | None = None,
+                script: str | None = None) -> tuple[int, Envelope]:
     """The driver loop's single call: resume the task this worker already holds,
     or acquire the next one. Returns `(exit_code, envelope)`."""
     ttl = lease_ttl_seconds(ttl)
@@ -2029,7 +2187,7 @@ def next_action(repo, project, worker, ttl=None, now=None, script=None):
         script=script))
 
 
-def render_next_action(env):
+def render_next_action(env: Envelope) -> None:
     """The --text rendering: the same verdict as one line a human can scan,
     plus what the agent owes next. The JSON stays the machine contract."""
     action = env["action"]
@@ -2061,7 +2219,7 @@ def render_next_action(env):
         print(f"  {name}: {command}")
 
 
-def cmd_next_action(args):
+def cmd_next_action(args: argparse.Namespace) -> int:
     with diagnostics_on_stderr():
         rc, env = next_action(args.repo, args.project, args.worker)
     if args.text:
@@ -2073,7 +2231,7 @@ def cmd_next_action(args):
 
 # --- subcommand: heartbeat ---------------------------------------------------
 
-def cmd_heartbeat(args):
+def cmd_heartbeat(args: argparse.Namespace) -> int:
     """Renew the lease: climb one generation with a fresh commit whose
     server-stamped date restarts the TTL and whose marker carries the progress
     text. No timeline comment — `status` surfaces the age and message from the
@@ -2089,7 +2247,7 @@ def cmd_heartbeat(args):
     if lost is not None:
         return lost
     outcome, gen, _sha = advance_lease(
-        repo, issue, head["gen"],
+        repo, issue, head.gen,
         {"type": "heartbeat", "worker": worker, "msg": message},
     )
     if outcome.startswith("fail"):
@@ -2099,21 +2257,21 @@ def cmd_heartbeat(args):
         print(f"heartbeat: lost-lease issue={issue} — another worker took the "
               "lease while this one was silent")
         return EXIT_LOST
-    drop_generations(repo, issue, [g for g in head["gens"] if g < gen])
+    drop_generations(repo, issue, [g for g in head.gens if g < gen])
     print(f"heartbeat: renewed issue={issue} worker={worker}")
     return EXIT_OK
 
 
 # --- subcommand: escalate ----------------------------------------------------
 
-def read_body_file(path):
+def read_body_file(path: str) -> str:
     """Read a file the way `$(cat file)` did: content with trailing newlines
     stripped (interior preserved)."""
     with open(path, encoding="utf-8") as fh:
         return fh.read().rstrip("\n")
 
 
-def cmd_escalate(args):
+def cmd_escalate(args: argparse.Namespace) -> int:
     repo, issue, worker, question_file = args.repo, args.issue, args.worker, args.question_file
     if not os.path.isfile(question_file):
         print(f"escalate: no such file {question_file}", file=sys.stderr)
@@ -2138,7 +2296,7 @@ def cmd_escalate(args):
     # Comment and labels first, the lock last: a half-executed escalation leaves
     # the task held, not free with no question on record. A leftover ref is an
     # orphan lock the reaper deletes.
-    if not drop_generations(repo, issue, head["gens"]):
+    if not drop_generations(repo, issue, head.gens):
         print(f"escalate: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
 
@@ -2149,7 +2307,7 @@ def cmd_escalate(args):
 
 # --- subcommand: deliver -----------------------------------------------------
 
-def cmd_deliver(args):
+def cmd_deliver(args: argparse.Namespace) -> int:
     repo, issue, worker, result_file = args.repo, args.issue, args.worker, args.result_file
     pr_url = args.pr_url
     if not os.path.isfile(result_file):
@@ -2179,7 +2337,7 @@ def cmd_deliver(args):
         print(f"deliver: gh-failure issue={issue} stage=labels")
         return EXIT_TRANSPORT
     # Result and labels first, the lock last (escalate's ordering rule).
-    if not drop_generations(repo, issue, head["gens"]):
+    if not drop_generations(repo, issue, head.gens):
         print(f"deliver: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
 
@@ -2191,7 +2349,7 @@ def cmd_deliver(args):
 
 # --- subcommand: release -----------------------------------------------------
 
-def cmd_release(args):
+def cmd_release(args: argparse.Namespace) -> int:
     repo, issue, worker, reason = args.repo, args.issue, args.worker, args.reason
 
     # Releasing a lease that is no longer ours would delete the NEW holder's
@@ -2220,7 +2378,7 @@ def cmd_release(args):
         return EXIT_TRANSPORT
     # The ref IS the claim: deleting it is what frees the task (comment and label
     # are narrative). Last, so the task never looks free while half-released.
-    if not drop_generations(repo, issue, head["gens"]):
+    if not drop_generations(repo, issue, head.gens):
         print(f"release: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
 
@@ -2231,7 +2389,7 @@ def cmd_release(args):
 
 # --- subcommand: note --------------------------------------------------------
 
-def cmd_note(args):
+def cmd_note(args: argparse.Namespace) -> int:
     """Post a free-form worker comment (assumptions, a progress note) with the
     attribution disclaimer prepended and a single non-state-changing `note`
     marker (PROTOCOL.md §4) — the structural signal that makes the §6 requeue
@@ -2260,7 +2418,7 @@ def cmd_note(args):
 
 # --- subcommand: watch -------------------------------------------------------
 
-def snapshot_state(repo, project):
+def snapshot_state(repo: Repo, project: str) -> str | None:
     """The queue snapshot list-startable emits in --snapshot mode, via the same
     classify_queue. Returns the snapshot text, or None on transport failure."""
     rows = classify_queue(repo, project)
@@ -2271,7 +2429,8 @@ def snapshot_state(repo, project):
     )
 
 
-def wake_retry_due(flag_mtime, last_emit, retry_seconds, now):
+def wake_retry_due(flag_mtime: float | None, last_emit: float,
+                   retry_seconds: int, now: Epoch) -> bool:
     """Whether the watcher owes a lost-wake retry: the StopFailure hook stamped
     the wake-retry flag AFTER this watcher's last emission (that wake's turn died
     on a usage limit) and the retry spacing has elapsed. A flag older than the
@@ -2290,7 +2449,9 @@ WATCH_WARN_EVERY = 10
 WATCH_MAX_FAILURES = 60
 
 
-def watch_failure_action(failures, warn_every, max_failures):
+def watch_failure_action(
+    failures: int, warn_every: int, max_failures: int,
+) -> str | None:
     """What a run of `failures` consecutive failed queue reads owes the operator:
     "die" once the ceiling is reached, "warn" on the first failure and every
     `warn_every` after it, None in between.
@@ -2309,7 +2470,7 @@ def watch_failure_action(failures, warn_every, max_failures):
     return None
 
 
-def cmd_watch(args):
+def cmd_watch(args: argparse.Namespace) -> int:
     repo, project = args.repo, args.project
     poll_seconds = int(os.environ.get("KRAKEN_WATCH_POLL_SECONDS", "60"))
     retry_seconds = int(os.environ.get("KRAKEN_WATCH_RETRY_SECONDS", "300"))
@@ -2402,7 +2563,7 @@ def cmd_watch(args):
 _PR_URL_RE = re.compile(r"https?://\S+?/pull/\d+")
 
 
-def project_names_of(node):
+def project_names_of(node: Node) -> list[str]:
     """The project:<name> suffixes carried by a queue node's labels."""
     names = set()
     for lbl in node.get("labels", {}).get("nodes", []):
@@ -2412,11 +2573,11 @@ def project_names_of(node):
     return names
 
 
-def label_names_of(node):
+def label_names_of(node: Node) -> set[str]:
     return {lbl.get("name", "") for lbl in node.get("labels", {}).get("nodes", [])}
 
 
-def parse_iso(ts):
+def parse_iso(ts: str) -> Epoch | None:
     """An ISO-8601 UTC timestamp (…Z) to epoch seconds, or None if unparseable."""
     if not ts:
         return None
@@ -2427,7 +2588,9 @@ def parse_iso(ts):
     return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
 
 
-def claim_meta_of(sha, commit_meta):
+def claim_meta_of(
+    sha: Sha, commit_meta: CommitMeta,
+) -> tuple[Worker | None, str | None, str | None]:
     """Decode one claim ref's commit into (worker, msg, anchor_iso) — the
     marker payload plus the server-stamped committedDate. This is the ONE
     liveness read `status` and the reaper share: the ref's commit date is the
@@ -2442,7 +2605,9 @@ def claim_meta_of(sha, commit_meta):
     return worker, msg, anchor
 
 
-def parse_pr_url(records):
+def parse_pr_url(
+    records: Sequence[CommentRecord],
+) -> tuple[str | None, str | None]:
     """The delivery PR URL of an awaiting-merge task, as `(url, source)`.
 
     The structured field is the source of truth (§8): the `pr` of the newest
@@ -2480,7 +2645,7 @@ def parse_pr_url(records):
 _PR_PARTS_RE = re.compile(r"^https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 
 
-def parse_github_pr_url(pr_url):
+def parse_github_pr_url(pr_url: str) -> tuple[str, str, str] | None:
     """(owner, name, number) parsed from a github.com web pull-request URL, or
     None when the delivery URL isn't one — a non-GitHub delivery (GitLab MR,
     Bitbucket PR, ...) that PROTOCOL.md never forbids, or anything else kraken's
@@ -2492,7 +2657,7 @@ def parse_github_pr_url(pr_url):
     return m.group(1), m.group(2), m.group(3)
 
 
-def pr_is_merged(pr_url):
+def pr_is_merged(pr_url: str) -> bool | None:
     """Whether a delivery PR is already merged — the orphan heuristic's only
     signal. Returns True/False; False also covers a delivery URL kraken cannot
     evaluate (not a github.com pull-request URL) — "not confirmed merged",
@@ -2513,7 +2678,7 @@ def pr_is_merged(pr_url):
             or str(data.get("state", "")).upper() == "MERGED")
 
 
-def list_projects(repo):
+def list_projects(repo: Repo) -> list[str] | None:
     """Every project:<name> label configured in the repo, sorted, prefix
     stripped — the launch recon points a worker at each. Read from the repo's
     label set (not the open-task walk) so a project with no open task still gets
@@ -2528,7 +2693,7 @@ def list_projects(repo):
     )
 
 
-def format_age(seconds):
+def format_age(seconds: int | None) -> str:
     """A compact human age: '42s', '12m', '3h', '4d'. 'unknown' when there is no
     anchor (a worker that never left a liveness marker)."""
     if seconds is None:
@@ -2547,7 +2712,7 @@ def format_age(seconds):
     return f"{hours // 24}d"
 
 
-def queue_hygiene(nodes, project=""):
+def queue_hygiene(nodes: Sequence[Node], project: str = "") -> list[Json]:
     """The queue entries that are dead on arrival, read off the walk the console
     already performed (PROTOCOL.md §2.1): no `project:<name>` label (invisible to
     every worker), or an empty/absent Goal or Acceptance section (a worker claims
@@ -2580,8 +2745,11 @@ def queue_hygiene(nodes, project=""):
     return out
 
 
-def compute_status(repo, project, nodes, now, *, leases, commit_meta,
-                   comment_reader, pr_merged, project_lister):
+def compute_status(repo: Repo, project: str, nodes: Sequence[Node],
+                   now: Epoch, *, leases: dict[Issue, Lease],
+                   commit_meta: CommitMeta, comment_reader: Callable[...,
+                   Any], pr_merged: Callable[..., Any],
+                   project_lister: Callable[..., Any]) -> Json | None:
     """Pure-ish status computation, transport injected so it is unit-testable:
     given the queue nodes (from fetch_open_tasks), the lease state of every claim
     ref + their commit meta, and reader callbacks, build the
@@ -2638,8 +2806,8 @@ def compute_status(repo, project, nodes, now, *, leases, commit_meta,
             # task whose release crashed — forever. Keying on the lease also
             # covers the opposite window, a claim whose label has not landed yet.
             lease = leases[number]
-            worker, msg, anchor = claim_meta_of(lease["sha"], commit_meta)
-            age = lease["age"]
+            worker, msg, anchor = claim_meta_of(lease.sha, commit_meta)
+            age = lease.age
             # An expired lease is not a claim any more: the next drain to read
             # the queue steals it, no repair pass involved. The console still has
             # to say so out loud — a lease due to expire in a minute looks
@@ -2649,7 +2817,7 @@ def compute_status(repo, project, nodes, now, *, leases, commit_meta,
                               "heartbeat_anchor": anchor,
                               "heartbeat_age_seconds": age,
                               "heartbeat_msg": msg,
-                              "stale": not lease["live"]})
+                              "stale": not lease.live})
 
     if project:
         projects = [project]
@@ -2672,7 +2840,7 @@ def compute_status(repo, project, nodes, now, *, leases, commit_meta,
     }
 
 
-def render_status(report):
+def render_status(report: Json) -> str:
     """The human console — the shape skills/status/SKILL.md documents. A thin
     renderer over compute_status's report; empty groups say so plainly."""
     repo = report["repo"]
@@ -2756,7 +2924,7 @@ def render_status(report):
     return "\n".join(lines)
 
 
-def cmd_status(args):
+def cmd_status(args: argparse.Namespace) -> int:
     repo, project = args.repo, args.project
     nodes = fetch_open_tasks(repo)
     if nodes is None:
@@ -2804,7 +2972,7 @@ def cmd_status(args):
 # The bootstrap `init`, single-sourced here so the skill and the program never
 # disagree on the asset set or the label canon.
 
-def bundled_asset(name):
+def bundled_asset(name: str) -> str:
     """The raw bytes of a bundled asset shipped in this skill's folder — what
     `init` commits into the coordination repo."""
     with open(os.path.join(SKILL_DIR, name), "rb") as fh:
@@ -2855,13 +3023,13 @@ PROJECT_LABEL_DESC = (
 )
 
 
-def gh_repo_exists(repo):
+def gh_repo_exists(repo: Repo) -> bool:
     """True iff the coordination repo already exists (a 2xx from the repo GET)."""
     status, _ = http_request("GET", f"/repos/{repo}")
     return 200 <= status < 300
 
 
-def gh_repo_create_private(repo):
+def gh_repo_create_private(repo: Repo) -> bool:
     """Create the coordination repo PRIVATE — never public: the queue is
     instructions that run in a worker's environment with its credentials. Created
     under the authenticated user (the coordination repo is personal by design)."""
@@ -2870,7 +3038,9 @@ def gh_repo_create_private(repo):
     return 200 <= status < 300
 
 
-def gh_get_content_meta(repo, path):
+def gh_get_content_meta(
+    repo: Repo, path: str,
+) -> tuple[str | None, Sha | None]:
     """(bytes, blob_sha) for `path` on the repo via the contents API, or
     (None, None) when it is absent (404) OR unreadable. The blob sha is what the
     contents API requires to *update* an existing file — a create never sends
@@ -2890,7 +3060,7 @@ def gh_get_content_meta(repo, path):
     return (content, sha if isinstance(sha, str) else None)
 
 
-def gh_put_content(repo, path, data, message):
+def gh_put_content(repo: Repo, path: str, data: str, message: str) -> bool:
     """CREATE `path` on the repo with `data` via the contents API. Callers reach
     here only when the file was reported absent — an overwrite would need the
     current blob sha, and init never overwrites."""
@@ -2899,7 +3069,7 @@ def gh_put_content(repo, path, data, message):
     return 200 <= status < 300
 
 
-def gh_delete_content(repo, path, sha, message):
+def gh_delete_content(repo: Repo, path: str, sha: Sha, message: str) -> bool:
     """Delete `path` on the repo via the contents API. The current blob `sha` is
     required (same as an update) — GitHub rejects a delete without it, which is
     what keeps the prune from racing a concurrent edit. True on success."""
@@ -2909,7 +3079,9 @@ def gh_delete_content(repo, path, sha, message):
     return 200 <= status < 300
 
 
-def gh_label_upsert(repo, name, color, description):
+def gh_label_upsert(
+    repo: Repo, name: str, color: str, description: str,
+) -> bool:
     """Upsert a label with its canonical color/description — a create on a fresh
     repo (POST /labels), an in-place re-canonicalize on a re-run (PATCH the
     existing label when the create answers 422 'already_exists'). This is the
@@ -2924,7 +3096,7 @@ def gh_label_upsert(repo, name, color, description):
     return 200 <= status < 300
 
 
-def cmd_init(args):
+def cmd_init(args: argparse.Namespace) -> int:
     """Stand up (or repair) a coordination repo: verify-or-create it private,
     install the bundled assets, prune the retired ones, and upsert the canonical
     labels. Create-only: an asset that already exists is left exactly as it is,
@@ -2998,7 +3170,7 @@ def cmd_init(args):
     return EXIT_OK
 
 
-def render_init(report):
+def render_init(report: Json) -> str:
     """Human-facing init report: one line per repo/asset/label decision, then a
     summary line the skill can echo verbatim."""
     lines = [f"init: repo {report['repo']} ({report['repo_status']})"]
@@ -3048,7 +3220,7 @@ def render_init(report):
 RECONCILER_WORKER = "reconciler"
 
 
-def stale_claim_body(worker, reason):
+def stale_claim_body(worker: Worker, reason: str) -> str:
     """The reconciler's reclaim comment: the attribution disclaimer, human prose,
     and the stale-claim marker (audit trail). The disclaimer is required because
     a worker posts this now — under protocol/4 it was the coordination repo's own
@@ -3063,7 +3235,7 @@ def stale_claim_body(worker, reason):
     )
 
 
-def expiry_count(node):
+def expiry_count(node: Node) -> int:
     """How many times this task's lease has already expired and been stolen —
     counted from the `lease-expired` markers each steal leaves (§5). Only reached
     for a task whose lease EXPIRED, which is exactly what makes the task one the
@@ -3080,7 +3252,10 @@ def expiry_count(node):
     return total
 
 
-def reconcile_plan(nodes, leases, max_expiries=LEASE_EXPIRY_ESCALATE):
+def reconcile_plan(
+    nodes: Sequence[Node], leases: dict[Issue, Lease],
+    max_expiries: int = LEASE_EXPIRY_ESCALATE,
+) -> list[ReconcileAction]:
     """The reconciler's decision as a PURE function of one queue read — no
     network, so every rule is unit-testable in isolation (PROTOCOL.md §6). The
     expiry itself is already decided (`lease_state`); these are the repairs the
@@ -3127,10 +3302,10 @@ def reconcile_plan(nodes, leases, max_expiries=LEASE_EXPIRY_ESCALATE):
                 or "awaiting-merge" in labels):
             plan.append({"rule": "orphan-lock", "issue": num,
                          "reason": "the task already left the claim",
-                         "gens": leases[num]["gens"]})
+                         "gens": list(leases[num].gens)})
             continue
 
-        if not leases[num]["live"]:
+        if not leases[num].live:
             expiries = expiry_count(by_number[num])
             if expiries >= max_expiries:
                 plan.append({"rule": "reclaim", "issue": num,
@@ -3140,20 +3315,21 @@ def reconcile_plan(nodes, leases, max_expiries=LEASE_EXPIRY_ESCALATE):
                              "reason": f"the lease expired {expiries} times and "
                                        "no worker has finished the task",
                              "held": "in-progress" in labels,
-                             "gens": leases[num]["gens"]})
+                             "gens": list(leases[num].gens)})
             # Below the threshold: not held, not repaired — stolen by the claim.
 
     return plan
 
 
-def _reconcile_failure(stage, issue):
+def _reconcile_failure(stage: str, issue: Issue) -> None:
     """One failure shape for the applier: name the stage and the issue on stderr,
     then answer None so the caller surfaces exit 20."""
     print(f"reap: gh-failure stage={stage} issue={issue}", file=sys.stderr)
     return None
 
 
-def apply_reconcile(repo, plan, worker):
+def apply_reconcile(repo: Repo, plan: Sequence[ReconcileAction],
+                    worker: Worker) -> dict[str, int] | None:
     """Execute a reconcile plan. Returns per-rule counts, or None on the first
     transport failure. A half-applied pass is safe: every rule is idempotent and
     ends with the ref delete, so a crash leaves the task HELD and the next
@@ -3186,7 +3362,8 @@ def apply_reconcile(repo, plan, worker):
     return counts
 
 
-def project_reconcile(plan, nodes, leases):
+def project_reconcile(plan: Sequence[ReconcileAction], nodes: list[Node],
+                      leases: dict[Issue, Lease]) -> None:
     """Fold an APPLIED plan back into the in-memory queue read, in place, so the
     drain that just reconciled classifies the reconciled state without paying for
     a second fetch. Mirrors exactly what apply_reconcile wrote — nothing more:
@@ -3204,7 +3381,7 @@ def project_reconcile(plan, nodes, leases):
             node["labels"] = {"nodes": [{"name": n} for n in sorted(labels)]}
 
 
-def cmd_reap(args):
+def cmd_reap(args: argparse.Namespace) -> int:
     """Run the reconcile pass stand-alone — the operator-side escape hatch for
     the reconcile a drain performs on its own (PROTOCOL.md §6). One queue read
     (leases included), then the plan. Exit 0 on success, 20 on any gh/transport
@@ -3257,7 +3434,7 @@ VALIDATE_ACCEPTANCE_MISSING = (
 )
 
 
-def section_body(body, heading):
+def section_body(body: str, heading: str) -> str:
     """The trimmed content under `### HEADING` up to the next `### ` heading (or
     EOF). A hand-written issue lacking the heading yields nothing; an issue-form
     field left blank renders as the literal `_No response_`. Mirrors the awk the
@@ -3277,7 +3454,7 @@ def section_body(body, heading):
     return "\n".join(out)
 
 
-def is_empty_section(content):
+def is_empty_section(content: str) -> bool:
     """True when a section's content is blank or only the issue-form
     `_No response_` placeholder — each line trimmed, blank lines dropped."""
     nonblank = [ln.strip() for ln in content.split("\n") if ln.strip() != ""]
@@ -3285,7 +3462,7 @@ def is_empty_section(content):
     return joined == "" or joined == NO_RESPONSE_PLACEHOLDER
 
 
-def validation_body(missing):
+def validation_body(missing: Sequence[str]) -> str:
     """The one actionable comment the validator posts, tagged with the protocol/3
     validation marker so the debounce can find its own prior comment. It informs
     only — never blocks, closes, or relabels the task."""
@@ -3298,7 +3475,7 @@ def validation_body(missing):
     ])
 
 
-def latest_validation_comment(records):
+def latest_validation_comment(records: Sequence[CommentRecord]) -> str | None:
     """The body of the newest prior validation comment (carrying the validation
     marker) in the thread, or None when none exists — the debounce anchor."""
     latest = None
@@ -3310,7 +3487,7 @@ def latest_validation_comment(records):
     return latest
 
 
-def cmd_validate(args):
+def cmd_validate(args: argparse.Namespace) -> int:
     """Flag a queue entry missing its project label, Goal, or Acceptance
     (validate-task.yml). Reads the issue's live labels and body, and on any
     missing requirement posts ONE actionable comment naming exactly what to fix;
@@ -3365,7 +3542,7 @@ def cmd_validate(args):
     return EXIT_OK
 
 
-def is_identity_label(name):
+def is_identity_label(name: str) -> bool:
     """A label cleanup MUST preserve on a closed task: the task-type label
     (kraken-task) and its project routing label (project:<name>). Everything else
     — every state-machine label (in-progress / needs-decision / awaiting-merge)
@@ -3374,7 +3551,7 @@ def is_identity_label(name):
     return name == "kraken-task" or name.startswith("project:")
 
 
-def cmd_cleanup(args):
+def cmd_cleanup(args: argparse.Namespace) -> int:
     """Strip every non-identity label off a CLOSED kraken-task issue except
     kraken-task itself and its project:<name> label (cleanup-closed.yml). Closing
     a task (the PR's `Closes` line, or a manual close) otherwise leaves whatever
@@ -3437,7 +3614,7 @@ CONTRACT_FIELDS = {
 }
 
 
-def cmd_contract(args):
+def cmd_contract(args: argparse.Namespace) -> int:
     """Print an authoritative contract literal (no network) — the single source of
     truth for the disclaimer format and marker vocabulary, so a format change lands
     in one place."""
@@ -3448,7 +3625,7 @@ def cmd_contract(args):
 
 # --- CLI ---------------------------------------------------------------------
 
-def build_parser():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kraken.py",
         description="Bundled kraken worker-side queue transitions.",
@@ -3616,7 +3793,7 @@ def build_parser():
     return parser
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)
