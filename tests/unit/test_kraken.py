@@ -1399,9 +1399,144 @@ class LeaseTtlTests(unittest.TestCase):
         self.assertLessEqual(kraken.lease_renew_seconds(ttl) * 3, ttl)
 
 
+class QueueWalkQueryTests(unittest.TestCase):
+    """What the hot read asks the server for. The walk runs once a minute per
+    worker over the WHOLE repo, so every field on it is paid for by every task —
+    which is why the comment thread is not one of them."""
+
+    def setUp(self):
+        self._orig_graphql = kraken.graphql
+        self.queries = []
+
+        def fake(q):
+            self.queries.append(q)
+            return {"data": {"repository": {"issues": {
+                "pageInfo": {"hasNextPage": False, "endCursor": ""}, "nodes": []}}}}
+        kraken.graphql = fake
+
+    def tearDown(self):
+        kraken.graphql = self._orig_graphql
+
+    def test_the_walk_does_not_select_comments(self):
+        kraken.fetch_open_tasks("o/tasks")
+        q = self.queries[0]
+        self.assertNotIn("comments", q,
+                         "the queue walk must not carry comment threads")
+        # The fields it does need, still on the one walk.
+        for field in ("body", "labels(first:", "blockedBy(first:",
+                      'labels: ["kraken-task"]', "states: OPEN"):
+            self.assertIn(field, q)
+
+
+class CommentHungryTests(unittest.TestCase):
+    """Which tasks a queue read must fetch comments for — the whole point of
+    taking the trailing window off the hot walk. Pure, so the SCOPE of the fetch
+    is pinned without any transport."""
+
+    def test_a_free_queue_is_not_hungry_at_all(self):
+        nodes = [_task_node(n, ["kraken-task", "project:app"]) for n in range(1, 51)]
+        self.assertEqual(kraken.comment_hungry(nodes, {}), set())
+
+    def test_held_labels_are_hungry(self):
+        nodes = [
+            _task_node(1, ["kraken-task", "needs-decision"]),
+            _task_node(2, ["kraken-task", "awaiting-merge"]),
+            _task_node(3, ["kraken-task"]),
+            _task_node(4, ["kraken-task", "in-progress"]),
+        ]
+        # in-progress is write-only (§3): a badge is not a hold, so it buys no
+        # comment fetch.
+        self.assertEqual(kraken.comment_hungry(nodes, {}), {1, 2})
+
+    def test_a_live_lease_outranks_the_thread_so_it_is_not_hungry(self):
+        nodes = [_task_node(1, ["kraken-task", "needs-decision"])]
+        leases = _leases(i1=0)
+        self.assertTrue(leases[1]["live"], "fixture must model a LIVE lease")
+        self.assertEqual(kraken.comment_hungry(nodes, leases), set())
+
+    def test_an_expired_lease_is_hungry_for_the_expiry_count(self):
+        nodes = [_task_node(1, ["kraken-task"])]
+        leases = _leases(i1=kraken.LEASE_DEFAULT_TTL_SECONDS + 60)
+        self.assertFalse(leases[1]["live"], "fixture must model an EXPIRED lease")
+        self.assertEqual(kraken.comment_hungry(nodes, leases), {1})
+
+    def test_an_expired_lease_off_the_walk_is_an_orphan_and_costs_no_fetch(self):
+        # A ref on an issue the walk did not return is closed or no longer a
+        # task: rule 1 deletes it without ever reading a comment.
+        leases = _leases(i9=kraken.LEASE_DEFAULT_TTL_SECONDS + 60)
+        self.assertEqual(kraken.comment_hungry([], leases), set())
+
+
+class CommentHydrationTests(unittest.TestCase):
+    """The batched window fetch and the in-place hydration."""
+
+    def setUp(self):
+        self._orig_graphql = kraken.graphql
+
+    def tearDown(self):
+        kraken.graphql = self._orig_graphql
+
+    def _reply(self, numbers, per_issue=1):
+        def fake(q):
+            self.queries.append(q)
+            return {"data": {"repository": {
+                "i%d" % n: {"comments": {"nodes": [
+                    {"body": "c%d-%d" % (n, i), "createdAt": "2026-01-01"}
+                    for i in range(per_issue)]}}
+                for n in numbers if "i%d:" % n in q}}}
+        self.queries = []
+        kraken.graphql = fake
+
+    def test_empty_ask_is_no_call(self):
+        kraken.graphql = lambda q: self.fail("graphql must not be called for []")
+        self.assertEqual(kraken.fetch_comment_windows("o/t", set()), {})
+
+    def test_batches_every_issue_into_one_call(self):
+        self._reply(range(1, 21))
+        got = kraken.fetch_comment_windows("o/t", {3, 1, 2})
+        self.assertEqual(len(self.queries), 1, "three issues must cost ONE call")
+        self.assertIn("i1: issue(number: 1)", self.queries[0])
+        self.assertIn("comments(last: %d)" % kraken.QUEUE_COMMENT_WINDOW,
+                      self.queries[0])
+        self.assertEqual(sorted(got), [1, 2, 3])
+        self.assertEqual(got[2][0]["body"], "c2-0")
+
+    def test_chunks_beyond_the_page_size(self):
+        total = kraken.COMMENT_HYDRATE_CHUNK * 2 + 1
+        self._reply(range(1, total + 1))
+        got = kraken.fetch_comment_windows("o/t", set(range(1, total + 1)))
+        self.assertEqual(len(self.queries), 3, "chunked, not one call per issue")
+        self.assertEqual(len(got), total)
+
+    def test_an_issue_the_reply_omits_reads_as_an_empty_thread(self):
+        kraken.graphql = lambda q: {"data": {"repository": {}}}
+        self.assertEqual(kraken.fetch_comment_windows("o/t", {5}), {5: []})
+
+    def test_transport_failure_propagates_as_none(self):
+        kraken.graphql = lambda q: None
+        self.assertIsNone(kraken.fetch_comment_windows("o/t", {1}))
+
+    def test_hydration_fills_only_the_hungry_nodes(self):
+        held = _task_node(1, ["kraken-task", "needs-decision"])
+        free = _task_node(2, ["kraken-task"])
+        # _task_node volunteers a window; strip it so the fetch is what fills it.
+        del held["comments"], free["comments"]
+        self._reply([1])
+
+        self.assertIsNotNone(kraken.hydrate_comment_windows("o/t", [held, free], {}))
+        self.assertEqual(kraken.comment_nodes_of(held)[0]["body"], "c1-0")
+        self.assertNotIn("comments", free, "a free task must stay unhydrated")
+        self.assertEqual(kraken.comment_nodes_of(free), [])
+
+    def test_hydration_transport_failure_propagates_as_none(self):
+        held = _task_node(1, ["kraken-task", "needs-decision"])
+        kraken.graphql = lambda q: None
+        self.assertIsNone(kraken.hydrate_comment_windows("o/t", [held], {}))
+
+
 class ExpiryCountTests(unittest.TestCase):
     """The repeat-expiry guard's counter: how often this task has already been
-    stolen, read off the comment window the queue walk already carries."""
+    stolen, read off the comment window the hydration pass filled."""
 
     def test_counts_only_lease_expired_markers(self):
         node = _task_node(1, ["kraken-task"], comments=[

@@ -47,6 +47,62 @@ class ListStartableCallCountTests(KrakenConformanceTest):
                              "expected O(1) gh calls for a 30-candidate depends-on fan-out, got %d: %s"
                              % (calls, self.log_text()))
 
+    def worker_comment(self, n):
+        self.mk_comment(n, "%s\n\nwhich option?\n\n%s" % (
+            self.disclaimer_line("w1"),
+            '<!-- kraken {"type":"needs-decision","worker":"w1"} -->'))
+
+    def test_comment_windows_are_fetched_for_the_held_few_in_one_call(self):
+        """The queue walk carries no comment threads: a 60-task queue with a
+        thread on every task must not ship 60 threads to decide the 20 that are
+        actually held, and must not pay one call per held task either."""
+        for n in range(1, 41):
+            self.mk_issue(n, "free %d" % n, "kraken-task", "project:app")
+        for n in range(41, 61):
+            self.mk_issue(n, "held %d" % n, "kraken-task", "project:app",
+                          "needs-decision")
+        for n in range(1, 61):
+            for c in range(5):
+                self.mk_comment(n, "operator chatter %d" % c)
+            self.worker_comment(n)  # newest comment: nothing is requeued
+
+        self.truncate_log()
+        r = self.kraken("list-startable", "OWNER/tasks", "app", "--snapshot")
+        self.assertEqual(r.rc, 0, "snapshot exit (40 free + 20 held)")
+        lines = [l for l in r.out.split("\n") if l]
+        self.assertEqual(sum(1 for l in lines if l.endswith(":startable")), 40,
+                         "the 40 free tasks must all be startable")
+        self.assertEqual(sum(1 for l in lines if l.endswith(":held")), 20,
+                         "the 20 unanswered escalations must stay held")
+
+        # Listing page + claim-refs read + ONE batched comment hydration. Pinned
+        # EXACTLY: an upper bound would also be met by putting the threads back on
+        # the walk, which is the thing this test exists to forbid.
+        calls = len(self.log_lines())
+        self.assertEqual(calls, 3,
+                         "expected walk + refs + one batched hydration for 20 held "
+                         "tasks, got %d: %s" % (calls, self.log_text()))
+
+    def test_a_queue_with_nothing_held_hydrates_nothing(self):
+        """The common case. Every task has a thread and none of them is held, so
+        the poll must not fetch a single comment — the whole point of taking the
+        window off the walk."""
+        for n in range(1, 31):
+            self.mk_issue(n, "free %d" % n, "kraken-task", "project:app")
+            self.mk_comment(n, "some chatter on the thread")
+
+        self.truncate_log()
+        r = self.kraken("list-startable", "OWNER/tasks", "app", "--snapshot")
+        self.assertEqual(r.rc, 0, "snapshot exit (30 free tasks with threads)")
+        self.assertEqual(sum(1 for l in r.out.split("\n") if l.endswith(":startable")),
+                         30)
+
+        # Listing page + claim-refs read, and nothing else: no hydration call.
+        calls = len(self.log_lines())
+        self.assertEqual(calls, 2,
+                         "an idle queue must cost no comment fetch at all, got %d: %s"
+                         % (calls, self.log_text()))
+
 
 if __name__ == "__main__":
     unittest.main()

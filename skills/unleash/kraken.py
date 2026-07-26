@@ -41,7 +41,10 @@ falling back to ONE memoized `gh auth token` spawn per process (startup cost,
 never per call). Queue reads stay batched: labels, native blocked-by, and body
 ride a single paginated GraphQL walk (classify_queue/fetch_open_tasks below),
 plus one paginated matching-refs read for the claim refs, so an idle watch poll
-costs O(pages), not one REST call per non-held task.
+costs O(pages), not one REST call per non-held task. Comment threads are NOT on
+that walk — they are hydrated for the held/leased handful that needs them
+(hydrate_comment_windows), so poll payload scales with what is blocked rather
+than with the whole queue.
 
 Exit-code contract (PROTOCOL.md §12), preserved verbatim from the scripts:
     0   success
@@ -970,20 +973,32 @@ def issue_body(repo, issue):
 # `issues(labels: [...])` is a UNION (unlike REST's AND), so we filter server-side
 # on the single "kraken-task" label and match the project label client-side.
 
-# How many trailing comments the queue walk carries per task. The requeue
-# derivation (§6) only ever needs the NEWEST comment of two classes — the last
-# worker comment and any operator reply after it — so a window cannot mislead it:
-# a window holding no worker comment means the last one is older than the window,
-# which makes every operator comment inside it newer, the correct verdict. 25 is
-# therefore about payload, not correctness.
+# How many trailing comments a HYDRATED task carries. The requeue derivation (§6)
+# only ever needs the NEWEST comment of two classes — the last worker comment and
+# any operator reply after it — so a window cannot mislead it: a window holding no
+# worker comment means the last one is older than the window, which makes every
+# operator comment inside it newer, the correct verdict. 25 is therefore about
+# payload, not correctness.
 QUEUE_COMMENT_WINDOW = 25
+
+# How many issues one hydration call asks about. The window is per issue, so the
+# chunk bounds the node count of a single query rather than the number of queries
+# — 50 × 25 keeps a hydration page about the size of a queue page.
+COMMENT_HYDRATE_CHUNK = 50
 
 
 def fetch_open_tasks(repo):
     """Every OPEN kraken-task issue in the repo, across all projects — number,
-    title, createdAt, body, labels, native blocked-by, and the trailing comment
-    window the requeue derivation reads, all in one paginated GraphQL walk.
-    Returns the node list, or None on transport failure."""
+    title, createdAt, body, labels and native blocked-by — in one paginated
+    GraphQL walk. Returns the node list, or None on transport failure.
+
+    Deliberately does NOT carry comments. This walk is the hot read: every
+    worker's watcher runs it once a minute, so a trailing comment window on every
+    node was the queue's first scaling wall — a 200-task queue shipped 5,000
+    comment bodies per poll, per worker, to answer a question about a handful of
+    them. Both readers that need comments (the requeue derivation and
+    `expiry_count`) only ever ask about tasks that are HELD or LEASED, so the
+    window is fetched for exactly those — see `hydrate_comment_windows`."""
     owner, name = repo.split("/", 1)
     nodes = []
     cursor = None
@@ -995,7 +1010,6 @@ def fetch_open_tasks(repo):
             f'pageInfo {{ hasNextPage endCursor }} '
             f'nodes {{ number title createdAt body '
             f'labels(first: 20) {{ nodes {{ name }} }} '
-            f'comments(last: {QUEUE_COMMENT_WINDOW}) {{ nodes {{ body createdAt }} }} '
             f'blockedBy(first: 50) {{ nodes {{ number state }} }} }} }} }} }}'
         )
         resp = graphql(query)
@@ -1027,6 +1041,37 @@ def resolve_depends_on(repo, targets):
     }
 
 
+def fetch_comment_windows(repo, numbers):
+    """The trailing comment window of the named issues, `{number: [nodes]}`, in
+    batched aliased GraphQL calls (`iN: issue(number: N) { comments(last: …) }`)
+    — the same shape `resolve_depends_on` uses, for the same reason: a fan-out
+    the queue walk no longer pays for on every task must not become one request
+    per task either. Returns None on transport failure.
+
+    Cost is O(len(numbers) / COMMENT_HYDRATE_CHUNK) calls, and O(1) — no call at
+    all — for the overwhelmingly common empty ask."""
+    if not numbers:
+        return {}
+    owner, name = repo.split("/", 1)
+    numbers = sorted(numbers)
+    out = {}
+    for start in range(0, len(numbers), COMMENT_HYDRATE_CHUNK):
+        chunk = numbers[start:start + COMMENT_HYDRATE_CHUNK]
+        fields = " ".join(
+            f"i{n}: issue(number: {n}) {{ comments(last: {QUEUE_COMMENT_WINDOW}) "
+            f"{{ nodes {{ body createdAt }} }} }}"
+            for n in chunk
+        )
+        resp = graphql(f'{{ repository(owner: "{owner}", name: "{name}") {{ {fields} }} }}')
+        if resp is None:
+            return None
+        repo_obj = resp["data"]["repository"]
+        for n in chunk:
+            obj = repo_obj.get(f"i{n}") or {}
+            out[n] = ((obj.get("comments") or {}).get("nodes")) or []
+    return out
+
+
 # --- the requeue derivation (PROTOCOL.md §6) ---------------------------------
 # When the operator answers a held task, the task rejoins the queue. Through
 # protocol/4 that was a MUTATION: a workflow watched the comment stream and
@@ -1035,8 +1080,11 @@ def resolve_depends_on(repo, targets):
 # DERIVES it on the read instead. No workflow, no label write, and no window
 # where the queue disagrees with the thread.
 #
-# The comment window rides the queue walk (QUEUE_COMMENT_WINDOW), so the
-# derivation costs no request of its own.
+# The derivation reads a trailing comment window (QUEUE_COMMENT_WINDOW). It used
+# to ride the queue walk, which made it free per task but charged every task for
+# it; it is now hydrated for the held/leased handful instead (see
+# hydrate_comment_windows), which is the same free on an idle queue and O(held)
+# rather than O(queue) on a busy one.
 
 # The labels a reply can lift are exactly the labels that hold (HELD_LABELS):
 # both are operator-facing states, and answering one is what ends it. Under
@@ -1092,8 +1140,68 @@ def has_requeue_directive(body):
 
 
 def comment_nodes_of(node):
-    """The queue walk's trailing comment window for a task node, oldest-first."""
+    """A task node's trailing comment window, oldest-first — empty for a node the
+    hydration pass did not fill.
+
+    That empty answer is not a guess. `hydrate_comment_windows` fills exactly the
+    nodes the two comment readers can be called on — `requeued_labels` only reads
+    a node wearing a held label with no live lease, `expiry_count` only a node
+    whose lease expired — so an unhydrated node is one neither reader visits, and
+    the emptiness is unobservable rather than merely harmless."""
     return (node.get("comments") or {}).get("nodes") or []
+
+
+def comment_hungry(nodes, leases):
+    """The issue numbers whose comment window a read of this queue actually needs
+    — the set `hydrate_comment_windows` fetches, as a pure function so the
+    fetch's scope is testable without transport.
+
+    Exactly two readers consume comments, and each names its own tasks:
+
+      1. the requeue derivation (§6) — a task wearing a HELD label. A live lease
+         outranks the thread (`requeued_labels` returns early), so a locked task
+         is not hungry however it is labelled;
+      2. `expiry_count` (§6 rule 2) — a task whose lease EXPIRED, which the
+         reconciler counts steals on before escalating. A live lease is not
+         reconciled at all, and a ref on an issue outside the walk is an orphan
+         lock deleted without ever reading a comment.
+
+    Everything else in the queue — the startable tasks, which is nearly all of it
+    — is decided from labels, blocked-by and body alone."""
+    live = live_leases(leases)
+    held_labels = set(HELD_LABELS)
+    hungry = set()
+    for node in nodes:
+        number = node["number"]
+        if number in live:
+            continue
+        if label_names_of(node) & held_labels:
+            hungry.add(number)
+    walked = {node["number"] for node in nodes}
+    for number, lease in leases.items():
+        if not lease["live"] and number in walked:
+            hungry.add(number)
+    return hungry
+
+
+def hydrate_comment_windows(repo, nodes, leases):
+    """Attach the trailing comment window to the queue nodes that need one, in
+    place, and answer the nodes back — or None on transport failure, which the
+    callers propagate exactly like a failed walk.
+
+    This is the second half of the split that took the comment window off the hot
+    read (see fetch_open_tasks): the walk answers "what is in the queue" for every
+    task, and this answers "what does the thread say" for the few whose answer
+    depends on it. An idle queue hydrates nothing and pays nothing."""
+    hungry = comment_hungry(nodes, leases)
+    windows = fetch_comment_windows(repo, hungry)
+    if windows is None:
+        return None
+    for node in nodes:
+        window = windows.get(node["number"])
+        if window is not None:
+            node["comments"] = {"nodes": window}
+    return nodes
 
 
 def requeue_verdict(held, comments):
@@ -1155,7 +1263,11 @@ def read_queue(repo, now=None, ttl=None):
     Resolving the lease costs one extra batched call — and only when a ref
     actually exists: `resolve_commit_meta` answers `{}` for an empty ref list
     without a request, so an idle queue reads exactly as cheaply as it did under
-    protocol/5, and a busy one pays O(1) in the number of claims, never O(N)."""
+    protocol/5, and a busy one pays O(1) in the number of claims, never O(N).
+
+    The comment hydration obeys the same rule and for the same reason: the leases
+    have to be known before the hungry set can be (a live lease outranks the
+    thread), so it runs last, and it asks for nothing when nothing is held."""
     nodes = fetch_open_tasks(repo)
     if nodes is None:
         return None
@@ -1165,9 +1277,12 @@ def read_queue(repo, now=None, ttl=None):
     commit_meta = resolve_commit_meta(repo, holder_shas(claim_refs))
     if commit_meta is None:
         return None
-    return (nodes, lease_state(claim_refs, commit_meta,
-                               time.time() if now is None else now,
-                               lease_ttl_seconds(ttl)))
+    leases = lease_state(claim_refs, commit_meta,
+                         time.time() if now is None else now,
+                         lease_ttl_seconds(ttl))
+    if hydrate_comment_windows(repo, nodes, leases) is None:
+        return None
+    return (nodes, leases)
 
 
 def classify_queue(repo, project, include_body=False, read=None):
@@ -2274,7 +2389,8 @@ def cmd_watch(args):
 # orphan heuristic, and launch recon — computed deterministically so the skill is
 # a thin renderer and the data is reusable (`--json`). No write of any kind.
 # Reuses fetch_open_tasks (queue), the claim refs (in-flight worker/age/progress),
-# and paginated comment reads only for awaiting-merge tasks (the PR link).
+# the held/leased comment hydration (the requeue derivation), and paginated
+# comment reads only for awaiting-merge tasks (the PR link).
 
 # The LEGACY free-text fallback, and nothing else (§8). The delivery URL is a
 # structured field — the `delivered` marker's `pr` — and reading it off the prose
@@ -2656,9 +2772,18 @@ def cmd_status(args):
         return EXIT_TRANSPORT
 
     now = time.time()
+    leases = lease_state(claim_refs, commit_meta, now, lease_ttl_seconds())
+    # The console reads the queue the way a worker does, so it needs the same
+    # windows the requeue derivation needs — and only those. Hygiene reads bodies
+    # and the review queue reads its own paginated thread, neither of which this
+    # touches.
+    if hydrate_comment_windows(repo, nodes, leases) is None:
+        print("status: gh-failure stage=comments", file=sys.stderr)
+        return EXIT_TRANSPORT
+
     report = compute_status(
         repo, project, nodes, now,
-        leases=lease_state(claim_refs, commit_meta, now, lease_ttl_seconds()),
+        leases=leases,
         commit_meta=commit_meta,
         comment_reader=comment_records,
         pr_merged=pr_is_merged,
@@ -2940,10 +3065,12 @@ def stale_claim_body(worker, reason):
 
 def expiry_count(node):
     """How many times this task's lease has already expired and been stolen —
-    counted from the `lease-expired` markers each steal leaves (§5). The queue
-    walk already carries the trailing comment window, so the count costs no
-    request; a window that has scrolled past the oldest steals undercounts, which
-    errs toward giving the task another worker rather than escalating early."""
+    counted from the `lease-expired` markers each steal leaves (§5). Only reached
+    for a task whose lease EXPIRED, which is exactly what makes the task one the
+    hydration pass filled (see comment_hungry), so the count reads a window that
+    is already in hand; a window that has scrolled past the oldest steals
+    undercounts, which errs toward giving the task another worker rather than
+    escalating early."""
     total = 0
     for rec in comment_nodes_of(node):
         for line in (rec.get("body") or "").split("\n"):
