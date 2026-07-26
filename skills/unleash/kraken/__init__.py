@@ -72,12 +72,10 @@ from .refs import (
     CLAIM_REF_PREFIX, EMPTY_TREE_SHA, Refs, claim_ref, parse_claim_ref
 )
 from .queue import (
-    COMMENT_HYDRATE_CHUNK, NO_RESPONSE_PLACEHOLDER, QUEUE_COMMENT_WINDOW,
-    claim_meta_of, classify_queue, cmd_list_startable, comment_hungry,
-    comment_nodes_of, fetch_comment_windows, fetch_open_tasks,
-    has_requeue_directive, hydrate_comment_windows, is_empty_section,
-    is_worker_comment, label_names_of, project_names_of, read_queue,
-    requeue_verdict, requeued_labels, resolve_depends_on, section_body
+    COMMENT_HYDRATE_CHUNK, NO_RESPONSE_PLACEHOLDER, QUEUE_COMMENT_WINDOW, Queue,
+    claim_meta_of, cmd_list_startable, comment_hungry, comment_nodes_of,
+    has_requeue_directive, is_empty_section, is_worker_comment, label_names_of,
+    project_names_of, requeue_verdict, requeued_labels, section_body
 )
 from .render import (
     render_init, render_next_action, render_status

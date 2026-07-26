@@ -23,7 +23,7 @@ from .lease import (
     live_leases, refuse_second_claim, write_claim_state
 )
 from .refs import Refs
-from .queue import classify_queue, read_queue, requeued_labels
+from .queue import Queue, requeued_labels
 from .reconcile import apply_reconcile, project_reconcile, reconcile_plan
 
 # --- subcommand: claim -------------------------------------------------------
@@ -106,6 +106,7 @@ class ClaimAttempt:
                  allow_held: Sequence[str] = (), lease: Lease = NO_LEASE,
                  ttl: int | None = None, probe_lease: bool = False):
         self.api = api
+        self.refs = Refs(api)
         self.issue = issue
         self.worker = worker
         self.allow_held = allow_held
@@ -181,7 +182,7 @@ class ClaimAttempt:
         renewal — produce exactly one winner and nothing to undo. Nothing is
         deleted to make room, so the task is never observably free mid-steal and
         no interleaving can hand two workers the same lease."""
-        outcome, gen, _sha = Refs(self.api).advance(
+        outcome, gen, _sha = self.refs.advance(
             self.issue, self.lease.gen,
             {"type": "claim", "worker": self.worker})
         if outcome.startswith("fail"):
@@ -192,7 +193,7 @@ class ClaimAttempt:
             # worker re-claiming its own in-flight generation after a network
             # failure (§5) already owns the task, so fall through to re-project.
             # An unreadable owner counts as not ours.
-            if Refs(self.api).owner(self.issue) != self.worker:
+            if self.refs.owner(self.issue) != self.worker:
                 diag(f"claim: lost-cas issue={self.issue} — another worker holds the claim ref")
                 return EXIT_LOST
 
@@ -200,7 +201,7 @@ class ClaimAttempt:
         # highest one, so a delete that fails leaves a stray ref, never a second
         # lease.
         if gen is not None:
-            Refs(self.api).drop(self.issue,
+            self.refs.drop(self.issue,
                              self.lease.superseded_below(gen))
         return None
 
@@ -306,8 +307,7 @@ def cmd_claim_next(args: argparse.Namespace) -> int:
 
 def acquire_next(api: Api, project: str, worker: Worker,
                  ttl: int | None = None, *,
-                 read: Callable[..., Any] | None = None,
-                 classify: Callable[..., Any] | None = None,
+                 queue: Queue | None = None,
                  claim_step: Callable[..., Any] | None = None,
                  ) -> tuple[int, Json | None]:
     """The whole acquisition — one-task-at-a-time guard, project preflight, queue
@@ -320,13 +320,13 @@ def acquire_next(api: Api, project: str, worker: Worker,
     one implementation and two presentations. Diagnostics go through `diag`, so
     `next-action` can push them to stderr and keep stdout pure JSON.
 
-    `read`, `classify` and `claim_step` default to the real thing and exist so
-    the ITERATION — skip-on-held, skip-on-lost, forward-only, stop-on-transport —
-    can be tested against a scripted queue, candidate list and claim outcomes.
-    All three are expensive collaborators with their own tests; a caller in
-    production passes none of them."""
-    read_fn = read or read_queue
-    classify = classify or classify_queue
+    `queue` and `claim_step` default to the real thing and exist so the
+    ITERATION — skip-on-held, skip-on-lost, forward-only, stop-on-transport — can
+    be tested against a scripted queue and scripted claim outcomes. Reading the
+    queue and filtering it used to be two separate injections; they are one
+    collaborator now, which is what `Queue` is for. Both have their own tests; a
+    caller in production passes neither."""
+    queue = queue or Queue(api)
     claim_step = claim_step or _claim_once
     refused = refuse_second_claim(worker)
     if refused is not None:
@@ -344,7 +344,7 @@ def acquire_next(api: Api, project: str, worker: Worker,
         return (EXIT_UNKNOWN_PROJECT, None)
 
     ttl = lease_ttl_seconds(ttl)
-    read = read_fn(api, ttl=ttl)
+    read = queue.read(ttl=ttl)
     if read is None:
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)
@@ -366,7 +366,7 @@ def acquire_next(api: Api, project: str, worker: Worker,
             return (EXIT_TRANSPORT, None)
         project_reconcile(plan, nodes, leases)
 
-    rows = classify(api, project, include_body=True, read=read)
+    rows = queue.candidates(project, include_body=True, read=read)
     if rows is None:
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)

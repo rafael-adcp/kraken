@@ -22,7 +22,7 @@ from .lease import (
 )
 from .refs import Refs
 from .queue import (
-    claim_meta_of, fetch_open_tasks, hydrate_comment_windows,
+    Queue, claim_meta_of,
     is_empty_section, label_names_of, project_names_of, requeued_labels,
     section_body
 )
@@ -258,7 +258,7 @@ def compute_status(api: Api, project: str, nodes: Sequence[Node],
 
 def cmd_status(args: argparse.Namespace) -> int:
     api, project = args.api, args.project
-    nodes = fetch_open_tasks(api)
+    nodes = Queue(api).open_tasks()
     if nodes is None:
         print("status: gh-failure stage=list", file=sys.stderr)
         return EXIT_TRANSPORT
@@ -277,7 +277,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     # windows the requeue derivation needs — and only those. Hygiene reads bodies
     # and the review queue reads its own paginated thread, neither of which this
     # touches.
-    if hydrate_comment_windows(api, nodes, leases) is None:
+    if Queue(api).hydrate(nodes, leases) is None:
         print("status: gh-failure stage=comments", file=sys.stderr)
         return EXIT_TRANSPORT
 

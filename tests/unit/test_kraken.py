@@ -25,7 +25,7 @@ SKILL_DIR = os.path.join(HERE, "..", "..", "skills", "unleash")
 sys.path.insert(0, os.path.abspath(SKILL_DIR))
 
 import kraken  # noqa: E402
-from fakes import FakeApi, recording_api  # noqa: E402
+from fakes import FakeApi, FakeQueue, recording_api  # noqa: E402
 
 
 # --- marker builders (what a claim commit / a comment carries) ---------------
@@ -652,9 +652,11 @@ class ClaimNextIterationTests(unittest.TestCase):
         with redirect_stdout(buf):
             rc, won = kraken.acquire_next(
                 api, "app", "w1",
-                read=lambda a, now=None, ttl=None: (
-                    None if rows is None else (nodes, {})),
-                classify=lambda a, p, include_body=False, read=None: rows,
+                queue=FakeQueue(
+                    api,
+                    read=lambda now=None, ttl=None: (
+                        None if rows is None else (nodes, {})),
+                    candidates=lambda p, include_body=False, read=None: rows),
                 claim_step=fake_claim_step)
         return rc, won, buf.getvalue()
 
@@ -779,7 +781,7 @@ class ClaimNextProjectGateTests(unittest.TestCase):
     def setUp(self):
         self.classified = []
 
-    def _classify(self, api, project, include_body=False, read=None):
+    def _candidates(self, project, include_body=False, read=None):
         self.classified.append(project)
         return []
 
@@ -791,8 +793,8 @@ class ClaimNextProjectGateTests(unittest.TestCase):
         with redirect_stdout(buf):
             rc, _won = kraken.acquire_next(
                 api, "app", "w-gate",
-                read=lambda a, now=None, ttl=None: ([], {}),
-                classify=self._classify)
+                queue=FakeQueue(api, read=lambda now=None, ttl=None: ([], {}),
+                                candidates=self._candidates))
         return rc, buf.getvalue()
 
     def test_unknown_project_refuses_before_reading_the_queue(self):
@@ -1369,7 +1371,7 @@ class QueueWalkQueryTests(unittest.TestCase):
         self.api = FakeApi("o/tasks", graphql=fake)
 
     def test_the_walk_does_not_select_comments(self):
-        kraken.fetch_open_tasks(self.api)
+        kraken.Queue(self.api).open_tasks()
         q = self.queries[0]
         self.assertNotIn("comments", q,
                          "the queue walk must not carry comment threads")
@@ -1435,11 +1437,11 @@ class CommentHydrationTests(unittest.TestCase):
     def test_empty_ask_is_no_call(self):
         api = FakeApi("o/t", graphql=lambda q: self.fail(
             "graphql must not be called for []"))
-        self.assertEqual(kraken.fetch_comment_windows(api, set()), {})
+        self.assertEqual(kraken.Queue(api).comment_windows(set()), {})
 
     def test_batches_every_issue_into_one_call(self):
         api = self._reply(range(1, 21))
-        got = kraken.fetch_comment_windows(api, {3, 1, 2})
+        got = kraken.Queue(api).comment_windows({3, 1, 2})
         self.assertEqual(len(self.queries), 1, "three issues must cost ONE call")
         self.assertIn("i1: issue(number: 1)", self.queries[0])
         self.assertIn("comments(last: %d)" % kraken.QUEUE_COMMENT_WINDOW,
@@ -1450,17 +1452,17 @@ class CommentHydrationTests(unittest.TestCase):
     def test_chunks_beyond_the_page_size(self):
         total = kraken.COMMENT_HYDRATE_CHUNK * 2 + 1
         api = self._reply(range(1, total + 1))
-        got = kraken.fetch_comment_windows(api, set(range(1, total + 1)))
+        got = kraken.Queue(api).comment_windows(set(range(1, total + 1)))
         self.assertEqual(len(self.queries), 3, "chunked, not one call per issue")
         self.assertEqual(len(got), total)
 
     def test_an_issue_the_reply_omits_reads_as_an_empty_thread(self):
         api = FakeApi("o/t", graphql=lambda q: {"data": {"repository": {}}})
-        self.assertEqual(kraken.fetch_comment_windows(api, {5}), {5: []})
+        self.assertEqual(kraken.Queue(api).comment_windows({5}), {5: []})
 
     def test_transport_failure_propagates_as_none(self):
         api = FakeApi("o/t", graphql=lambda q: None)
-        self.assertIsNone(kraken.fetch_comment_windows(api, {1}))
+        self.assertIsNone(kraken.Queue(api).comment_windows({1}))
 
     def test_hydration_fills_only_the_hungry_nodes(self):
         held = _task_node(1, ["kraken-task", "needs-decision"])
@@ -1469,7 +1471,7 @@ class CommentHydrationTests(unittest.TestCase):
         del held["comments"], free["comments"]
         api = self._reply([1])
 
-        self.assertIsNotNone(kraken.hydrate_comment_windows(api, [held, free], {}))
+        self.assertIsNotNone(kraken.Queue(api).hydrate([held, free], {}))
         self.assertEqual(kraken.comment_nodes_of(held)[0]["body"], "c1-0")
         self.assertNotIn("comments", free, "a free task must stay unhydrated")
         self.assertEqual(kraken.comment_nodes_of(free), [])
@@ -1477,7 +1479,7 @@ class CommentHydrationTests(unittest.TestCase):
     def test_hydration_transport_failure_propagates_as_none(self):
         held = _task_node(1, ["kraken-task", "needs-decision"])
         api = FakeApi("o/t", graphql=lambda q: None)
-        self.assertIsNone(kraken.hydrate_comment_windows(api, [held], {}))
+        self.assertIsNone(kraken.Queue(api).hydrate([held], {}))
 
 
 class ExpiryCountTests(unittest.TestCase):
