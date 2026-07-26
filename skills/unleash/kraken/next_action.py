@@ -124,51 +124,84 @@ def task_brief(title: str, body: str) -> Json:
     }
 
 
+class NextActionEnvelope:
+    """Builds next-action's answers for ONE worker draining ONE repo.
+
+    Two things were being said twice at every call site. The repo, the worker
+    and the script path are invariant for the whole call — they were three of
+    eleven arguments, repeated at all eight places an answer is returned. And
+    every site paired its envelope with an exit code written out by hand, when
+    `NEXT_ACTION_EXIT` already maps action to code: six of the eight restated a
+    row of that table, which is a drift waiting to happen rather than a
+    difference. So the context goes in the constructor, and `answer` DERIVES the
+    code from the action instead of being told it.
+
+    `action` is the verdict, `reason` a stable machine slug for it, and `detail`
+    the human sentence — so a consumer branches on the slug and a human reads
+    the sentence, never the other way round."""
+
+    def __init__(self, repo: Repo, worker: Worker, script: str | None = None):
+        self.repo = repo
+        self.worker = worker
+        self.script = script
+
+    def answer(self, action: str, **fields) -> tuple[int, Envelope]:
+        """The envelope AND the exit code that carries the same verdict to a
+        shell — one call, because they are one decision."""
+        return (NEXT_ACTION_EXIT[action], self.build(action, **fields))
+
+    def build(self, action: str, *,
+              issue: Issue | None = None,
+              resumed: bool | None = None,
+              brief: Json | None = None,
+              lease: Json | None = None,
+              reason: str | None = None,
+              detail: str | None = None,
+              holding: Json | None = None) -> Envelope:
+        """The one JSON shape next-action emits.
+
+        `holding` is `{"repo", "issue"}` naming a claim this worker must resolve,
+        and it exists because a `blocked` claim may live in a **different repo**
+        than the one being drained: pairing the top-level `repo` with that
+        claim's issue number would name a task that does not exist. So `blocked`
+        reports the claim under `holding` and never as a bare top-level `issue`.
+
+        `then` is attached wherever a write is actually legal: to `execute` for
+        the task in hand, and to `blocked` for the claim that has to be resolved
+        first — built against **that** claim's repo and issue. Emitting `blocked`
+        without it would tell a worker to run a transition it has no way to
+        construct."""
+        env = {"action": action, "repo": self.repo, "worker": self.worker}
+        if issue is not None:
+            env["issue"] = int(issue)
+        if resumed is not None:
+            env["resumed"] = resumed
+        if reason:
+            env["reason"] = reason
+        if detail:
+            env["detail"] = detail
+        if holding is not None:
+            env["holding"] = {"repo": holding["repo"],
+                              "issue": int(holding["issue"])}
+        if brief is not None:
+            env["brief"] = brief
+        if lease is not None:
+            env["lease"] = lease
+        if action == "execute" and issue is not None:
+            env["then"] = self._then(self.repo, issue)
+        elif action == "blocked" and holding is not None:
+            env["then"] = self._then(holding["repo"], int(holding["issue"]))
+        return env
+
+    def _then(self, repo: Repo, issue: Issue) -> dict[str, str]:
+        return then_commands(repo, issue, self.worker, script=self.script)
+
+
 def next_action_envelope(action: str, repo: Repo, worker: Worker, *,
-                         issue: Issue | None = None,
-                         resumed: bool | None = None,
-                         brief: Json | None = None,
-                         lease: Json | None = None,
-                         reason: str | None = None,
-                         detail: str | None = None,
-                         holding: Json | None = None,
-                         script: str | None = None) -> Envelope:
-    """The one JSON shape next-action emits. `action` is the verdict, `reason` a
-    stable machine slug for it, and `detail` the human sentence — so a consumer
-    branches on the slug and a human reads the sentence, never the other way
-    round.
-
-    `holding` is `{"repo", "issue"}` naming a claim this worker must resolve, and
-    it exists because a `blocked` claim may live in a **different repo** than the
-    one being drained: pairing the top-level `repo` with that claim's issue
-    number would name a task that does not exist. So `blocked` reports the claim
-    under `holding` and never as a bare top-level `issue`.
-
-    `then` is attached wherever a write is actually legal: to `execute` for the
-    task in hand, and to `blocked` for the claim that has to be resolved first —
-    built against **that** claim's repo and issue. Emitting `blocked` without it
-    would tell a worker to run a transition it has no way to construct."""
-    env = {"action": action, "repo": repo, "worker": worker}
-    if issue is not None:
-        env["issue"] = int(issue)
-    if resumed is not None:
-        env["resumed"] = resumed
-    if reason:
-        env["reason"] = reason
-    if detail:
-        env["detail"] = detail
-    if holding is not None:
-        env["holding"] = {"repo": holding["repo"], "issue": int(holding["issue"])}
-    if brief is not None:
-        env["brief"] = brief
-    if lease is not None:
-        env["lease"] = lease
-    if action == "execute" and issue is not None:
-        env["then"] = then_commands(repo, issue, worker, script=script)
-    elif action == "blocked" and holding is not None:
-        env["then"] = then_commands(holding["repo"], int(holding["issue"]),
-                                    worker, script=script)
-    return env
+                         script: str | None = None, **fields) -> Envelope:
+    """The envelope as a single call, for a caller that has no context object in
+    hand."""
+    return NextActionEnvelope(repo, worker, script).build(action, **fields)
 
 
 def issue_is_finished(issue_obj: Json | None) -> bool:
@@ -248,120 +281,163 @@ def resume_verdict(
     return ("execute", {"generation": head.gen, "epoch": head.epoch})
 
 
-def _resume(
-    record: ClaimRecord, api: Api, worker: Worker, ttl: int, now: Epoch,
-    script: str | None,
-) -> tuple[int | None, Envelope | None]:
-    """Fetch what `resume_verdict` needs and turn its verdict into an envelope.
-    Returns `(exit_code, envelope)`, or `(None, None)` when the recorded claim is
-    resolved and the caller should go acquire a new task."""
-    issue = record["issue"]
-    issue_obj = None
+class NextAction:
+    """One `next-action` call: resume the claim this worker already holds, or
+    acquire the next task, and answer as an envelope.
 
-    if record["repo"] and record["repo"] != api.repo:
-        # Nothing was read, and nothing needs to be: the repo mismatch decides it.
-        verdict, detail = resume_verdict(record, api.repo, worker,
-                                         UNREADABLE_LEASE, None)
-    else:
-        head = claim_ref_head(api, issue)
+    `_resume` and the acquisition were two functions taking the same six
+    arguments — api, project, worker, ttl, now, script — and each built its own
+    envelope factory from them. That repetition is the object: the six are the
+    context of one call, not parameters of two."""
+
+    def __init__(self, api: Api, project: str, worker: Worker, *,
+                 ttl: int | None = None, now: Epoch | None = None,
+                 script: str | None = None):
+        self.api = api
+        self.project = project
+        self.worker = worker
+        self.ttl = lease_ttl_seconds(ttl)
+        self.now = time.time() if now is None else now
+        self.envelope = NextActionEnvelope(api.repo, worker, script)
+
+    def run(self) -> tuple[int, Envelope]:
+        """Resume what is held, else acquire. Returns `(exit_code, envelope)`."""
+        record = open_claim_record(self.worker)
+        if record is not None:
+            rc, env = self.resume(record)
+            if env is not None:
+                return (rc, env)
+            # Resolved: fall through and take the next task.
+        return self.acquire()
+
+    # --- resuming a claim this worker already holds ---------------------------
+
+    def resume(self, record: ClaimRecord) -> tuple[int | None, Envelope | None]:
+        """Fetch what `resume_verdict` needs and turn its verdict into an
+        envelope. Returns `(exit_code, envelope)`, or `(None, None)` when the
+        recorded claim is resolved and the caller should acquire a new task."""
+        verdict, detail, issue_obj = self._observe(record)
+        issue = record["issue"]
+
+        if verdict == "resolved":
+            # The claim is over. Drop the stale scratch file so the
+            # one-task-at-a-time guard stops refusing on it, and let the caller
+            # drain on. This is the self-heal that used to need an operator
+            # running `release` by hand.
+            clear_claim_state(self.worker)
+            diag(f"next-action: claim resolved issue={issue} ({detail['reason']}) "
+                 "— continuing the drain")
+            return (None, None)
+
+        if verdict == "abandon":
+            # Provably not ours: clearing local state is safe and is what unjams
+            # this worker. An AMBIGUOUS read never reaches here (it is "retry"),
+            # so no transport fault can make us drop a claim we might still hold.
+            clear_claim_state(self.worker)
+
+        action = verdict  # the remaining verdicts are the action names themselves
+        if action != "execute":
+            return self._refuse(action, record, detail)
+        return self._resumed(issue, detail, issue_obj)
+
+    def _observe(self, record: ClaimRecord):
+        """What the verdict is decided from: the lease and the issue, or neither
+        when the record names a claim in a different repo."""
+        if record["repo"] and record["repo"] != self.api.repo:
+            # Nothing was read, and nothing needs to be: the repo mismatch
+            # decides it.
+            verdict, detail = resume_verdict(
+                record, self.api.repo, self.worker, UNREADABLE_LEASE, None)
+            return (verdict, detail, None)
+        issue = record["issue"]
+        head = claim_ref_head(self.api, issue)
         # One GET serves both the finished-task check and the brief.
-        issue_obj = None if head.unknown else api.issue_detail(issue)
-        verdict, detail = resume_verdict(record, api.repo, worker, head, issue_obj)
+        issue_obj = None if head.unknown else self.api.issue_detail(issue)
+        verdict, detail = resume_verdict(
+            record, self.api.repo, self.worker, head, issue_obj)
+        return (verdict, detail, issue_obj)
 
-    if verdict == "resolved":
-        # The claim is over. Drop the stale scratch file so the one-task-at-a-time
-        # guard stops refusing on it, and let the caller drain on. This is the
-        # self-heal that used to need an operator running `release` by hand.
-        clear_claim_state(worker)
-        diag(f"next-action: claim resolved issue={issue} ({detail['reason']}) "
-             "— continuing the drain")
-        return (None, None)
-
-    if verdict == "abandon":
-        # Provably not ours: clearing local state is safe and is what unjams this
-        # worker. An AMBIGUOUS read never reaches here (it is "retry"), so no
-        # transport fault can make us drop a claim we might still hold.
-        clear_claim_state(worker)
-
-    action = verdict  # the remaining verdicts are the action names themselves
-    if action != "execute":
+    def _refuse(self, action: str, record: ClaimRecord,
+                detail: Json) -> tuple[int, Envelope]:
+        """Every non-execute resume verdict. `blocked` names the claim under
+        `holding` (it may be in another repo, so a bare top-level issue would
+        read against the wrong one) and carries the commands that resolve it. The
+        other verdicts are about the task in this repo, and none of them makes a
+        write legal."""
+        issue = record["issue"]
         diag(f"next-action: {action} issue={issue} ({detail['reason']})")
-        # `blocked` names the claim under `holding` (it may be in another repo,
-        # so a bare top-level issue would read against the wrong one) and carries
-        # the commands that resolve it. The other verdicts are about the task in
-        # this repo, and none of them makes a write legal.
         if action == "blocked":
-            return (NEXT_ACTION_EXIT[action], next_action_envelope(
-                action, api.repo, worker, reason=detail["reason"],
-                detail=detail.get("detail"), script=script,
-                holding={"repo": record["repo"] or api.repo, "issue": issue}))
-        return (NEXT_ACTION_EXIT[action], next_action_envelope(
-            action, api.repo, worker, issue=issue, reason=detail["reason"],
-            detail=detail.get("detail"), script=script))
+            return self.envelope.answer(
+                action, reason=detail["reason"], detail=detail.get("detail"),
+                holding={"repo": record["repo"] or self.api.repo,
+                         "issue": issue})
+        return self.envelope.answer(
+            action, issue=issue, reason=detail["reason"],
+            detail=detail.get("detail"))
 
-    epoch = detail["epoch"]
-    # An unreadable clock is an expired lease (§5.1) — fail open, toward renewing
-    # immediately, never toward assuming time is left.
-    lease = lease_block(epoch if epoch is not None else now - ttl, now, ttl,
-                        generation=detail["generation"])
-    diag(f"next-action: resumed issue={issue} worker={worker}")
-    return (EXIT_OK, next_action_envelope(
-        "execute", api.repo, worker, issue=issue, resumed=True,
-        brief=task_brief(issue_obj.get("title") or "", issue_obj.get("body") or ""),
-        lease=lease, script=script))
+    def _resumed(self, issue: Issue, detail: Json,
+                 issue_obj: Json) -> tuple[int, Envelope]:
+        epoch = detail["epoch"]
+        # An unreadable clock is an expired lease (§5.1) — fail open, toward
+        # renewing immediately, never toward assuming time is left.
+        lease = lease_block(
+            epoch if epoch is not None else self.now - self.ttl,
+            self.now, self.ttl, generation=detail["generation"])
+        diag(f"next-action: resumed issue={issue} worker={self.worker}")
+        return self.envelope.answer(
+            "execute", issue=issue, resumed=True,
+            brief=task_brief(issue_obj.get("title") or "",
+                             issue_obj.get("body") or ""),
+            lease=lease)
+
+    # --- acquiring the next task ---------------------------------------------
+
+    def acquire(self) -> tuple[int, Envelope]:
+        """Take the next startable task, and translate the claim loop's exit code
+        into the verdict a driver reads."""
+        rc, won = acquire_next(self.api, self.project, self.worker, ttl=self.ttl)
+        if rc == EXIT_OK:
+            return self.envelope.answer(
+                "execute", issue=won["issue"], resumed=False,
+                brief=task_brief(won["title"], won["body"]),
+                lease=lease_block(self.now, self.now, self.ttl,
+                                  source="estimated"))
+        if rc == EXIT_NONE:
+            return self.envelope.answer(
+                "idle", reason="queue-empty",
+                detail=f"nothing startable in project:{self.project}")
+        if rc == EXIT_UNKNOWN_PROJECT:
+            return self.envelope.answer(
+                "stop", reason="unknown-project",
+                detail=f"the repo carries no project:{self.project} label — this "
+                       "worker would filter every task out; fix the label, never "
+                       "drain unscoped")
+        if rc == EXIT_NOT_CLEAR:
+            return self._blocked_by_a_late_claim()
+        return self.envelope.answer(
+            "retry", reason="transport",
+            detail="the queue read or a claim write did not land — re-check the "
+                   "task's real state before retrying")
+
+    def _blocked_by_a_late_claim(self) -> tuple[int, Envelope]:
+        """A claim appeared between the resume check and the acquisition. Re-read
+        the record so this envelope, like the other `blocked`, names the claim to
+        resolve and carries the commands that resolve it."""
+        late = open_claim_record(self.worker)
+        return self.envelope.answer(
+            "blocked", reason="claim-open",
+            detail="this worker already holds an open claim — resolve it "
+                   "(deliver / escalate / release) first",
+            holding=({"repo": late["repo"] or self.api.repo,
+                      "issue": late["issue"]} if late else None))
 
 
 def next_action(api: Api, project: str, worker: Worker,
                 ttl: int | None = None, now: Epoch | None = None,
                 script: str | None = None) -> tuple[int, Envelope]:
-    """The driver loop's single call: resume the task this worker already holds,
-    or acquire the next one. Returns `(exit_code, envelope)`."""
-    ttl = lease_ttl_seconds(ttl)
-    now = time.time() if now is None else now
-
-    record = open_claim_record(worker)
-    if record is not None:
-        rc, env = _resume(record, api, worker, ttl, now, script)
-        if env is not None:
-            return (rc, env)
-        # Resolved: fall through and take the next task.
-
-    rc, won = acquire_next(api, project, worker, ttl=ttl)
-    if rc == EXIT_OK:
-        return (EXIT_OK, next_action_envelope(
-            "execute", api.repo, worker, issue=won["issue"], resumed=False,
-            brief=task_brief(won["title"], won["body"]),
-            lease=lease_block(now, now, ttl, source="estimated"),
-            script=script))
-    if rc == EXIT_NONE:
-        return (EXIT_NONE, next_action_envelope(
-            "idle", api.repo, worker, reason="queue-empty",
-            detail=f"nothing startable in project:{project}",
-            script=script))
-    if rc == EXIT_UNKNOWN_PROJECT:
-        return (EXIT_UNKNOWN_PROJECT, next_action_envelope(
-            "stop", api.repo, worker, reason="unknown-project",
-            detail=f"the repo carries no project:{project} label — this worker "
-                   "would filter every task out; fix the label, never drain "
-                   "unscoped",
-            script=script))
-    if rc == EXIT_NOT_CLEAR:
-        # A claim appeared between the resume check and the acquisition. Re-read
-        # the record so this envelope, like the other `blocked`, names the claim
-        # to resolve and carries the commands that resolve it.
-        late = open_claim_record(worker)
-        return (EXIT_NOT_CLEAR, next_action_envelope(
-            "blocked", api.repo, worker, reason="claim-open",
-            detail="this worker already holds an open claim — resolve it "
-                   "(deliver / escalate / release) first",
-            holding=({"repo": late["repo"] or api.repo, "issue": late["issue"]}
-                     if late else None),
-            script=script))
-    return (EXIT_TRANSPORT, next_action_envelope(
-        "retry", api.repo, worker, reason="transport",
-        detail="the queue read or a claim write did not land — re-check the "
-               "task's real state before retrying",
-        script=script))
+    """The driver loop's single call, as a call. Returns `(exit_code, envelope)`."""
+    return NextAction(api, project, worker, ttl=ttl, now=now,
+                      script=script).run()
 
 
 def cmd_next_action(args: argparse.Namespace) -> int:

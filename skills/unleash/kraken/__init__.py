@@ -90,14 +90,14 @@ from .reconcile import (
     project_reconcile, reconcile_pass, reconcile_plan, stale_claim_body
 )
 from .claim import (
-    acquire_next, cmd_claim, cmd_claim_next, cmd_deliver, cmd_escalate,
-    cmd_heartbeat, cmd_note, cmd_release, lease_expired_body, list_projects,
-    probe_lease_state, read_body_file, verify_project
+    ClaimAttempt, acquire_next, cmd_claim, cmd_claim_next, cmd_deliver,
+    cmd_escalate, cmd_heartbeat, cmd_note, cmd_release, lease_expired_body,
+    list_projects, probe_lease_state, read_body_file, verify_project
 )
 from .next_action import (
-    NEXT_ACTIONS, NEXT_ACTION_EXIT, cmd_next_action, issue_is_finished,
-    lease_block, next_action, next_action_envelope, resume_verdict,
-    task_brief, then_commands
+    NEXT_ACTIONS, NEXT_ACTION_EXIT, NextAction, NextActionEnvelope,
+    cmd_next_action, issue_is_finished, lease_block, next_action,
+    next_action_envelope, resume_verdict, task_brief, then_commands
 )
 from .watch import (
     WATCH_MAX_FAILURES, WATCH_WARN_EVERY, cmd_watch, snapshot_state,
