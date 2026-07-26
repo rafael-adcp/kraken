@@ -265,7 +265,7 @@ the surrounding prose is a pure human courtesy. **Grammar** (normative):
 | `released` | `worker`, `reason`? | comment | release | claim handed back (optional `reason`) (§9) |
 | `lease-expired` | `worker`, `previous_worker`, `age_seconds`? | comment | claim (steal) | an expired lease was taken over; **counted** by §6's repeat-expiry guard |
 | `stale-claim` | `reason`? | comment | reconciler | a stale/orphaned claim was reclaimed (§6) |
-| `note` | `worker` | comment | note | free-form worker comment (assumptions/progress); carries **no** machine state — inert to reap/requeue/validate (SKILL.md §2a) |
+| `note` | `worker` | comment | note | free-form worker comment (assumptions/progress); carries **no** machine state — inert to reap/requeue/validate |
 | `requeue` | — | comment | operator | bounce a delivered (`awaiting-merge`) task back for rework (§6) |
 | `validation` | — | comment | validator | task fails the queue-entry gate; the comment lists what to fix (§2.1) |
 
@@ -719,6 +719,25 @@ also refuses — writing nothing — when this worker already holds an open clai
 when the repo carries no `project:<name>` label, so the worker would be deaf
 rather than idle (`13`). Both are reference-implementation ergonomics, not wire
 contract.
+
+One layer above it, `next-action OWNER/tasks <project> <worker>` composes the
+whole **driver loop** into a single call and answers it as a JSON envelope: it
+resumes the task this worker already holds — proving the lease is still its own
+(§5.3) before saying so — or acquires the next one through the same
+`claim-next` path, and reports the verdict as an `action` field
+(`execute` / `idle` / `abandon` / `blocked` / `stop` / `retry`) carried by the
+same exit codes. An `execute` envelope hands the worker the task brief, the
+lease's expiry and renewal interval as numbers, and the exact fully-interpolated
+command line for every write that is legal next. Its point is that the ordering
+and bookkeeping this document specifies — one task at a time, prove the lease
+before writing, renew every TTL/3, comment before label before ref delete — stop
+being things a worker has to *remember* and become things the program *answers*;
+what is left to the worker is judgment. It also heals the local claim-state file
+that outlives its claim: provably lost (`abandon`) or already resolved, the file
+is cleared, while an *ambiguous* read only ever yields `retry`. Like `claim-next`
+and `status` it is a **reference-implementation ergonomic, not part of the wire
+contract** — it performs no write the claim path does not, and a conforming
+worker may ignore it entirely.
 
 Nothing is installed into the coordination repo for any of this to work. The
 reference `init` commits one file — the issue-form template — and creates the

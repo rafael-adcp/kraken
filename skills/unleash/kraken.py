@@ -57,6 +57,7 @@ Exit-code contract (PROTOCOL.md §12), preserved verbatim from the scripts:
 
 import argparse
 import base64
+import contextlib
 import datetime
 import json
 import os
@@ -115,6 +116,36 @@ def plugin_version(manifest=PLUGIN_MANIFEST):
     except (OSError, ValueError):
         return PLUGIN_VERSION_UNKNOWN
     return version if isinstance(version, str) and version else PLUGIN_VERSION_UNKNOWN
+
+
+# --- diagnostic output -------------------------------------------------------
+# Every transition prints one-line diagnostics a human (or a shell) reads off
+# stdout: "claim: held issue=7 label=in-progress", "reap: healed issue=9 …".
+# `next-action` (below) owns stdout for its JSON envelope, so it routes those
+# same lines to stderr for the duration of its run — identical text, identical
+# order, just off the machine channel. Only the functions next-action reaches
+# through (the claim path and the reconcile applier) go through `diag`; a
+# subcommand that never runs inside it keeps printing directly.
+
+_DIAG_STREAM = None  # None -> sys.stdout, resolved per call so tests can capture
+
+
+def diag(text):
+    """Print one diagnostic line to the current diagnostic sink."""
+    print(text, file=_DIAG_STREAM if _DIAG_STREAM is not None else sys.stdout)
+
+
+@contextlib.contextmanager
+def diagnostics_on_stderr():
+    """Route `diag` to stderr while stdout carries a machine payload."""
+    global _DIAG_STREAM
+    previous = _DIAG_STREAM
+    _DIAG_STREAM = sys.stderr
+    try:
+        yield
+    finally:
+        _DIAG_STREAM = previous
+
 
 # --- structured hidden markers -----------------------------------------------
 # A state-changing comment (or a claim ref's commit message) carries its machine
@@ -792,14 +823,18 @@ def clear_claim_state(worker):
         pass
 
 
-def open_claim(worker):
-    """Return the issue number (as a string) of an open claim this worker still
-    holds, read from its claim-<worker>.json state file, or None when no open
-    claim exists. The file's *presence* is the signal that a claim is
-    unresolved: every terminal transition (deliver / escalate / release) removes
-    it, so a resolved claim leaves nothing behind. A missing, unreadable, or
-    malformed file is treated as no open claim — the guard it feeds must never
-    fail a claim over an unparseable scratch file (the reaper backs us up)."""
+def open_claim_record(worker):
+    """The whole claim-<worker>.json record — `{"repo", "issue", "worker"}` with
+    `issue` normalized to a string — or None when this worker holds no open
+    claim. The file's *presence* is the signal that a claim is unresolved: every
+    terminal transition (deliver / escalate / release) removes it, so a resolved
+    claim leaves nothing behind. A missing, unreadable, or malformed file is
+    treated as no open claim — the guards it feeds must never fail a claim over
+    an unparseable scratch file (the lease backs us up regardless).
+
+    `next-action` reads the record rather than the bare issue number, because
+    resuming a claim means proving the lease on the repo the claim was made in,
+    not on whichever repo this invocation happens to name."""
     try:
         with open(claim_state_path(worker), encoding="utf-8") as fh:
             data = json.load(fh)
@@ -808,7 +843,21 @@ def open_claim(worker):
     if not isinstance(data, dict):
         return None
     issue = data.get("issue")
-    return None if issue is None else str(issue)
+    if issue is None:
+        return None
+    return {
+        "repo": str(data.get("repo") or ""),
+        "issue": str(issue),
+        "worker": str(data.get("worker") or worker),
+    }
+
+
+def open_claim(worker):
+    """The issue number (as a string) of an open claim this worker still holds,
+    or None when there is none — the one field the one-task-at-a-time guard
+    needs, read off open_claim_record so there is a single parse of the file."""
+    record = open_claim_record(worker)
+    return None if record is None else record["issue"]
 
 
 def refuse_second_claim(worker, issue=None):
@@ -825,7 +874,7 @@ def refuse_second_claim(worker, issue=None):
     held = open_claim(worker)
     if held is None or (issue is not None and held == str(issue)):
         return None
-    print(
+    diag(
         f"claim: refused worker={worker} holds={held} — one task at a time "
         f"(PROTOCOL.md §5); resolve the open claim first "
         f"(deliver / escalate / release)"
@@ -1303,7 +1352,7 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
     # 1. Guard — re-fetch labels; a held task is skipped with zero writes.
     label_names = issue_label_names(repo, issue)
     if label_names is None:
-        print(f"claim: gh-failure issue={issue} stage=guard")
+        diag(f"claim: gh-failure issue={issue} stage=guard")
         return EXIT_TRANSPORT
     for held in HELD_LABELS:
         if held in label_names and held not in allow_held:
@@ -1313,12 +1362,12 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
             if held == "in-progress" and probe_lease and lease is None:
                 lease = probe_lease_state(repo, issue, ttl)
                 if lease is False:
-                    print(f"claim: gh-failure issue={issue} stage=lease")
+                    diag(f"claim: gh-failure issue={issue} stage=lease")
                     return EXIT_TRANSPORT
                 if _stealing(lease):
                     allow_held = tuple(allow_held) + ("in-progress",)
                     continue
-            print(f"claim: held issue={issue} label={held}")
+            diag(f"claim: held issue={issue} label={held}")
             return EXIT_NOT_CLEAR
     if probe_lease and lease is None:
         # Labels are clear, but a lease can still exist in the crash window
@@ -1328,7 +1377,7 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
         # "win" a ref nobody is holding by while the real holder works on.
         lease = probe_lease_state(repo, issue, ttl)
         if lease is False:
-            print(f"claim: gh-failure issue={issue} stage=lease")
+            diag(f"claim: gh-failure issue={issue} stage=lease")
             return EXIT_TRANSPORT
 
     # A live lease that is not ours holds the task whatever the labels say — the
@@ -1339,7 +1388,7 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
     # than useless — creating the next generation would SUCCEED and take a live
     # lease — so the read answers it instead, with the same verdict.
     if lease is not None and lease["live"] and lease["worker"] != worker:
-        print(f"claim: lost-cas issue={issue} — another worker holds the claim ref")
+        diag(f"claim: lost-cas issue={issue} — another worker holds the claim ref")
         return EXIT_LOST
 
     steal = lease if _stealing(lease) else None
@@ -1361,7 +1410,7 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
     outcome, gen, _sha = advance_lease(
         repo, issue, from_gen, {"type": "claim", "worker": worker})
     if outcome.startswith("fail"):
-        print(f"claim: gh-failure issue={issue} stage={outcome[len('fail-'):]}")
+        diag(f"claim: gh-failure issue={issue} stage={outcome[len('fail-'):]}")
         return EXIT_TRANSPORT
     if outcome == "lost":
         # A 422 is a real loss only if the lease is ANOTHER worker's. A worker
@@ -1369,7 +1418,7 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
         # already owns the task, so fall through to re-project. An unreadable
         # owner counts as not ours.
         if claim_ref_owner(repo, issue) != worker:
-            print(f"claim: lost-cas issue={issue} — another worker holds the claim ref")
+            diag(f"claim: lost-cas issue={issue} — another worker holds the claim ref")
             return EXIT_LOST
 
     # The generations we climbed past are garbage now — the holder is the highest
@@ -1383,25 +1432,25 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
     write_claim_state(repo, issue, worker)
     if steal is not None and not post_comment(
             repo, issue, lease_expired_body(worker, steal)):
-        print(f"claim: gh-failure issue={issue} stage=comment (claim held)")
+        diag(f"claim: gh-failure issue={issue} stage=comment (claim held)")
         return EXIT_TRANSPORT
     for stale in stale_held:
         if not swap_labels(repo, issue, remove=stale):
-            print(f"claim: gh-failure issue={issue} stage=label (claim held)")
+            diag(f"claim: gh-failure issue={issue} stage=label (claim held)")
             return EXIT_TRANSPORT
     if not swap_labels(repo, issue, add="in-progress"):
-        print(f"claim: gh-failure issue={issue} stage=label (claim held)")
+        diag(f"claim: gh-failure issue={issue} stage=label (claim held)")
         return EXIT_TRANSPORT
     body = compose_comment(
         worker, "Claimed this task — starting work now.",
         {"type": "claim", "worker": worker},
     )
     if not post_comment(repo, issue, body):
-        print(f"claim: gh-failure issue={issue} stage=comment (claim held)")
+        diag(f"claim: gh-failure issue={issue} stage=comment (claim held)")
         return EXIT_TRANSPORT
 
     verb = "stole" if steal is not None else "claimed"
-    print(f"claim: {verb} issue={issue} worker={worker}")
+    diag(f"claim: {verb} issue={issue} worker={worker}")
     return EXIT_OK
 
 
@@ -1446,29 +1495,53 @@ def cmd_claim_next(args):
     each in turn, stopping at the first win. Losses (10/11) move to the next
     candidate; a transport fault (20) stops with state-unknown; an exhausted queue
     is EXIT_NONE. Never retries a lost CAS on the same issue (PROTOCOL.md §5) — it
-    iterates forward, never back."""
-    repo, project, worker = args.repo, args.project, args.worker
+    iterates forward, never back.
 
+    The loop itself lives in `acquire_next`; this is its line-oriented rendering
+    (the briefing a human or a shell reads). `next-action` renders the same
+    result as a JSON envelope."""
+    rc, won = acquire_next(args.repo, args.project, args.worker)
+    if rc == EXIT_OK:
+        if args.json:
+            print(json.dumps(won))
+        else:
+            diag(f"claim-next: claimed issue={won['issue']} worker={args.worker}")
+            print(f"{won['issue']}\t{won['title']}")
+            print()
+            print(won["body"])
+    return rc
+
+
+def acquire_next(repo, project, worker, ttl=None):
+    """The whole acquisition — one-task-at-a-time guard, project preflight, queue
+    read, §6 reconcile, then guard + CAS down the candidate list — as DATA rather
+    than as printed output: returns `(exit_code, won)` where `won` is
+    `{"issue", "title", "body"}` on EXIT_OK and None on every other outcome.
+
+    `claim-next` and `next-action` are both thin renderings of this, which is
+    what keeps the deterministic claim loop from drifting between them: there is
+    one implementation and two presentations. Diagnostics go through `diag`, so
+    `next-action` can push them to stderr and keep stdout pure JSON."""
     refused = refuse_second_claim(worker)
     if refused is not None:
-        return refused
+        return (refused, None)
 
     # Project preflight: before the queue is read and before any write,
     # because a worker scoped to a project label the repo does not carry is deaf,
     # not idle — it would report an honest-looking empty queue forever.
     ok, message = verify_project(repo, project)
     if ok is None:
-        print(message)
-        return EXIT_TRANSPORT
+        diag(message)
+        return (EXIT_TRANSPORT, None)
     if not ok:
-        print(message)
-        return EXIT_UNKNOWN_PROJECT
+        diag(message)
+        return (EXIT_UNKNOWN_PROJECT, None)
 
-    ttl = lease_ttl_seconds()
+    ttl = lease_ttl_seconds(ttl)
     read = read_queue(repo, ttl=ttl)
     if read is None:
-        print("claim-next: gh-failure stage=list")
-        return EXIT_TRANSPORT
+        diag("claim-next: gh-failure stage=list")
+        return (EXIT_TRANSPORT, None)
     nodes, leases = read
 
     # Reconcile before classifying (PROTOCOL.md §6). A dead worker's lease
@@ -1483,14 +1556,14 @@ def cmd_claim_next(args):
         if apply_reconcile(repo, plan, worker) is None:
             # Writes of ours may have half-landed — same state-unknown rule as a
             # failed claim: re-check before retrying, never push on.
-            print("claim-next: gh-failure stage=reconcile — state unknown, re-check")
-            return EXIT_TRANSPORT
+            diag("claim-next: gh-failure stage=reconcile — state unknown, re-check")
+            return (EXIT_TRANSPORT, None)
         project_reconcile(plan, nodes, leases)
 
     rows = classify_queue(repo, project, include_body=True, read=read)
     if rows is None:
-        print("claim-next: gh-failure stage=list")
-        return EXIT_TRANSPORT
+        diag("claim-next: gh-failure stage=list")
+        return (EXIT_TRANSPORT, None)
 
     by_number = {n["number"]: n for n in nodes}
     live = live_leases(leases)
@@ -1506,23 +1579,352 @@ def cmd_claim_next(args):
         rc = _claim_once(repo, number, worker, allow_held=allow_held,
                          lease=leases.get(number), ttl=ttl)
         if rc == EXIT_OK:
-            if args.json:
-                print(json.dumps({"issue": number, "title": title, "body": body}))
-            else:
-                print(f"claim-next: claimed issue={number} worker={worker}")
-                print(f"{number}\t{title}")
-                print()
-                print(body)
-            return EXIT_OK
+            return (EXIT_OK, {"issue": number, "title": title, "body": body})
         if rc == EXIT_TRANSPORT:
             # State is now ambiguous — do NOT move on to another candidate while
             # a write of ours may have half-landed. Re-check before any retry.
-            print(f"claim-next: gh-failure issue={number} — state unknown, re-check")
-            return EXIT_TRANSPORT
+            diag(f"claim-next: gh-failure issue={number} — state unknown, re-check")
+            return (EXIT_TRANSPORT, None)
         # EXIT_LOST (10) / EXIT_NOT_CLEAR (11): back off, try the next candidate.
 
-    print(f"claim-next: none project:{project}")
-    return EXIT_NONE
+    diag(f"claim-next: none project:{project}")
+    return (EXIT_NONE, None)
+
+
+# --- subcommand: next-action -------------------------------------------------
+#
+# The driver loop, as one call. Everything a worker otherwise has to REMEMBER
+# between transitions — whether it already holds a task, whether that lease is
+# still its own, when the lease must be renewed, which writes are legal next and
+# with which arguments — is bookkeeping, and bookkeeping belongs in the program.
+# What is left for the agent is the part only it can do: read the goal, write the
+# code, write the question, write the result.
+#
+# This is a worker-side ergonomic (PROTOCOL.md §12), exactly like claim-next and
+# status: no new wire semantics and no new write. The only writes it performs are
+# the claim path's, reached through acquire_next.
+#
+# stdout is the JSON envelope and NOTHING else, so the whole computation runs
+# with `diag` routed to stderr (see diagnostics_on_stderr).
+
+# The action vocabulary, single-sourced here: `kraken.py contract next-actions`
+# prints it and the skill lint checks the SKILL.md documents every one, the same
+# execute-don't-diff rule the marker types follow.
+NEXT_ACTIONS = ("execute", "idle", "abandon", "blocked", "stop", "retry")
+
+# action -> the exit code that carries the same verdict to a shell. They reuse
+# the established contract (§12) rather than inventing a second numbering: a
+# caller that already branches on claim-next's codes needs to learn nothing.
+NEXT_ACTION_EXIT = {
+    "execute": EXIT_OK,
+    "idle": EXIT_NONE,
+    "abandon": EXIT_LOST,
+    "blocked": EXIT_NOT_CLEAR,
+    "stop": EXIT_UNKNOWN_PROJECT,
+    "retry": EXIT_TRANSPORT,
+}
+
+
+def format_iso(epoch):
+    """Epoch seconds as an ISO-8601 UTC timestamp (…Z) — `parse_iso`'s inverse,
+    so a timestamp this program emits is one it can read back."""
+    return datetime.datetime.fromtimestamp(
+        epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def then_commands(repo, issue, worker, script=None):
+    """The exact command lines this worker may run next, fully interpolated —
+    the script's own absolute path, the repo, the issue and the worker name
+    already filled in, with only the parts that are the agent's to write left as
+    placeholders.
+
+    This is the point of the envelope: assembling an argv is bookkeeping, and an
+    agent that assembles one gets the path wrong, or the argument order, or the
+    worker name. The path is quoted because a plugin folder may contain spaces."""
+    script = script or os.path.abspath(__file__)
+    base = f'python3 "{script}"'
+    return {
+        "renew": f"{base} heartbeat {repo} {issue} {worker} '<one line of progress>'",
+        "note": f"{base} note {repo} {issue} {worker} <body-file>",
+        "escalate": f"{base} escalate {repo} {issue} {worker} <question-file>",
+        "deliver": f"{base} deliver {repo} {issue} {worker} <result-file> <pr-url>",
+        "release": f"{base} release {repo} {issue} {worker} '<reason>'",
+    }
+
+
+def lease_block(epoch, now, ttl, generation=None, source="claim-ref"):
+    """The renewal contract as numbers instead of as an instruction to remember:
+    when this lease dies, how long is left, and how often to renew.
+
+    `source` says where the clock came from. "claim-ref" is the authoritative
+    one — the ref's server-stamped commit date, the same anchor every reader
+    applies the TTL to (§5.1). "estimated" is the freshly-won claim, whose commit
+    was created moments ago and is timed off the local clock rather than paying a
+    re-read for it: renewal is TTL/3, so a local clock has three renewals of
+    slack before drift could matter, and the authoritative clock still decides
+    every actual expiry."""
+    expires = epoch + ttl
+    return {
+        "generation": generation,
+        "renew_every_seconds": lease_renew_seconds(ttl),
+        "expires_at": format_iso(expires),
+        "seconds_remaining": int(expires - now),
+        "renew_now": expires <= now,
+        "source": source,
+    }
+
+
+def task_brief(title, body):
+    """The task as the agent needs it: the issue-form sections split out, plus
+    the raw body for a hand-written issue that carries no headings. An empty or
+    `_No response_` section reads as "" rather than as the placeholder text."""
+    def section(name):
+        content = section_body(body, name)
+        return "" if is_empty_section(content) else content.strip()
+
+    return {
+        "title": title,
+        "goal": section("Goal"),
+        "acceptance": section("Acceptance"),
+        "notes": section("Notes"),
+        "body": body,
+    }
+
+
+def next_action_envelope(action, repo, worker, *, issue=None, resumed=None,
+                         brief=None, lease=None, reason=None, detail=None,
+                         script=None):
+    """The one JSON shape next-action emits. `action` is the verdict, `reason` a
+    stable machine slug for it, and `detail` the human sentence — so a consumer
+    branches on the slug and a human reads the sentence, never the other way
+    round. `then` is attached only to `execute`, because it is the only verdict
+    under which a write is legal."""
+    env = {"action": action, "repo": repo, "worker": worker}
+    if issue is not None:
+        env["issue"] = int(issue)
+    if resumed is not None:
+        env["resumed"] = resumed
+    if reason:
+        env["reason"] = reason
+    if detail:
+        env["detail"] = detail
+    if brief is not None:
+        env["brief"] = brief
+    if lease is not None:
+        env["lease"] = lease
+    if action == "execute" and issue is not None:
+        env["then"] = then_commands(repo, issue, worker, script=script)
+    return env
+
+
+def issue_is_finished(issue_obj):
+    """Whether an issue has left the state where "keep executing" makes sense:
+    closed, or carrying a terminal held label. A worker whose state file still
+    names such a task already finished with it — the transition landed and only
+    the local scratch file lagged."""
+    if str((issue_obj or {}).get("state", "")).upper() == "CLOSED":
+        return True
+    names = {lbl.get("name", "") for lbl in (issue_obj or {}).get("labels", [])}
+    return bool(names & {"needs-decision", "awaiting-merge"})
+
+
+def resume_verdict(record, repo, worker, ref_state, head, issue_obj, now, ttl):
+    """Decide what a recorded open claim is worth, as a pure function of what was
+    observed. Returns `(verdict, detail)` where verdict is one of:
+
+      - `"blocked"`  — the record names a claim in a DIFFERENT repo. Decided
+        before any read, so the caller passes None for `ref_state`/`head`/
+        `issue_obj`; one task at a time is repo-independent (§5).
+      - `"retry"`    — a read did not land. Ambiguous is never a decision:
+        write nothing, change nothing, re-check.
+      - `"resolved"` — this worker no longer holds the task AND the task has
+        already left the queue (closed, or `needs-decision`/`awaiting-merge`).
+        The transition landed and the state file lagged, so the drain simply
+        continues to the next task.
+      - `"abandon"`  — this worker no longer holds the lease on a task that is
+        still open and unfinished: it was stolen, or the ref is gone. Write
+        NOTHING (§5.3) and say so.
+      - `"execute"`  — the lease is still ours. Resume.
+
+    Ownership is checked before the issue's own state, because the lease is the
+    lock and the labels are projection. A lease that is ours but PAST its TTL
+    still resumes: §5.3 is explicit that an expired-but-unstolen lease may
+    complete its transition — the caller is told to renew first."""
+    if record["repo"] and record["repo"] != repo:
+        return ("blocked", {"reason": "claim-elsewhere",
+                            "detail": f"this worker holds {record['repo']}"
+                                      f"#{record['issue']}; resolve it (deliver / "
+                                      f"escalate / release) before draining {repo}"})
+    if ref_state == "error":
+        return ("retry", {"reason": "lease-unreadable",
+                          "detail": "the claim ref did not read — re-check "
+                                    "before writing anything"})
+    if issue_obj is None:
+        return ("retry", {"reason": "issue-unreadable",
+                          "detail": "the task issue did not read — re-check "
+                                    "before writing anything"})
+
+    ours = ref_state == "ok" and (head or {}).get("worker") == worker
+    if not ours:
+        if issue_is_finished(issue_obj):
+            # Whether this worker's own terminal transition deleted the ref or
+            # the reconciler reclaimed it is not answerable from here — and the
+            # right move is the same either way: the task is not ours and not in
+            # the queue, so keep draining rather than report a loss.
+            return ("resolved", {"reason": "already-resolved"})
+        holder = (head or {}).get("worker")
+        if ref_state == "absent":
+            return ("abandon", {"reason": "lease-gone",
+                                "detail": "the claim ref is gone — re-claim the "
+                                          "task before writing to it"})
+        return ("abandon", {"reason": "lease-stolen",
+                            "detail": f"the lease is held by "
+                                      f"{holder or 'another worker'} now — the "
+                                      f"branch and PR you pushed stay, and "
+                                      f"whoever holds the task inherits them"})
+    if issue_is_finished(issue_obj):
+        # Our lease, but the task ended under us (an operator closed or answered
+        # it). Nothing to resume; the lease frees itself within one TTL.
+        return ("resolved", {"reason": "task-finished"})
+
+    return ("execute", {"generation": (head or {}).get("gen"),
+                        "epoch": (head or {}).get("epoch")})
+
+
+def _resume(record, repo, worker, ttl, now, script):
+    """Fetch what `resume_verdict` needs and turn its verdict into an envelope.
+    Returns `(exit_code, envelope)`, or `(None, None)` when the recorded claim is
+    resolved and the caller should go acquire a new task."""
+    issue = record["issue"]
+    issue_obj = None
+
+    if record["repo"] and record["repo"] != repo:
+        verdict, detail = resume_verdict(record, repo, worker, None, None,
+                                         None, now, ttl)
+    else:
+        ref_state, head = claim_ref_head(repo, issue)
+        # One GET serves both the finished-task check and the brief.
+        issue_obj = None if ref_state == "error" else issue_detail(repo, issue)
+        verdict, detail = resume_verdict(record, repo, worker, ref_state, head,
+                                         issue_obj, now, ttl)
+
+    if verdict == "resolved":
+        # The claim is over. Drop the stale scratch file so the one-task-at-a-time
+        # guard stops refusing on it, and let the caller drain on. This is the
+        # self-heal that used to need an operator running `release` by hand.
+        clear_claim_state(worker)
+        diag(f"next-action: claim resolved issue={issue} ({detail['reason']}) "
+             "— continuing the drain")
+        return (None, None)
+
+    if verdict == "abandon":
+        # Provably not ours: clearing local state is safe and is what unjams this
+        # worker. An AMBIGUOUS read never reaches here (it is "retry"), so no
+        # transport fault can make us drop a claim we might still hold.
+        clear_claim_state(worker)
+
+    action = verdict  # the remaining verdicts are the action names themselves
+    if action != "execute":
+        diag(f"next-action: {action} issue={issue} ({detail['reason']})")
+        return (NEXT_ACTION_EXIT[action], next_action_envelope(
+            action, repo, worker, issue=issue, reason=detail["reason"],
+            detail=detail.get("detail"), script=script))
+
+    epoch = detail["epoch"]
+    # An unreadable clock is an expired lease (§5.1) — fail open, toward renewing
+    # immediately, never toward assuming time is left.
+    lease = lease_block(epoch if epoch is not None else now - ttl, now, ttl,
+                        generation=detail["generation"])
+    diag(f"next-action: resumed issue={issue} worker={worker}")
+    return (EXIT_OK, next_action_envelope(
+        "execute", repo, worker, issue=issue, resumed=True,
+        brief=task_brief(issue_obj.get("title") or "", issue_obj.get("body") or ""),
+        lease=lease, script=script))
+
+
+def next_action(repo, project, worker, ttl=None, now=None, script=None):
+    """The driver loop's single call: resume the task this worker already holds,
+    or acquire the next one. Returns `(exit_code, envelope)`."""
+    ttl = lease_ttl_seconds(ttl)
+    now = time.time() if now is None else now
+
+    record = open_claim_record(worker)
+    if record is not None:
+        rc, env = _resume(record, repo, worker, ttl, now, script)
+        if env is not None:
+            return (rc, env)
+        # Resolved: fall through and take the next task.
+
+    rc, won = acquire_next(repo, project, worker, ttl=ttl)
+    if rc == EXIT_OK:
+        return (EXIT_OK, next_action_envelope(
+            "execute", repo, worker, issue=won["issue"], resumed=False,
+            brief=task_brief(won["title"], won["body"]),
+            lease=lease_block(now, now, ttl, source="estimated"),
+            script=script))
+    if rc == EXIT_NONE:
+        return (EXIT_NONE, next_action_envelope(
+            "idle", repo, worker, reason="queue-empty",
+            detail=f"nothing startable in project:{project}",
+            script=script))
+    if rc == EXIT_UNKNOWN_PROJECT:
+        return (EXIT_UNKNOWN_PROJECT, next_action_envelope(
+            "stop", repo, worker, reason="unknown-project",
+            detail=f"the repo carries no project:{project} label — this worker "
+                   "would filter every task out; fix the label, never drain "
+                   "unscoped",
+            script=script))
+    if rc == EXIT_NOT_CLEAR:
+        return (EXIT_NOT_CLEAR, next_action_envelope(
+            "blocked", repo, worker, reason="claim-open",
+            detail="this worker already holds an open claim — resolve it "
+                   "(deliver / escalate / release) first",
+            script=script))
+    return (EXIT_TRANSPORT, next_action_envelope(
+        "retry", repo, worker, reason="transport",
+        detail="the queue read or a claim write did not land — re-check the "
+               "task's real state before retrying",
+        script=script))
+
+
+def render_next_action(env):
+    """The --text rendering: the same verdict as one line a human can scan,
+    plus what the agent owes next. The JSON stays the machine contract."""
+    action = env["action"]
+    head = f"next-action: {action}"
+    if "issue" in env:
+        head += f" issue={env['issue']}"
+    head += f" repo={env['repo']} worker={env['worker']}"
+    if env.get("resumed") is not None:
+        head += f" resumed={str(env['resumed']).lower()}"
+    print(head)
+    if env.get("detail"):
+        print(f"  {env['detail']}")
+    brief = env.get("brief")
+    if brief:
+        print(f"  title: {brief['title']}")
+        for field in ("goal", "acceptance"):
+            if brief[field]:
+                first = brief[field].split("\n")[0]
+                print(f"  {field}: {first}")
+    lease = env.get("lease")
+    if lease:
+        print(f"  lease: renew every {lease['renew_every_seconds']}s; "
+              f"expires {lease['expires_at']} "
+              f"({lease['seconds_remaining']}s left"
+              f"{', RENEW NOW' if lease['renew_now'] else ''})")
+    for name, command in (env.get("then") or {}).items():
+        print(f"  {name}: {command}")
+
+
+def cmd_next_action(args):
+    with diagnostics_on_stderr():
+        rc, env = next_action(args.repo, args.project, args.worker)
+    if args.text:
+        render_next_action(env)
+    else:
+        print(json.dumps(env, indent=2))
+    return rc
 
 
 # --- subcommand: heartbeat ---------------------------------------------------
@@ -2623,7 +3025,7 @@ def apply_reconcile(repo, plan, worker):
         if rule == "orphan-lock":
             if not drop_generations(repo, num, action["gens"]):
                 return _reconcile_failure("ref", num)
-            print(f"reap: orphan-lock issue={num} — claim ref deleted")
+            diag(f"reap: orphan-lock issue={num} — claim ref deleted")
 
         elif rule == "reclaim":
             if not swap_labels(
@@ -2637,19 +3039,19 @@ def apply_reconcile(repo, plan, worker):
                 return _reconcile_failure("comment", num)
             if not drop_generations(repo, num, action["gens"]):
                 return _reconcile_failure("ref", num)
-            print(f"reap: reclaimed issue={num} ({action['reason']})")
+            diag(f"reap: reclaimed issue={num} ({action['reason']})")
 
         elif rule == "heal":
             if not swap_labels(repo, num, add="in-progress"):
                 return _reconcile_failure("heal", num)
-            print(f"reap: healed issue={num} — in-progress label restored")
+            diag(f"reap: healed issue={num} — in-progress label restored")
 
         elif rule == "requeue":
             if not swap_labels(repo, num, remove="in-progress"):
                 return _reconcile_failure("requeue", num)
             if not post_comment(repo, num, orphan_projection_body(worker)):
                 return _reconcile_failure("comment", num)
-            print(f"reap: requeued issue={num} ({action['reason']})")
+            diag(f"reap: requeued issue={num} ({action['reason']})")
 
         counts[rule] += 1
     return counts
@@ -2897,6 +3299,10 @@ CONTRACT_FIELDS = {
     "disclaimer": lambda args: [disclaimer(args.worker)],
     "task-trailer": lambda args: [task_trailer(args.repo, args.issue, args.worker)],
     "marker-types": lambda args: list(MARKER_TYPES),
+    # The next-action verdict vocabulary. The skill documents what an agent does
+    # for each one, and the lint executes this rather than diffing prose — the
+    # same rule marker-types follows.
+    "next-actions": lambda args: list(NEXT_ACTIONS),
     "protocol-version": lambda args: [str(PROTOCOL_VERSION)],
     # The lease clock, in seconds. A skill or a doc that needs the number asks
     # for it rather than copying it, so raising the TTL raises the renewal
@@ -2947,6 +3353,19 @@ def build_parser():
     p.add_argument("--json", action="store_true",
                    help="emit the won claim as a JSON object {issue,title,body}")
     p.set_defaults(func=cmd_claim_next)
+
+    p = sub.add_parser(
+        "next-action",
+        help="the driver loop in one call: resume the task this worker holds, "
+             "or claim the next one, and say what to run next (JSON envelope)",
+    )
+    p.add_argument("repo")
+    p.add_argument("project")
+    p.add_argument("worker")
+    p.add_argument("--text", action="store_true",
+                   help="render the envelope as human-readable lines instead "
+                        "of JSON (the JSON is the machine contract)")
+    p.set_defaults(func=cmd_next_action)
 
     p = sub.add_parser("heartbeat",
                        help="liveness: advance the claim ref to a fresh commit")

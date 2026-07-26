@@ -146,10 +146,12 @@ bouncing) a PR. The tentacles drive everything else.
 The coordination contract — task shape, state machine, the machine marker,
 the claim algorithm — is normatively specified in
 [`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/6`); it is agent-agnostic, so any
-tool that follows it can be a tentacle on the same queue. How a Claude Code worker
-executes it — subagents, the watcher, the bundled transition program — lives in
-[`skills/unleash/SKILL.md`](skills/unleash/SKILL.md); the GitHub Copilot CLI
-worker reuses that same skill with the harness deltas in [`AGENTS.md`](AGENTS.md).
+tool that follows it can be a tentacle on the same queue. How a worker executes it
+lives in [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md) — a loop around
+`kraken.py next-action`, which answers "what do I do now" with a JSON envelope so
+the ordering rules are the program's job rather than something the agent has to
+remember. That makes the skill harness-neutral: the GitHub Copilot CLI worker
+reuses it through [`AGENTS.md`](AGENTS.md) with **no deltas at all**.
 
 ## The full walkthrough
 
@@ -506,8 +508,8 @@ FAQ above). A hard kill / crash / power loss fires neither hook — and it does 
 matter: the **lease expires on its own** 30 minutes later and the next worker to
 read the queue takes the task over (§5). The hooks only make that immediate; no
 server-side job, so it needs nothing running anywhere. And the watcher is no
-escape hatch: it is **step 4 of `unleash`**, armed inside the same session — not
-a command of its own — so it dies with it. Moving the poll out of the model is
+escape hatch: it is armed by `unleash` itself (its *Staying in ambush* step),
+inside the same session — not a command of its own — so it dies with it. Moving the poll out of the model is
 what [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) already does, though it
 still needs a live shell to run in; a genuinely headless driver (system cron,
 GitHub Actions) is open work —

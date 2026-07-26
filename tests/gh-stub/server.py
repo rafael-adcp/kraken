@@ -667,6 +667,10 @@ class Handler(BaseHTTPRequestHandler):
         labels = self.knobs.guard_wait(lambda: s.issue_labels(n))
         self._send(200, {
             "number": int(n),
+            # Real GitHub returns the title here; next-action briefs a resumed
+            # task off this read, so omitting it made the stub the only place
+            # where a resumed brief was title-less.
+            "title": s._read(os.path.join(s.issue_dir(n), "title")).rstrip("\n"),
             "labels": [{"name": x} for x in labels],
             "body": s.issue_body(n),
             "state": "open" if s.is_open(s.issue_dir(n)) else "closed",

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # kraken-loop.sh — external "ambush" loop for a GitHub Copilot CLI tentacle.
 #
-# Copilot CLI has no Monitor tool to arm kraken's zero-token watcher (SKILL.md
-# step 4), so this is the documented fallback: an outside-the-model shell loop
+# Copilot CLI has no Monitor tool to arm kraken's zero-token watcher (SKILL.md,
+# "Staying in ambush"), so this is the documented fallback: an outside-the-model shell loop
 # running ONE `--once`-style drain per iteration (a fresh `copilot` process per
 # pass also gives each task the fresh-context isolation a subagent would).
 #
@@ -121,8 +121,9 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 
 PROMPT="Act as kraken worker $WORKER, draining project:$PROJECT from $TASKS.
-Follow AGENTS.md, SKILL.md and PROTOCOL.md. Do ONE drain pass: claim at most one
-startable task, execute it end to end, deliver it as a draft PR, then stop."
+Follow AGENTS.md, SKILL.md and PROTOCOL.md. Do ONE drain pass: run kraken.py next-action
+and do what the envelope says — execute the task it hands you end to end, deliver it as a
+draft PR, then stop."
 
 drain_pass() {
   local ts startable
