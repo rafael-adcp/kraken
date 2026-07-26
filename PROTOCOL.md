@@ -635,9 +635,9 @@ improvisation.
 ## 12. Conformance
 
 The **reference implementation** of the worker side is
-[`skills/unleash/kraken.py`](skills/unleash/kraken.py) — one stdlib-only program
-with a subcommand per transition (`list-startable`, `claim`, `heartbeat`, `note`,
-`escalate`, `deliver`, `release`, `watch`), driven by a Claude Code skill
+[`skills/unleash/kraken.py`](skills/unleash/kraken.py) — the entry point of a
+stdlib-only package with a subcommand per transition (`list-startable`, `claim`,
+`heartbeat`, `note`, `escalate`, `deliver`, `release`, `watch`), driven by a Claude Code skill
 ([`skills/unleash/SKILL.md`](skills/unleash/SKILL.md)) that supplies the
 judgment between transitions. The transport is direct HTTP over the stdlib
 (`urllib`) against the GitHub REST + GraphQL API — the base URL comes from

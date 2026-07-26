@@ -2,7 +2,8 @@
 """kraken.py watch's entire emit gate is `count > 0` on
 `kraken.py list-startable --snapshot`'s ":startable$" lines. Proving a
 blocked-only queue's snapshot carries zero ":startable" lines IS the no-wake
-proof. Also textually pins the watch gate in kraken.py."""
+proof. Also textually pins the watch gate in the package's watch module."""
+import os
 import unittest
 
 from harness import KrakenConformanceTest, KRAKEN
@@ -33,12 +34,14 @@ class WatchQueueBlockedTests(KrakenConformanceTest):
         self.assertEqual(count, 1, "exactly the newly-clear task startable once the blocker closes")
 
     def test_watch_gate_is_textually_pinned(self):
-        with open(KRAKEN, encoding="utf-8") as f:
+        # The gate lives in the watch module of the package KRAKEN executes.
+        watch_py = os.path.join(os.path.dirname(KRAKEN), "kraken", "watch.py")
+        with open(watch_py, encoding="utf-8") as f:
             src = f.read()
         self.assertNotIn("REMIND_SECONDS", src,
-                         "kraken.py watch must not retain the 30-min re-emission safety net")
+                         "kraken watch must not retain the 30-min re-emission safety net")
         self.assertIn("count > 0 and (snapshot != prev or due)", src,
-                      "kraken.py watch must gate emission on count>0 AND (snapshot changed OR retry due)")
+                      "kraken watch must gate emission on count>0 AND (snapshot changed OR retry due)")
 
 
 if __name__ == "__main__":
