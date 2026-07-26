@@ -69,18 +69,13 @@ from .lease import (
     write_claim_state
 )
 from .refs import (
-    CLAIM_REF_PREFIX, EMPTY_TREE_SHA, advance_lease, claim_ref,
-    claim_ref_create, claim_ref_delete, claim_ref_head, claim_ref_list,
-    claim_ref_owner, claim_refs_of, create_claim_commit, drop_generations,
-    hold_lease, parse_claim_ref, resolve_commit_meta
+    CLAIM_REF_PREFIX, EMPTY_TREE_SHA, Refs, claim_ref, parse_claim_ref
 )
 from .queue import (
-    COMMENT_HYDRATE_CHUNK, NO_RESPONSE_PLACEHOLDER, QUEUE_COMMENT_WINDOW,
-    claim_meta_of, classify_queue, cmd_list_startable, comment_hungry,
-    comment_nodes_of, fetch_comment_windows, fetch_open_tasks,
-    has_requeue_directive, hydrate_comment_windows, is_empty_section,
-    is_worker_comment, label_names_of, project_names_of, read_queue,
-    requeue_verdict, requeued_labels, resolve_depends_on, section_body
+    COMMENT_HYDRATE_CHUNK, NO_RESPONSE_PLACEHOLDER, QUEUE_COMMENT_WINDOW, Queue,
+    claim_meta_of, cmd_list_startable, comment_hungry, comment_nodes_of,
+    has_requeue_directive, is_empty_section, is_worker_comment, label_names_of,
+    project_names_of, requeue_verdict, requeued_labels, section_body
 )
 from .render import (
     render_init, render_next_action, render_status
@@ -90,14 +85,14 @@ from .reconcile import (
     project_reconcile, reconcile_pass, reconcile_plan, stale_claim_body
 )
 from .claim import (
-    acquire_next, cmd_claim, cmd_claim_next, cmd_deliver, cmd_escalate,
-    cmd_heartbeat, cmd_note, cmd_release, lease_expired_body, list_projects,
-    probe_lease_state, read_body_file, verify_project
+    ClaimAttempt, acquire_next, cmd_claim, cmd_claim_next, cmd_deliver,
+    cmd_escalate, cmd_heartbeat, cmd_note, cmd_release, lease_expired_body,
+    list_projects, probe_lease_state, read_body_file, verify_project
 )
 from .next_action import (
-    NEXT_ACTIONS, NEXT_ACTION_EXIT, cmd_next_action, issue_is_finished,
-    lease_block, next_action, next_action_envelope, resume_verdict,
-    task_brief, then_commands
+    NEXT_ACTIONS, NEXT_ACTION_EXIT, NextAction, NextActionEnvelope,
+    cmd_next_action, issue_is_finished, lease_block, next_action,
+    next_action_envelope, resume_verdict, task_brief, then_commands
 )
 from .watch import (
     WATCH_MAX_FAILURES, WATCH_WARN_EVERY, cmd_watch, snapshot_state,

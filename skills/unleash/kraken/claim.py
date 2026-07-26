@@ -22,11 +22,8 @@ from .lease import (
     Lease, NO_LEASE, clear_claim_state, format_age, lease_ttl_seconds,
     live_leases, refuse_second_claim, write_claim_state
 )
-from .refs import (
-    advance_lease, claim_ref_head, claim_ref_owner, drop_generations,
-    hold_lease
-)
-from .queue import classify_queue, read_queue, requeued_labels
+from .refs import Refs
+from .queue import Queue, requeued_labels
 from .reconcile import apply_reconcile, project_reconcile, reconcile_plan
 
 # --- subcommand: claim -------------------------------------------------------
@@ -63,7 +60,7 @@ def probe_lease_state(api: Api, issue: Issue, ttl: int) -> Lease:
     the one this saw, so a holder that renewed in the meantime already took that
     generation and the challenger simply loses. This read decides whether to
     *try*, never who wins."""
-    head = claim_ref_head(api, issue)
+    head = Refs(api).head(issue)
     if not head.present:
         return head  # NO_LEASE or UNREADABLE_LEASE — the caller tells them apart
     # `claim_ref_head` cannot know the TTL, so it reports the clock and leaves
@@ -74,19 +71,24 @@ def probe_lease_state(api: Api, issue: Issue, ttl: int) -> Lease:
                                live=age is not None and age < ttl)
 
 
-def _claim_once(api: Api, issue: Issue, worker: Worker,
-                allow_held: Sequence[str] = (), lease: Lease = NO_LEASE,
-                ttl: int | None = None, probe_lease: bool = False) -> int:
-    """The one contended claim sequence — guard, CAS, projection — executed
-    identically every time (PROTOCOL.md §5). Returns an exit code and prints a
-    `claim:` diagnostic line. Shared by `claim` and `claim-next` so they can never
-    drift.
+class ClaimAttempt:
+    """One worker's attempt to take one task: guard, CAS, projection, executed
+    identically every time (PROTOCOL.md §5). Shared by `claim` and `claim-next`
+    so the two can never drift.
+
+    The three phases were one 124-line function taking seven arguments, which is
+    what state looks like when it has nowhere to live: they are not really
+    parameters of a call, they are what an attempt IS. Each phase is a method
+    that answers an exit code to stop with, or None to carry on; `run` sequences
+    them and owns the one success path.
+
+    Constructor arguments:
 
     `allow_held` names the held labels the caller's §6 requeue derivation has
     already lifted, so the guard does not refuse the very task the queue filter
-    just offered. They are stale projection, and the projection step below swaps
-    them off. The guard is an optimisation either way — the claim-ref CAS is the
-    only thing that decides ownership.
+    just offered. They are stale projection, and the projection phase swaps them
+    off. The guard is an optimisation either way — the claim-ref CAS is the only
+    thing that decides ownership.
 
     `lease` is the lease record the caller observed on this issue, or `NO_LEASE`
     when it observed no claim ref. It decides the generation the CAS starts
@@ -98,106 +100,151 @@ def _claim_once(api: Api, issue: Issue, worker: Worker,
     drain reads every lease with the queue, a `claim <issue>` has read nothing,
     so it looks the lease up itself — but only once the cheap label guard has
     already let the task through, so a task held by `needs-decision` or
-    `awaiting-merge` still costs exactly one read to refuse.
+    `awaiting-merge` still costs exactly one read to refuse."""
 
-    The guard reads two labels, not three: `in-progress` is write-only (§3), so
-    the lease below decides everything it used to. That collapses what was this
-    function's hardest branch — a label that held only conditionally, probed
-    mid-guard — into the plain rule the lock already stated."""
-    ttl = lease_ttl_seconds(ttl)
+    def __init__(self, api: Api, issue: Issue, worker: Worker, *,
+                 allow_held: Sequence[str] = (), lease: Lease = NO_LEASE,
+                 ttl: int | None = None, probe_lease: bool = False):
+        self.api = api
+        self.refs = Refs(api)
+        self.issue = issue
+        self.worker = worker
+        self.allow_held = allow_held
+        self.lease = lease
+        self.ttl = lease_ttl_seconds(ttl)
+        self.probe_lease = probe_lease
+        # Decided by the guard, consumed by the projection: whose expired lease
+        # this is taking, and which requeued labels are still on the issue.
+        self.steal = NO_LEASE
+        self.stale_held: list[str] = []
 
-    # 1. Guard — re-fetch labels; a held task is skipped with zero writes.
-    label_names = api.issue_label_names(issue)
-    if label_names is None:
-        diag(f"claim: gh-failure issue={issue} stage=guard")
-        return EXIT_TRANSPORT
-    for held in HELD_LABELS:
-        if held in label_names and held not in allow_held:
-            diag(f"claim: held issue={issue} label={held}")
-            return EXIT_NOT_CLEAR
-    if probe_lease and not lease.present:
-        # Labels say nothing about who is working — that is the lease's job, and
-        # this path has not read one yet. It answers both questions at once: who
-        # holds the task (the check below), and which generation the CAS must
-        # create — the one above whatever is actually there, since creating a
-        # LOWER one would "win" a ref nobody is holding by while the real holder
-        # works on.
-        lease = probe_lease_state(api, issue, ttl)
-        if lease.unknown:
-            diag(f"claim: gh-failure issue={issue} stage=lease")
+    def run(self) -> int:
+        """The sequence. Returns an exit code and prints a `claim:` diagnostic."""
+        for phase in (self._guard, self._take, self._project):
+            code = phase()
+            if code is not None:
+                return code
+        verb = "stole" if self.steal.present else "claimed"
+        diag(f"claim: {verb} issue={self.issue} worker={self.worker}")
+        return EXIT_OK
+
+    def _guard(self) -> int | None:
+        """Refuse early and for free: a held task is skipped with zero writes.
+
+        The guard reads two labels, not three: `in-progress` is write-only (§3),
+        so the lease below decides everything it used to. That collapses what was
+        this sequence's hardest branch — a label that held only conditionally,
+        probed mid-guard — into the plain rule the lock already stated."""
+        label_names = self.api.issue_label_names(self.issue)
+        if label_names is None:
+            diag(f"claim: gh-failure issue={self.issue} stage=guard")
             return EXIT_TRANSPORT
+        for held in HELD_LABELS:
+            if held in label_names and held not in self.allow_held:
+                diag(f"claim: held issue={self.issue} label={held}")
+                return EXIT_NOT_CLEAR
+        if self.probe_lease and not self.lease.present:
+            # Labels say nothing about who is working — that is the lease's job,
+            # and this path has not read one yet. It answers both questions at
+            # once: who holds the task (the check below), and which generation
+            # the CAS must create — the one above whatever is actually there,
+            # since creating a LOWER one would "win" a ref nobody is holding by
+            # while the real holder works on.
+            self.lease = probe_lease_state(self.api, self.issue, self.ttl)
+            if self.lease.unknown:
+                diag(f"claim: gh-failure issue={self.issue} stage=lease")
+                return EXIT_TRANSPORT
 
-    # A live lease that is not ours holds the task whatever the labels say — the
-    # lock is the whole of "somebody is working on this" (§5), including in the
-    # crash window where no label has landed yet, and including when the badge
-    # says otherwise. This is a LOST claim, not an unclear one: somebody
-    # owns the task. Under protocol/5 the same case surfaced by attempting the
-    # CAS and reading its 422; the generation ladder makes that attempt worse
-    # than useless — creating the next generation would SUCCEED and take a live
-    # lease — so the read answers it instead, with the same verdict.
-    if lease.held_by_other(worker):
-        diag(f"claim: lost-cas issue={issue} — another worker holds the claim ref")
-        return EXIT_LOST
-
-    steal = lease if lease.stealable_by(worker) else NO_LEASE
-    # The requeued labels still on the issue: dropped as part of the projection.
-    stale_held = [h for h in HELD_LABELS if h in label_names and h in allow_held]
-
-    # 2. CAS — an orphan claim commit, then the create that arbitrates: the
-    #    generation above whatever was observed. It is the SAME conflict-failing
-    #    write on the SAME ref name for a first claim, a steal and a renewal, so
-    #    N thieves racing one expired lease — and the holder racing them with a
-    #    renewal — produce exactly one winner and nothing to undo. Nothing is
-    #    deleted to make room, so the task is never observably free mid-steal and
-    #    no interleaving can hand two workers the same lease.
-    outcome, gen, _sha = advance_lease(
-        api, issue, lease.gen, {"type": "claim", "worker": worker})
-    if outcome.startswith("fail"):
-        diag(f"claim: gh-failure issue={issue} stage={outcome[len('fail-'):]}")
-        return EXIT_TRANSPORT
-    if outcome == "lost":
-        # A 422 is a real loss only if the lease is ANOTHER worker's. A worker
-        # re-claiming its own in-flight generation after a network failure (§5)
-        # already owns the task, so fall through to re-project. An unreadable
-        # owner counts as not ours.
-        if claim_ref_owner(api, issue) != worker:
-            diag(f"claim: lost-cas issue={issue} — another worker holds the claim ref")
+        # A live lease that is not ours holds the task whatever the labels say —
+        # the lock is the whole of "somebody is working on this" (§5), including
+        # in the crash window where no label has landed yet, and including when
+        # the badge says otherwise. This is a LOST claim, not an unclear one:
+        # somebody owns the task. Under protocol/5 the same case surfaced by
+        # attempting the CAS and reading its 422; the generation ladder makes
+        # that attempt worse than useless — creating the next generation would
+        # SUCCEED and take a live lease — so the read answers it instead, with
+        # the same verdict.
+        if self.lease.held_by_other(self.worker):
+            diag(f"claim: lost-cas issue={self.issue} — another worker holds the claim ref")
             return EXIT_LOST
 
-    # The generations we climbed past are garbage now — the holder is the highest
-    # one, so a delete that fails leaves a stray ref, never a second lease.
-    if gen is not None:
-        drop_generations(api, issue, lease.superseded_below(gen))
+        self.steal = self.lease if self.lease.stealable_by(self.worker) else NO_LEASE
+        # The requeued labels still on the issue: dropped by the projection.
+        self.stale_held = [h for h in HELD_LABELS
+                           if h in label_names and h in self.allow_held]
+        return None
 
-    # 3. Projection. State file FIRST so lifecycle hooks can release the claim even
-    #    if the writes below fail; then the in-progress label and claim comment. A
-    #    failure here leaves the claim HELD by the lease — exit 20 says re-check.
-    #    The label is the only thing that can be left behind, and nothing reads it
-    #    (§3): the task stays correctly held, just without its badge, until the
-    #    terminal transition writes the next one.
-    write_claim_state(api.repo, issue, worker)
-    if steal.present and not api.post_comment(
-            issue, lease_expired_body(worker, steal)):
-        diag(f"claim: gh-failure issue={issue} stage=comment (claim held)")
-        return EXIT_TRANSPORT
-    for stale in stale_held:
-        if not api.swap_labels(issue, remove=stale):
-            diag(f"claim: gh-failure issue={issue} stage=label (claim held)")
+    def _take(self) -> int | None:
+        """The CAS — an orphan claim commit, then the create that arbitrates: the
+        generation above whatever was observed. It is the SAME conflict-failing
+        write on the SAME ref name for a first claim, a steal and a renewal, so N
+        thieves racing one expired lease — and the holder racing them with a
+        renewal — produce exactly one winner and nothing to undo. Nothing is
+        deleted to make room, so the task is never observably free mid-steal and
+        no interleaving can hand two workers the same lease."""
+        outcome, gen, _sha = self.refs.advance(
+            self.issue, self.lease.gen,
+            {"type": "claim", "worker": self.worker})
+        if outcome.startswith("fail"):
+            diag(f"claim: gh-failure issue={self.issue} stage={outcome[len('fail-'):]}")
             return EXIT_TRANSPORT
-    if not api.swap_labels(issue, add="in-progress"):
-        diag(f"claim: gh-failure issue={issue} stage=label (claim held)")
-        return EXIT_TRANSPORT
-    body = compose_comment(
-        worker, "Claimed this task — starting work now.",
-        {"type": "claim", "worker": worker},
-    )
-    if not api.post_comment(issue, body):
-        diag(f"claim: gh-failure issue={issue} stage=comment (claim held)")
+        if outcome == "lost":
+            # A 422 is a real loss only if the lease is ANOTHER worker's. A
+            # worker re-claiming its own in-flight generation after a network
+            # failure (§5) already owns the task, so fall through to re-project.
+            # An unreadable owner counts as not ours.
+            if self.refs.owner(self.issue) != self.worker:
+                diag(f"claim: lost-cas issue={self.issue} — another worker holds the claim ref")
+                return EXIT_LOST
+
+        # The generations we climbed past are garbage now — the holder is the
+        # highest one, so a delete that fails leaves a stray ref, never a second
+        # lease.
+        if gen is not None:
+            self.refs.drop(self.issue,
+                             self.lease.superseded_below(gen))
+        return None
+
+    def _project(self) -> int | None:
+        """Write what a human reads. State file FIRST so lifecycle hooks can
+        release the claim even if the writes below fail; then the in-progress
+        label and claim comment. A failure here leaves the claim HELD by the
+        lease — exit 20 says re-check. The label is the only thing that can be
+        left behind, and nothing reads it (§3): the task stays correctly held,
+        just without its badge, until the terminal transition writes the next
+        one."""
+        write_claim_state(self.api.repo, self.issue, self.worker)
+        if self.steal.present and not self.api.post_comment(
+                self.issue, lease_expired_body(self.worker, self.steal)):
+            return self._held("comment")
+        for stale in self.stale_held:
+            if not self.api.swap_labels(self.issue, remove=stale):
+                return self._held("label")
+        if not self.api.swap_labels(self.issue, add="in-progress"):
+            return self._held("label")
+        body = compose_comment(
+            self.worker, "Claimed this task — starting work now.",
+            {"type": "claim", "worker": self.worker},
+        )
+        if not self.api.post_comment(self.issue, body):
+            return self._held("comment")
+        return None
+
+    def _held(self, stage: str) -> int:
+        """A projection write that did not land. The CAS already won, so the
+        claim IS ours — the diagnostic says so, and exit 20 means re-check
+        rather than re-claim."""
+        diag(f"claim: gh-failure issue={self.issue} stage={stage} (claim held)")
         return EXIT_TRANSPORT
 
-    verb = "stole" if steal.present else "claimed"
-    diag(f"claim: {verb} issue={issue} worker={worker}")
-    return EXIT_OK
+
+def _claim_once(api: Api, issue: Issue, worker: Worker,
+                allow_held: Sequence[str] = (), lease: Lease = NO_LEASE,
+                ttl: int | None = None, probe_lease: bool = False) -> int:
+    """The claim sequence as a call. Kept because `acquire_next` injects it as
+    `claim_step` and both subcommands reach it through here."""
+    return ClaimAttempt(api, issue, worker, allow_held=allow_held, lease=lease,
+                        ttl=ttl, probe_lease=probe_lease).run()
 
 
 def cmd_claim(args: argparse.Namespace) -> int:
@@ -260,8 +307,7 @@ def cmd_claim_next(args: argparse.Namespace) -> int:
 
 def acquire_next(api: Api, project: str, worker: Worker,
                  ttl: int | None = None, *,
-                 read: Callable[..., Any] | None = None,
-                 classify: Callable[..., Any] | None = None,
+                 queue: Queue | None = None,
                  claim_step: Callable[..., Any] | None = None,
                  ) -> tuple[int, Json | None]:
     """The whole acquisition — one-task-at-a-time guard, project preflight, queue
@@ -274,13 +320,13 @@ def acquire_next(api: Api, project: str, worker: Worker,
     one implementation and two presentations. Diagnostics go through `diag`, so
     `next-action` can push them to stderr and keep stdout pure JSON.
 
-    `read`, `classify` and `claim_step` default to the real thing and exist so
-    the ITERATION — skip-on-held, skip-on-lost, forward-only, stop-on-transport —
-    can be tested against a scripted queue, candidate list and claim outcomes.
-    All three are expensive collaborators with their own tests; a caller in
-    production passes none of them."""
-    read_fn = read or read_queue
-    classify = classify or classify_queue
+    `queue` and `claim_step` default to the real thing and exist so the
+    ITERATION — skip-on-held, skip-on-lost, forward-only, stop-on-transport — can
+    be tested against a scripted queue and scripted claim outcomes. Reading the
+    queue and filtering it used to be two separate injections; they are one
+    collaborator now, which is what `Queue` is for. Both have their own tests; a
+    caller in production passes neither."""
+    queue = queue or Queue(api)
     claim_step = claim_step or _claim_once
     refused = refuse_second_claim(worker)
     if refused is not None:
@@ -298,7 +344,7 @@ def acquire_next(api: Api, project: str, worker: Worker,
         return (EXIT_UNKNOWN_PROJECT, None)
 
     ttl = lease_ttl_seconds(ttl)
-    read = read_fn(api, ttl=ttl)
+    read = queue.read(ttl=ttl)
     if read is None:
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)
@@ -320,7 +366,7 @@ def acquire_next(api: Api, project: str, worker: Worker,
             return (EXIT_TRANSPORT, None)
         project_reconcile(plan, nodes, leases)
 
-    rows = classify(api, project, include_body=True, read=read)
+    rows = queue.candidates(project, include_body=True, read=read)
     if rows is None:
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)
@@ -365,11 +411,11 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
     is no interleaving in which a live worker is stolen from *and* believes it
     still holds the lease — the loser is told, immediately, with exit 10."""
     api, issue, worker, message = args.api, args.issue, args.worker, args.message
-    lost, head = hold_lease("heartbeat", api, issue, worker)
+    lost, head = Refs(api).hold("heartbeat", issue, worker)
     if lost is not None:
         return lost
-    outcome, gen, _sha = advance_lease(
-        api, issue, head.gen,
+    outcome, gen, _sha = Refs(api).advance(
+        issue, head.gen,
         {"type": "heartbeat", "worker": worker, "msg": message},
     )
     if outcome.startswith("fail"):
@@ -379,7 +425,7 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
         print(f"heartbeat: lost-lease issue={issue} — another worker took the "
               "lease while this one was silent")
         return EXIT_LOST
-    drop_generations(api, issue, [g for g in head.gens if g < gen])
+    Refs(api).drop(issue, [g for g in head.gens if g < gen])
     print(f"heartbeat: renewed issue={issue} worker={worker}")
     return EXIT_OK
 
@@ -401,7 +447,7 @@ def cmd_escalate(args: argparse.Namespace) -> int:
 
     # The lease first (§5): a question posted onto a task another worker is now
     # executing puts a decision in front of the operator that nobody is waiting on.
-    lost, head = hold_lease("escalate", api, issue, worker)
+    lost, head = Refs(api).hold("escalate", issue, worker)
     if lost is not None:
         return lost
 
@@ -418,7 +464,7 @@ def cmd_escalate(args: argparse.Namespace) -> int:
     # Comment and labels first, the lock last: a half-executed escalation leaves
     # the task held, not free with no question on record. A leftover ref is an
     # orphan lock the reaper deletes.
-    if not drop_generations(api, issue, head.gens):
+    if not Refs(api).drop(issue, head.gens):
         print(f"escalate: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
 
@@ -442,7 +488,7 @@ def cmd_deliver(args: argparse.Namespace) -> int:
     # land on a task another worker is now executing — two deliveries, one task,
     # and a review queue that lies. The work is not lost: the branch and PR
     # exist, and re-claiming the task delivers them honestly.
-    lost, head = hold_lease("deliver", api, issue, worker)
+    lost, head = Refs(api).hold("deliver", issue, worker)
     if lost is not None:
         return lost
 
@@ -459,7 +505,7 @@ def cmd_deliver(args: argparse.Namespace) -> int:
         print(f"deliver: gh-failure issue={issue} stage=labels")
         return EXIT_TRANSPORT
     # Result and labels first, the lock last (escalate's ordering rule).
-    if not drop_generations(api, issue, head.gens):
+    if not Refs(api).drop(issue, head.gens):
         print(f"deliver: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
 
@@ -480,7 +526,7 @@ def cmd_release(args: argparse.Namespace) -> int:
     # optional here, and the local state file is cleared either way: the caller
     # (a lifecycle hook, the ambush loop) must not be left retrying forever a
     # release that is no longer its business.
-    lost, head = hold_lease("release", api, issue, worker)
+    lost, head = Refs(api).hold("release", issue, worker)
     if lost is not None:
         if lost == EXIT_LOST:
             clear_claim_state(worker)
@@ -500,7 +546,7 @@ def cmd_release(args: argparse.Namespace) -> int:
         return EXIT_TRANSPORT
     # The ref IS the claim: deleting it is what frees the task (comment and label
     # are narrative). Last, so the task never looks free while half-released.
-    if not drop_generations(api, issue, head.gens):
+    if not Refs(api).drop(issue, head.gens):
         print(f"release: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
 

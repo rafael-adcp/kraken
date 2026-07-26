@@ -27,7 +27,7 @@ SKILL_DIR = os.path.join(HERE, "..", "..", "skills", "unleash")
 sys.path.insert(0, os.path.abspath(SKILL_DIR))
 
 import kraken  # noqa: E402
-from fakes import FakeApi  # noqa: E402
+from fakes import FakeApi, FakeQueue  # noqa: E402
 
 
 def disclaimer_body(worker, *rest):
@@ -262,14 +262,14 @@ class ReapCommandTests(unittest.TestCase):
         # here is the wiring from that read to the plan and the applier.
         ladders = {n: [(1, sha)] for n, sha in refs.items()}
 
-        def read(api, now=None, ttl=None):
+        def read(now=None, ttl=None):
             return (nodes, kraken.lease_state(ladders, commit_meta, self.NOW,
                                               kraken.lease_ttl_seconds(ttl)))
 
         buf = StringIO()
         with redirect_stdout(buf):
-            rc, counts = kraken.reconcile_pass(self._api(), worker, ttl,
-                                               read=read)
+            rc, counts = kraken.reconcile_pass(
+                self._api(), worker, ttl, queue=FakeQueue(read=read))
         return rc, counts, buf.getvalue()
 
     @staticmethod
@@ -336,7 +336,8 @@ class ReapCommandTests(unittest.TestCase):
     def test_transport_failure_on_the_queue_read_is_twenty(self):
         with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
             rc, counts = kraken.reconcile_pass(
-                self._api(), "w", None, read=lambda api, now=None, ttl=None: None)
+                self._api(), "w", None,
+                queue=FakeQueue(read=lambda now=None, ttl=None: None))
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
         self.assertIsNone(counts)
 

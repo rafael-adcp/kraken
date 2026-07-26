@@ -12,15 +12,15 @@ from typing import Any, Callable
 from .contract import EXIT_TRANSPORT, EXIT_UNKNOWN_PROJECT, Epoch
 from .transport import Api
 from .lease import wake_retry_mtime
-from .queue import classify_queue
+from .queue import Queue
 from .claim import verify_project
 
 # --- subcommand: watch -------------------------------------------------------
 
 def snapshot_state(api: Api, project: str) -> str | None:
     """The queue snapshot list-startable emits in --snapshot mode, via the same
-    classify_queue. Returns the snapshot text, or None on transport failure."""
-    rows = classify_queue(api, project)
+    Queue.candidates. Returns the snapshot text, or None on transport failure."""
+    rows = Queue(api).candidates(project)
     if rows is None:
         return None
     return "\n".join(

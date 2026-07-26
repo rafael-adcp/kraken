@@ -65,6 +65,21 @@ def recording_api(repo: str = DEFAULT_REPO, **methods):
     return FakeApi(repo, **defaults), writes
 
 
+class FakeQueue(kraken.Queue):
+    """A `Queue` whose methods the test supplies, same contract as `FakeApi`.
+
+    Anything not supplied keeps the real implementation over the given `api`, so
+    a test that scripts only `read` still exercises the real candidate filter."""
+
+    def __init__(self, api=None, **methods):
+        super().__init__(api if api is not None else FakeApi())
+        for name, fn in methods.items():
+            if not callable(getattr(kraken.Queue, name, None)):
+                raise AttributeError(
+                    f"Queue has no method {name!r} to fake — check the spelling")
+            setattr(self, name, fn)
+
+
 def paged(items, per_page=None):
     """A `request` stand-in that serves `items` as a paginated REST list, so a
     test exercises the real pagination loop instead of asserting against a

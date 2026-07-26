@@ -13,8 +13,8 @@ from .contract import (
 from .comments import compose_comment, parse_marker
 from .transport import Api
 from .lease import LEASE_EXPIRY_ESCALATE, Lease
-from .refs import drop_generations
-from .queue import comment_nodes_of, label_names_of, read_queue
+from .refs import Refs
+from .queue import Queue, comment_nodes_of, label_names_of
 
 # --- coordination-repo subcommands -------------------------------------------
 # The logic-bearing coordination passes (reconcile, validate-task) live here
@@ -168,7 +168,7 @@ def apply_reconcile(api: Api, plan: Sequence[ReconcileAction],
         rule, num = action["rule"], action["issue"]
 
         if rule == "orphan-lock":
-            if not drop_generations(api, num, action["gens"]):
+            if not Refs(api).drop(num, action["gens"]):
                 return _reconcile_failure("ref", num)
             diag(f"reap: orphan-lock issue={num} — claim ref deleted")
 
@@ -182,7 +182,7 @@ def apply_reconcile(api: Api, plan: Sequence[ReconcileAction],
             if not api.post_comment(
                     num, stale_claim_body(worker, action["reason"])):
                 return _reconcile_failure("comment", num)
-            if not drop_generations(api, num, action["gens"]):
+            if not Refs(api).drop(num, action["gens"]):
                 return _reconcile_failure("ref", num)
             diag(f"reap: reclaimed issue={num} ({action['reason']})")
 
@@ -210,18 +210,16 @@ def project_reconcile(plan: Sequence[ReconcileAction], nodes: list[Node],
 
 
 def reconcile_pass(api: Api, worker: Worker, ttl: int | None = None, *,
-                   read: Callable[..., Any] | None = None,
-                   ) -> tuple[int, Json | None]:
+                   queue: Queue | None = None) -> tuple[int, Json | None]:
     """The reconcile pass as DATA: `(exit_code, counts)`, where counts is None on
     any transport failure. `cmd_reap` is its line-oriented rendering, the same
     split `acquire_next`/`cmd_claim_next` use.
 
-    `read` defaults to the real queue read and is injectable so the wiring —
-    which failure stages which exit, whether the lease clock reaches the plan —
-    can be tested against a scripted queue. The rules themselves are pure and
-    tested through `reconcile_plan` directly."""
-    read = read or read_queue
-    got = read(api, ttl=ttl)
+    `queue` defaults to the real one and is injectable so the wiring — which
+    failure stages which exit, whether the lease clock reaches the plan — can be
+    tested against a scripted queue. The rules themselves are pure and tested
+    through `reconcile_plan` directly."""
+    got = (queue or Queue(api)).read(ttl=ttl)
     if got is None:
         print("reap: gh-failure stage=list", file=sys.stderr)
         return (EXIT_TRANSPORT, None)
