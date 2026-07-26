@@ -13,7 +13,7 @@ from .contract import (
     CommentRecord, EXIT_OK, EXIT_TRANSPORT, EXIT_USAGE, SKILL_DIR
 )
 from .comments import make_marker, parse_marker
-from .refs import claim_refs_of, drop_generations
+from .refs import Refs
 from .queue import is_empty_section, section_body
 from .render import render_init
 
@@ -290,8 +290,8 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     # could linger past the close, and so could a generation a steal failed to
     # collect — drop every one of them. Idempotent: an already-absent ref counts
     # as deleted, and a task with no lease reads as an empty ladder.
-    ok, refs = claim_refs_of(api, issue)
-    if not ok or not drop_generations(api, issue, [g for g, _s in refs]):
+    ok, refs = Refs(api).of(issue)
+    if not ok or not Refs(api).drop(issue, [g for g, _s in refs]):
         print(f"cleanup: gh-failure stage=ref issue={issue}", file=sys.stderr)
         return EXIT_TRANSPORT
 

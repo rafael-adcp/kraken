@@ -18,7 +18,7 @@ from .lease import (
     Lease, UNREADABLE_LEASE, clear_claim_state, format_iso,
     lease_renew_seconds, lease_ttl_seconds, open_claim_record
 )
-from .refs import claim_ref_head
+from .refs import Refs
 from .queue import is_empty_section, section_body
 from .render import render_next_action
 from .claim import acquire_next
@@ -350,7 +350,7 @@ class NextAction:
                 record, self.api.repo, self.worker, UNREADABLE_LEASE, None)
             return (verdict, detail, None)
         issue = record["issue"]
-        head = claim_ref_head(self.api, issue)
+        head = Refs(self.api).head(issue)
         # One GET serves both the finished-task check and the brief.
         issue_obj = None if head.unknown else self.api.issue_detail(issue)
         verdict, detail = resume_verdict(

@@ -20,7 +20,7 @@ from .transport import Api
 from .lease import (
     Lease, holder_shas, lease_state, lease_ttl_seconds, live_leases
 )
-from .refs import claim_ref_list, resolve_commit_meta
+from .refs import Refs
 from .queue import (
     claim_meta_of, fetch_open_tasks, hydrate_comment_windows,
     is_empty_section, label_names_of, project_names_of, requeued_labels,
@@ -262,11 +262,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     if nodes is None:
         print("status: gh-failure stage=list", file=sys.stderr)
         return EXIT_TRANSPORT
-    claim_refs = claim_ref_list(api)
+    claim_refs = Refs(api).all()
     if claim_refs is None:
         print("status: gh-failure stage=refs", file=sys.stderr)
         return EXIT_TRANSPORT
-    commit_meta = resolve_commit_meta(api, holder_shas(claim_refs))
+    commit_meta = Refs(api).commit_meta(holder_shas(claim_refs))
     if commit_meta is None:
         print("status: gh-failure stage=commits", file=sys.stderr)
         return EXIT_TRANSPORT

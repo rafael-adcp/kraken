@@ -143,7 +143,7 @@ class RefCasTests(unittest.TestCase):
             return 201, json.dumps({"sha": "abc123"})
 
         api = FakeApi("o/tasks", request=fake_request)
-        sha = kraken.create_claim_commit(api, {"type": "claim", "worker": "w1"})
+        sha = kraken.Refs(api).commit({"type": "claim", "worker": "w1"})
         self.assertEqual(sha, "abc123")
         self.assertEqual(captured["method"], "POST")
         self.assertIn("repos/o/tasks/git/commits", captured["path"])
@@ -166,7 +166,7 @@ class RefCasTests(unittest.TestCase):
             return 201, json.dumps({"sha": "def456"})
 
         api = FakeApi("o/tasks", request=fake_request)
-        sha = kraken.create_claim_commit(api, {"type": "claim", "worker": "w1"})
+        sha = kraken.Refs(api).commit({"type": "claim", "worker": "w1"})
         self.assertEqual(sha, "def456")
         self.assertEqual(trees, [kraken.EMPTY_TREE_SHA, "headtree"],
                          "must retry with the HEAD tree after the empty-tree 422")
@@ -175,18 +175,18 @@ class RefCasTests(unittest.TestCase):
         api = FakeApi(request=lambda m, p, body=None: (
             kraken.STATUS_NETWORK_FAILURE, ""))
         self.assertIsNone(
-            kraken.create_claim_commit(api, {"type": "claim", "worker": "w"}))
+            kraken.Refs(api).commit({"type": "claim", "worker": "w"}))
 
     def test_claim_ref_create_maps_the_cas_outcomes(self):
         api = FakeApi(request=lambda m, p, body=None: (201, "{}"))
-        self.assertEqual(kraken.claim_ref_create(api, 7, 1, "sha"), "won")
+        self.assertEqual(kraken.Refs(api).create(7, 1, "sha"), "won")
 
         # HTTP 422 IS the CAS-lost signal — an integer status, not a stderr scrape.
         api = FakeApi(request=lambda m, p, body=None: (422, ""))
-        self.assertEqual(kraken.claim_ref_create(api, 7, 1, "sha"), "lost")
+        self.assertEqual(kraken.Refs(api).create(7, 1, "sha"), "lost")
 
         api = FakeApi(request=lambda m, p, body=None: (500, ""))
-        self.assertEqual(kraken.claim_ref_create(api, 7, 1, "sha"), "fail")
+        self.assertEqual(kraken.Refs(api).create(7, 1, "sha"), "fail")
 
     def test_advance_lease_creates_the_next_generation(self):
         # The single contended write behind a claim, a steal AND a renewal: it
@@ -201,8 +201,8 @@ class RefCasTests(unittest.TestCase):
             return (201, "{}")
 
         api = FakeApi(request=fake_request)
-        verdict, gen, sha = kraken.advance_lease(
-            api, 7, 4, {"type": "claim", "worker": "w1"})
+        verdict, gen, sha = kraken.Refs(api).advance(
+            7, 4, {"type": "claim", "worker": "w1"})
         self.assertEqual((verdict, gen, sha), ("won", 5, "fresh"))
         self.assertEqual(created["ref"], "refs/kraken/claims/7/5")
         self.assertEqual(created["sha"], "fresh")
@@ -214,19 +214,19 @@ class RefCasTests(unittest.TestCase):
             return (422, "")
 
         api = FakeApi(request=fake_request)
-        self.assertEqual(kraken.advance_lease(api, 7, 1, {"type": "claim"}),
+        self.assertEqual(kraken.Refs(api).advance(7, 1, {"type": "claim"}),
                          ("lost", None, None))
 
     def test_claim_ref_delete_tolerates_a_missing_ref(self):
         api = FakeApi(request=lambda m, p, body=None: (204, ""))
-        self.assertTrue(kraken.claim_ref_delete(api, 7, 1))
+        self.assertTrue(kraken.Refs(api).delete(7, 1))
         # Already gone (422) is success — the delete is idempotent.
         api = FakeApi(request=lambda m, p, body=None: (422, ""))
-        self.assertTrue(kraken.claim_ref_delete(api, 7, 1))
+        self.assertTrue(kraken.Refs(api).delete(7, 1))
         # A real transport fault is not tolerated.
         api = FakeApi(request=lambda m, p, body=None: (
             kraken.STATUS_NETWORK_FAILURE, ""))
-        self.assertFalse(kraken.claim_ref_delete(api, 7, 1))
+        self.assertFalse(kraken.Refs(api).delete(7, 1))
 
     def test_dropping_generations_reports_a_partial_failure(self):
         seen = []
@@ -236,7 +236,7 @@ class RefCasTests(unittest.TestCase):
             return (204, "") if path.endswith("/1") else (500, "")
 
         api = FakeApi(request=fake_request)
-        self.assertFalse(kraken.drop_generations(api, 7, [1, 2]))
+        self.assertFalse(kraken.Refs(api).drop(7, [1, 2]))
         self.assertEqual(len(seen), 2, "a failed delete must not stop the rest")
 
     def test_claim_ref_list_groups_generations_per_issue(self):
@@ -246,7 +246,7 @@ class RefCasTests(unittest.TestCase):
             {"ref": "refs/kraken/claims/12/1", "object": {"sha": "sha12"}},
             {"ref": "refs/heads/main", "object": {"sha": "nope"}},
         ])))
-        self.assertEqual(kraken.claim_ref_list(api),
+        self.assertEqual(kraken.Refs(api).all(),
                          {7: [(0, "sha7g0"), (2, "sha7g2")], 12: [(1, "sha12")]})
 
     def test_holder_shas_reads_only_the_highest_generation(self):
@@ -263,17 +263,17 @@ class RefCasTests(unittest.TestCase):
             {"ref": "refs/kraken/claims/12/1", "object": {"sha": "mine"}},
             {"ref": "refs/kraken/claims/120/9", "object": {"sha": "theirs"}},
         ])))
-        self.assertEqual(kraken.claim_refs_of(api, 12), (True, [(1, "mine")]))
+        self.assertEqual(kraken.Refs(api).of(12), (True, [(1, "mine")]))
 
     def test_claim_refs_of_separates_absent_from_unreadable(self):
         api = FakeApi(request=lambda m, p, body=None: (200, "[]"))
-        self.assertEqual(kraken.claim_refs_of(api, 7), (True, []))
+        self.assertEqual(kraken.Refs(api).of(7), (True, []))
         api = FakeApi(request=lambda m, p, body=None: (500, ""))
-        self.assertEqual(kraken.claim_refs_of(api, 7), (False, []))
+        self.assertEqual(kraken.Refs(api).of(7), (False, []))
 
     def test_claim_ref_list_transport_failure_is_none(self):
         api = FakeApi(request=lambda m, p, body=None: (500, ""))
-        self.assertIsNone(kraken.claim_ref_list(api))
+        self.assertIsNone(kraken.Refs(api).all())
 
     def test_claim_ref_owner_names_the_ref_holder(self):
         # The §5 re-check discriminator: a 422 is a real loss only when the
@@ -289,17 +289,17 @@ class RefCasTests(unittest.TestCase):
 
         api = FakeApi(request=present, graphql=lambda q: {"data": {"repository": {
             "c0": {"committedDate": "t", "message": clm("w1")}}}})
-        self.assertEqual(kraken.claim_ref_owner(api, 7), "w1")
-        self.assertEqual(kraken.claim_ref_owner(api, "7"), "w1")
+        self.assertEqual(kraken.Refs(api).owner(7), "w1")
+        self.assertEqual(kraken.Refs(api).owner("7"), "w1")
         # No lease at all → None (treated as not-ours by the caller).
-        self.assertIsNone(kraken.claim_ref_owner(api, 9))
+        self.assertIsNone(kraken.Refs(api).owner(9))
         # Transport failure → None, never a guessed owner — an ambiguous read
         # must never turn a real CAS loss into a false win.
         api = FakeApi(request=lambda m, p, body=None: (500, ""))
-        self.assertIsNone(kraken.claim_ref_owner(api, 7))
+        self.assertIsNone(kraken.Refs(api).owner(7))
         api = FakeApi(request=lambda m, p, body=None: (
             kraken.STATUS_NETWORK_FAILURE, ""))
-        self.assertIsNone(kraken.claim_ref_owner(api, 7))
+        self.assertIsNone(kraken.Refs(api).owner(7))
 
     def test_resolve_commit_meta_batches_and_parses(self):
         captured = {}
@@ -310,7 +310,7 @@ class RefCasTests(unittest.TestCase):
                 "c0": {"committedDate": "2026-07-01T00:00:00Z", "message": clm("w1")}}}}
 
         api = FakeApi("o/tasks", graphql=fake_graphql)
-        meta = kraken.resolve_commit_meta(api, ["sha1"])
+        meta = kraken.Refs(api).commit_meta(["sha1"])
         self.assertIn('object(oid: "sha1")', captured["q"])
         self.assertEqual(meta["sha1"]["message"], clm("w1"))
         self.assertEqual(meta["sha1"]["committedDate"], "2026-07-01T00:00:00Z")
@@ -318,7 +318,7 @@ class RefCasTests(unittest.TestCase):
     def test_resolve_commit_meta_empty_input_is_no_call(self):
         api = FakeApi(graphql=lambda q: self.fail(
             "graphql must not be called for []"))
-        self.assertEqual(kraken.resolve_commit_meta(api, []), {})
+        self.assertEqual(kraken.Refs(api).commit_meta([]), {})
 
     def test_claim_meta_of_decodes_worker_msg_and_anchor(self):
         cm = {"s1": {"committedDate": "2026-07-01T00:00:00Z",

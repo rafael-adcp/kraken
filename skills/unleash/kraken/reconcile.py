@@ -13,7 +13,7 @@ from .contract import (
 from .comments import compose_comment, parse_marker
 from .transport import Api
 from .lease import LEASE_EXPIRY_ESCALATE, Lease
-from .refs import drop_generations
+from .refs import Refs
 from .queue import comment_nodes_of, label_names_of, read_queue
 
 # --- coordination-repo subcommands -------------------------------------------
@@ -168,7 +168,7 @@ def apply_reconcile(api: Api, plan: Sequence[ReconcileAction],
         rule, num = action["rule"], action["issue"]
 
         if rule == "orphan-lock":
-            if not drop_generations(api, num, action["gens"]):
+            if not Refs(api).drop(num, action["gens"]):
                 return _reconcile_failure("ref", num)
             diag(f"reap: orphan-lock issue={num} — claim ref deleted")
 
@@ -182,7 +182,7 @@ def apply_reconcile(api: Api, plan: Sequence[ReconcileAction],
             if not api.post_comment(
                     num, stale_claim_body(worker, action["reason"])):
                 return _reconcile_failure("comment", num)
-            if not drop_generations(api, num, action["gens"]):
+            if not Refs(api).drop(num, action["gens"]):
                 return _reconcile_failure("ref", num)
             diag(f"reap: reclaimed issue={num} ({action['reason']})")
 

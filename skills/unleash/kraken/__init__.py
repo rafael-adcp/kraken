@@ -69,10 +69,7 @@ from .lease import (
     write_claim_state
 )
 from .refs import (
-    CLAIM_REF_PREFIX, EMPTY_TREE_SHA, advance_lease, claim_ref,
-    claim_ref_create, claim_ref_delete, claim_ref_head, claim_ref_list,
-    claim_ref_owner, claim_refs_of, create_claim_commit, drop_generations,
-    hold_lease, parse_claim_ref, resolve_commit_meta
+    CLAIM_REF_PREFIX, EMPTY_TREE_SHA, Refs, claim_ref, parse_claim_ref
 )
 from .queue import (
     COMMENT_HYDRATE_CHUNK, NO_RESPONSE_PLACEHOLDER, QUEUE_COMMENT_WINDOW,

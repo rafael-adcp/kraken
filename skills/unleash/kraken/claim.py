@@ -22,10 +22,7 @@ from .lease import (
     Lease, NO_LEASE, clear_claim_state, format_age, lease_ttl_seconds,
     live_leases, refuse_second_claim, write_claim_state
 )
-from .refs import (
-    advance_lease, claim_ref_head, claim_ref_owner, drop_generations,
-    hold_lease
-)
+from .refs import Refs
 from .queue import classify_queue, read_queue, requeued_labels
 from .reconcile import apply_reconcile, project_reconcile, reconcile_plan
 
@@ -63,7 +60,7 @@ def probe_lease_state(api: Api, issue: Issue, ttl: int) -> Lease:
     the one this saw, so a holder that renewed in the meantime already took that
     generation and the challenger simply loses. This read decides whether to
     *try*, never who wins."""
-    head = claim_ref_head(api, issue)
+    head = Refs(api).head(issue)
     if not head.present:
         return head  # NO_LEASE or UNREADABLE_LEASE — the caller tells them apart
     # `claim_ref_head` cannot know the TTL, so it reports the clock and leaves
@@ -184,8 +181,8 @@ class ClaimAttempt:
         renewal — produce exactly one winner and nothing to undo. Nothing is
         deleted to make room, so the task is never observably free mid-steal and
         no interleaving can hand two workers the same lease."""
-        outcome, gen, _sha = advance_lease(
-            self.api, self.issue, self.lease.gen,
+        outcome, gen, _sha = Refs(self.api).advance(
+            self.issue, self.lease.gen,
             {"type": "claim", "worker": self.worker})
         if outcome.startswith("fail"):
             diag(f"claim: gh-failure issue={self.issue} stage={outcome[len('fail-'):]}")
@@ -195,7 +192,7 @@ class ClaimAttempt:
             # worker re-claiming its own in-flight generation after a network
             # failure (§5) already owns the task, so fall through to re-project.
             # An unreadable owner counts as not ours.
-            if claim_ref_owner(self.api, self.issue) != self.worker:
+            if Refs(self.api).owner(self.issue) != self.worker:
                 diag(f"claim: lost-cas issue={self.issue} — another worker holds the claim ref")
                 return EXIT_LOST
 
@@ -203,7 +200,7 @@ class ClaimAttempt:
         # highest one, so a delete that fails leaves a stray ref, never a second
         # lease.
         if gen is not None:
-            drop_generations(self.api, self.issue,
+            Refs(self.api).drop(self.issue,
                              self.lease.superseded_below(gen))
         return None
 
@@ -414,11 +411,11 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
     is no interleaving in which a live worker is stolen from *and* believes it
     still holds the lease — the loser is told, immediately, with exit 10."""
     api, issue, worker, message = args.api, args.issue, args.worker, args.message
-    lost, head = hold_lease("heartbeat", api, issue, worker)
+    lost, head = Refs(api).hold("heartbeat", issue, worker)
     if lost is not None:
         return lost
-    outcome, gen, _sha = advance_lease(
-        api, issue, head.gen,
+    outcome, gen, _sha = Refs(api).advance(
+        issue, head.gen,
         {"type": "heartbeat", "worker": worker, "msg": message},
     )
     if outcome.startswith("fail"):
@@ -428,7 +425,7 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
         print(f"heartbeat: lost-lease issue={issue} — another worker took the "
               "lease while this one was silent")
         return EXIT_LOST
-    drop_generations(api, issue, [g for g in head.gens if g < gen])
+    Refs(api).drop(issue, [g for g in head.gens if g < gen])
     print(f"heartbeat: renewed issue={issue} worker={worker}")
     return EXIT_OK
 
@@ -450,7 +447,7 @@ def cmd_escalate(args: argparse.Namespace) -> int:
 
     # The lease first (§5): a question posted onto a task another worker is now
     # executing puts a decision in front of the operator that nobody is waiting on.
-    lost, head = hold_lease("escalate", api, issue, worker)
+    lost, head = Refs(api).hold("escalate", issue, worker)
     if lost is not None:
         return lost
 
@@ -467,7 +464,7 @@ def cmd_escalate(args: argparse.Namespace) -> int:
     # Comment and labels first, the lock last: a half-executed escalation leaves
     # the task held, not free with no question on record. A leftover ref is an
     # orphan lock the reaper deletes.
-    if not drop_generations(api, issue, head.gens):
+    if not Refs(api).drop(issue, head.gens):
         print(f"escalate: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
 
@@ -491,7 +488,7 @@ def cmd_deliver(args: argparse.Namespace) -> int:
     # land on a task another worker is now executing — two deliveries, one task,
     # and a review queue that lies. The work is not lost: the branch and PR
     # exist, and re-claiming the task delivers them honestly.
-    lost, head = hold_lease("deliver", api, issue, worker)
+    lost, head = Refs(api).hold("deliver", issue, worker)
     if lost is not None:
         return lost
 
@@ -508,7 +505,7 @@ def cmd_deliver(args: argparse.Namespace) -> int:
         print(f"deliver: gh-failure issue={issue} stage=labels")
         return EXIT_TRANSPORT
     # Result and labels first, the lock last (escalate's ordering rule).
-    if not drop_generations(api, issue, head.gens):
+    if not Refs(api).drop(issue, head.gens):
         print(f"deliver: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
 
@@ -529,7 +526,7 @@ def cmd_release(args: argparse.Namespace) -> int:
     # optional here, and the local state file is cleared either way: the caller
     # (a lifecycle hook, the ambush loop) must not be left retrying forever a
     # release that is no longer its business.
-    lost, head = hold_lease("release", api, issue, worker)
+    lost, head = Refs(api).hold("release", issue, worker)
     if lost is not None:
         if lost == EXIT_LOST:
             clear_claim_state(worker)
@@ -549,7 +546,7 @@ def cmd_release(args: argparse.Namespace) -> int:
         return EXIT_TRANSPORT
     # The ref IS the claim: deleting it is what frees the task (comment and label
     # are narrative). Last, so the task never looks free while half-released.
-    if not drop_generations(api, issue, head.gens):
+    if not Refs(api).drop(issue, head.gens):
         print(f"release: gh-failure issue={issue} stage=ref")
         return EXIT_TRANSPORT
 

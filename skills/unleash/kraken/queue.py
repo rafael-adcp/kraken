@@ -18,7 +18,7 @@ from .transport import Api
 from .lease import (
     Lease, holder_shas, lease_state, lease_ttl_seconds, live_leases
 )
-from .refs import claim_ref_list, resolve_commit_meta
+from .refs import Refs
 
 # --- subcommand: list-startable ---------------------------------------------
 #
@@ -334,10 +334,10 @@ def read_queue(
     nodes = fetch_open_tasks(api)
     if nodes is None:
         return None
-    claim_refs = claim_ref_list(api)
+    claim_refs = Refs(api).all()
     if claim_refs is None:
         return None
-    commit_meta = resolve_commit_meta(api, holder_shas(claim_refs))
+    commit_meta = Refs(api).commit_meta(holder_shas(claim_refs))
     if commit_meta is None:
         return None
     leases = lease_state(claim_refs, commit_meta,
