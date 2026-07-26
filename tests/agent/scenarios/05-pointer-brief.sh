@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Scenario: the subagent briefed BY POINTER still honors the rules.
 #
-# SKILL.md step 2 no longer restates Conventions / Bundled transition program /
-# Delivering the work into the subagent's prompt — it points at
-# `<this skill's folder>/SKILL.md` and names the sections to read (only
-# Authorization boundaries stays inline). The rules the driver stopped repeating
+# SKILL.md's "Context isolation" note does not restate the rules into the
+# subagent's prompt — the prompt is the next-action envelope plus a pointer to
+# `<this skill's folder>/SKILL.md` (and DELIVERY.md through it); only
+# Authorization boundaries stays inline. The rules the driver stopped repeating
 # are therefore only honored if the subagent actually reads them, so this
 # scenario pins the three that a rule-less worker would drop first:
 #
-#   1. the attribution disclaimer on every coordination-repo comment (Conventions);
+#   1. the attribution disclaimer on every coordination-repo comment (Attribution);
 #   2. the Co-Authored-By / Kraken-Task trailers on the delivered branch
-#      (Delivering the work);
+#      (DELIVERY.md);
 #   3. the no-merge veto — default branch untouched, no merge attempted, task
 #      never closed by the worker (Authorization boundaries).
 #

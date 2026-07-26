@@ -1702,5 +1702,193 @@ class BundledAssetTests(unittest.TestCase):
                             "%s has no bundled bytes to install" % name)
 
 
+# --- next-action -------------------------------------------------------------
+# The verdict is a pure function of what was observed, so every branch is
+# exercised here without a stub: what a recorded claim is worth, and what the
+# envelope promises for it. The wire-level behaviour lives in
+# tests/conformance/test_39_next_action.py.
+
+def rec(issue="7", repo="OWNER/tasks", worker="w1"):
+    """A claim-<worker>.json record as open_claim_record returns it."""
+    return {"repo": repo, "issue": str(issue), "worker": worker}
+
+
+def ref_head(worker="w1", epoch=1000.0, gen=1):
+    return {"gen": gen, "sha": "abc", "worker": worker, "epoch": epoch,
+            "gens": list(range(1, gen + 1))}
+
+
+def issue_obj(state="open", labels=("kraken-task", "in-progress")):
+    return {"state": state, "title": "t", "body": "b",
+            "labels": [{"name": n} for n in labels]}
+
+
+class ResumeVerdictTests(unittest.TestCase):
+    """PROTOCOL.md §5.3 as a decision table: who owns the lease decides whether a
+    write is legal, and an ambiguous read is never a decision."""
+
+    # None is a meaningful VALUE for head/obj ("no ref" / "the read failed"), so
+    # the defaults need a sentinel of their own.
+    DEFAULT = object()
+
+    def verdict(self, *, record=None, repo="OWNER/tasks", worker="w1",
+                ref_state="ok", head=DEFAULT, obj=DEFAULT, now=2000.0, ttl=1800):
+        return kraken.resume_verdict(
+            record or rec(), repo, worker, ref_state,
+            ref_head() if head is self.DEFAULT else head,
+            issue_obj() if obj is self.DEFAULT else obj, now, ttl)
+
+    def test_live_lease_of_ours_resumes(self):
+        v, detail = self.verdict(head=ref_head(epoch=1900.0), now=2000.0)
+        self.assertEqual(v, "execute", "our own live lease must resume")
+        self.assertEqual(detail["generation"], 1, "generation not reported")
+
+    def test_expired_but_ours_still_resumes(self):
+        # §5.3: expired-but-unstolen is still ours — completing the transition
+        # frees it honestly. The caller is told to renew, not to stop.
+        v, _ = self.verdict(head=ref_head(epoch=1.0), now=99999.0)
+        self.assertEqual(v, "execute",
+                         "an expired lease nobody took is still ours to finish")
+
+    def test_stolen_lease_abandons(self):
+        v, detail = self.verdict(head=ref_head(worker="w-thief", gen=2))
+        self.assertEqual(v, "abandon", "a stolen lease must not be written through")
+        self.assertEqual(detail["reason"], "lease-stolen")
+        self.assertIn("w-thief", detail["detail"], "the new holder is not named")
+
+    def test_missing_ref_on_an_open_task_abandons(self):
+        v, detail = self.verdict(ref_state="absent", head=None)
+        self.assertEqual(v, "abandon", "a vanished lease holds nothing")
+        self.assertEqual(detail["reason"], "lease-gone")
+
+    def test_unreadable_lease_is_a_retry_not_a_loss(self):
+        v, detail = self.verdict(ref_state="error", head=None)
+        self.assertEqual(v, "retry",
+                         "an ambiguous read must never be turned into a verdict")
+        self.assertEqual(detail["reason"], "lease-unreadable")
+
+    def test_unreadable_issue_is_a_retry(self):
+        v, detail = self.verdict(obj=None)
+        self.assertEqual(v, "retry", "a failed issue read is ambiguous, not a loss")
+        self.assertEqual(detail["reason"], "issue-unreadable")
+
+    def test_terminal_label_without_our_lease_is_resolved(self):
+        # The transition landed; only the local scratch file lagged. Keep
+        # draining rather than report a loss.
+        v, detail = self.verdict(
+            ref_state="absent", head=None,
+            obj=issue_obj(labels=("kraken-task", "awaiting-merge")))
+        self.assertEqual(v, "resolved", "a delivered task is not an abandonment")
+        self.assertEqual(detail["reason"], "already-resolved")
+
+    def test_closed_task_under_our_own_lease_is_resolved(self):
+        v, detail = self.verdict(obj=issue_obj(state="closed"))
+        self.assertEqual(v, "resolved", "a closed task has nothing to resume")
+        self.assertEqual(detail["reason"], "task-finished")
+
+    def test_claim_in_another_repo_blocks(self):
+        # One task at a time is repo-independent, and it is decided before any
+        # read — hence the None observations.
+        v, detail = kraken.resume_verdict(
+            rec(repo="OWNER/other"), "OWNER/tasks", "w1",
+            None, None, None, 2000.0, 1800)
+        self.assertEqual(v, "blocked", "a claim elsewhere must block this drain")
+        self.assertEqual(detail["reason"], "claim-elsewhere")
+        self.assertIn("OWNER/other#7", detail["detail"],
+                      "the blocking claim is not named")
+
+
+class NextActionEnvelopeTests(unittest.TestCase):
+    """The envelope is the contract the agent reads, so its shape is pinned."""
+
+    def test_execute_carries_fully_interpolated_commands(self):
+        env = kraken.next_action_envelope(
+            "execute", "OWNER/tasks", "env-1", issue=12, resumed=False,
+            script="/plugins/with space/kraken.py")
+        self.assertEqual(set(env["then"]),
+                         {"renew", "note", "escalate", "deliver", "release"},
+                         "the legal next writes drifted")
+        for name, command in env["then"].items():
+            self.assertIn("OWNER/tasks 12 env-1", command,
+                          "then.%s is not interpolated" % name)
+            self.assertIn('"/plugins/with space/kraken.py"', command,
+                          "then.%s does not quote a path containing spaces" % name)
+
+    def test_verdicts_with_no_legal_write_offer_none(self):
+        for action in ("idle", "abandon", "stop", "retry"):
+            env = kraken.next_action_envelope(action, "OWNER/tasks", "env-1",
+                                              issue=12, reason="x")
+            self.assertNotIn("then", env,
+                             "%s must offer no next write — none is legal" % action)
+
+    def test_blocked_names_the_held_claim_and_targets_it(self):
+        # The held claim may live in ANOTHER repo. Pairing the top-level repo
+        # with its issue number would name a task that does not exist, and a
+        # worker acting on it would write to the wrong repo's issue.
+        env = kraken.next_action_envelope(
+            "blocked", "OWNER/tasks", "env-1", reason="claim-elsewhere",
+            holding={"repo": "OWNER/other", "issue": "7"},
+            script="/plugins/kraken.py")
+        self.assertNotIn("issue", env,
+                         "blocked must not carry a bare top-level issue — it "
+                         "would read against the repo being drained")
+        self.assertEqual(env["holding"], {"repo": "OWNER/other", "issue": 7},
+                         "the held claim is not named")
+        # A write IS legal here — it is what resolves the block — so the commands
+        # must be present and must target the HELD claim.
+        for name in ("deliver", "escalate", "release"):
+            self.assertIn("OWNER/other 7 env-1", env["then"][name],
+                          "then.%s does not target the held claim" % name)
+            self.assertNotIn("OWNER/tasks", env["then"][name],
+                             "then.%s targets the drained repo, not the held "
+                             "claim" % name)
+
+    def test_every_action_has_an_exit_code(self):
+        self.assertEqual(set(kraken.NEXT_ACTIONS), set(kraken.NEXT_ACTION_EXIT),
+                         "an action without an exit code is unreachable from a "
+                         "shell, and an exit code without an action is dead")
+
+    def test_lease_block_reports_the_renewal_contract(self):
+        block = kraken.lease_block(1000.0, 1200.0, 1800, generation=3)
+        self.assertEqual(block["generation"], 3)
+        self.assertEqual(block["seconds_remaining"], 1600, "TTL math is wrong")
+        self.assertFalse(block["renew_now"], "a live lease does not need renewing")
+        self.assertEqual(block["renew_every_seconds"],
+                         kraken.lease_renew_seconds(1800),
+                         "the cadence must come from the TTL, never a literal")
+        self.assertEqual(block["expires_at"], kraken.format_iso(2800.0),
+                         "expires_at is not the anchor plus the TTL")
+
+    def test_lease_block_flags_an_expired_lease(self):
+        block = kraken.lease_block(1000.0, 9999.0, 1800)
+        self.assertTrue(block["renew_now"], "an expired lease must say so")
+        self.assertLess(block["seconds_remaining"], 0,
+                        "an expired lease reports the overrun honestly")
+
+    def test_format_iso_round_trips_through_parse_iso(self):
+        self.assertEqual(kraken.parse_iso(kraken.format_iso(1700000000.0)),
+                         1700000000.0, "a timestamp we emit must read back")
+
+
+class TaskBriefTests(unittest.TestCase):
+    def test_sections_are_split_and_placeholders_read_as_empty(self):
+        body = ("### Goal\nship it\n\n### Acceptance\nmake check\n\n"
+                "### Notes\n_No response_\n")
+        brief = kraken.task_brief("a title", body)
+        self.assertEqual(brief["goal"], "ship it")
+        self.assertEqual(brief["acceptance"], "make check")
+        self.assertEqual(brief["notes"], "",
+                         "the issue-form placeholder must not reach the agent as "
+                         "if it were a note")
+        self.assertEqual(brief["body"], body,
+                         "the raw body must survive for hand-written issues that "
+                         "carry no headings")
+
+    def test_hand_written_issue_keeps_its_body(self):
+        brief = kraken.task_brief("t", "just some prose")
+        self.assertEqual(brief["goal"], "", "no heading means no Goal section")
+        self.assertEqual(brief["body"], "just some prose")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

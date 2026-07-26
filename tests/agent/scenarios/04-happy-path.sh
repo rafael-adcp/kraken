@@ -4,7 +4,8 @@
 # A clear, hostable task with executable acceptance. The worker claims it, works
 # on a branch, pushes, opens a draft PR with attribution trailers, runs the
 # acceptance for real, and delivers: in-progress -> awaiting-merge with a
-# `delivered` marker carrying a `pr` field (PROTOCOL.md §8, SKILL.md steps b–d).
+# `delivered` marker carrying a `pr` field (PROTOCOL.md §8, SKILL.md
+# "What is yours: the judgment" steps 2–4).
 # Assertion surface = artifacts only.
 #
 # When the push reaches the remote, the FULL delivery holds and blocks (task

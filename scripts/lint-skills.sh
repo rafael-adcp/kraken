@@ -15,6 +15,7 @@ INIT="skills/init/SKILL.md"
 STATUS="skills/status/SKILL.md"
 README="README.md"
 PROTOCOL="PROTOCOL.md"
+AGENTS="AGENTS.md"
 PLUGIN=".claude-plugin/plugin.json"
 TEMPLATE="skills/unleash/task-template.yml"
 # Every label / machine-line / disclaimer emitter lives in kraken.py, so all the
@@ -101,6 +102,19 @@ if command -v python3 >/dev/null 2>&1; then
   fi
   [ "$fail" -eq "$fail_before" ] \
     && note "plugin.json declares kraken-protocol/$pv, matching kraken.py"
+
+  # [1f] Every verdict `next-action` can emit is documented in the worker skill.
+  # The skill IS the agent's decision table — a verdict the program can return
+  # and the prose never mentions is a worker that freezes on it. Executed, not
+  # diffed: kraken.py's NEXT_ACTIONS is the single source (same rule as 1b).
+  echo "[1f] next-action verdicts (kraken.py vs $SKILL)"
+  fail_before=$fail
+  while read -r a; do
+    [ -z "$a" ] && continue
+    grep -qF -- "\`$a\`" "$SKILL" || err "next-action verdict '$a' undocumented in $SKILL"
+  done < <(kcontract next-actions)
+  [ "$fail" -eq "$fail_before" ] \
+    && note "every next-action verdict kraken.py emits is documented in $SKILL"
 else
   note "python3 unavailable — skipping contract-derived checks (1b–1d)"
 fi
@@ -158,8 +172,14 @@ done
 # --- 4. Relative links and images resolve (every SKILL.md + README) --------
 echo "[4] links & images"
 broken=0; total=0
-sources=("$README" "$PROTOCOL")
+sources=("$README" "$PROTOCOL" "$AGENTS")
 for s in skills/*/SKILL.md; do [ -f "$s" ] && sources+=("$s"); done
+# Reference pages a SKILL.md points at are checked like the skills themselves —
+# a broken link in one is a worker that cannot read its own delivery rules.
+for s in skills/*/*.md; do
+  case "$s" in */SKILL.md) continue;; esac
+  [ -f "$s" ] && sources+=("$s")
+done
 # resolve each target against its source file's directory, the way GitHub does
 for src in "${sources[@]}"; do
   dir="$(dirname "$src")"
