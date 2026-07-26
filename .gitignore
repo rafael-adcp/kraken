@@ -1,3 +1,10 @@
 # Python bytecode caches — kraken.py and the unit tests generate these when run.
 __pycache__/
 *.pyc
+
+# The graphify knowledge graph — generated from the source, never edited by hand.
+graphify-out/
+
+# Per-clone Claude Code settings. The shared .claude/settings.json IS checked in;
+# this one is personal by convention and must stay out of a public repo.
+.claude/settings.local.json

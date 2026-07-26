@@ -70,7 +70,10 @@ class LeaseExpiryTests(KrakenConformanceTest):
         dead = self.mk_expired_lease(6, "w-dead")
 
         r = self.kraken("claim", "OWNER/tasks", 5, "w-drain")
-        self.assertEqual(r.rc, 11, "a named claim took a live lease")
+        # 10, not 11: the LEASE refuses, and a lease says somebody owns the task.
+        # (Under protocol/6 the in-progress badge answered first, with the vaguer
+        # "not clear" verdict; nothing reads that badge any more.)
+        self.assertEqual(r.rc, 10, "a named claim took a live lease")
         self.assertEqual(self.claim_ref(5), live)
 
         r = self.kraken("claim", "OWNER/tasks", 6, "w-drain")
@@ -89,9 +92,9 @@ class LeaseExpiryTests(KrakenConformanceTest):
         self.mk_issue(10, "legacy dead", "kraken-task", "project:app", "in-progress")
         legacy_dead = self.mk_expired_lease(10, "w-old", gen=0)
 
-        # 11 (held), the same verdict a live protocol/6 lease behind an
-        # in-progress label gets — the label guard answers before the ladder.
-        self.assertEqual(self.kraken("claim", "OWNER/tasks", 9, "w-new").rc, 11,
+        # 10 (lost), the same verdict a live protocol/6 lease gets: the ladder's
+        # lowest rung is still a rung, and holding it still means holding it.
+        self.assertEqual(self.kraken("claim", "OWNER/tasks", 9, "w-new").rc, 10,
                          "a live protocol/5 claim was not honoured")
         self.assertEqual(self.claim_ref(9), legacy_live)
 

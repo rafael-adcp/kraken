@@ -12,7 +12,7 @@ loop around `kraken.py next-action` — **no deltas either**.
 
 ## Your operating contract — read these, then follow them
 
-1. [`PROTOCOL.md`](PROTOCOL.md) — the normative wire contract (`kraken-protocol/6`): the
+1. [`PROTOCOL.md`](PROTOCOL.md) — the normative wire contract (`kraken-protocol/7`): the
    label state machine, the hidden `<!-- kraken {...} -->` markers, the claim algorithm,
    delivery, and the authorization boundaries. Agent-agnostic already.
 2. [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md) — how a worker *executes* that
@@ -73,7 +73,7 @@ Each poll runs the free, read-only `list-startable` check first and only invokes
 
 ## Self-healing: the lease does it, the loop only does it faster
 
-**The protocol recovers on its own.** Under `kraken-protocol/6` a claim is a **lease**
+**The protocol recovers on its own.** Under `kraken-protocol/7` a claim is a **lease**
 with a TTL in minutes (PROTOCOL.md §5): a worker renews it while it works, and a worker
 that dies simply stops renewing — the next tentacle to read the queue finds the lease
 expired and takes the task over. That happens with **nothing installed**, in every

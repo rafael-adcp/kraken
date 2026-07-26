@@ -15,8 +15,11 @@ class ListStartablePaginationTests(KrakenConformanceTest):
         self.mk_issue(2, "second startable", "kraken-task", "project:app")
         self.mk_issue(3, "third startable", "kraken-task", "project:app")
         # ...then 102 held tasks (younger numbers) that push the queue past 100.
+        # They are held by a LABEL that actually holds — `in-progress` is
+        # write-only under protocol/7 and would leave them all startable.
         for n in range(100, 202):
-            self.mk_issue(n, "held %d" % n, "kraken-task", "project:app", "in-progress")
+            self.mk_issue(n, "held %d" % n, "kraken-task", "project:app",
+                          "needs-decision")
 
         r = self.kraken("list-startable", "OWNER/tasks", "app")
         self.assertEqual(r.rc, 0, "default mode exit (queue > 100)")

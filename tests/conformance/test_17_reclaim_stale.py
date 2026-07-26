@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """The reconcile pass run STAND-ALONE (kraken.py reap) — the operator-side escape
 hatch for what a drain does on its own read (that path is pinned in
-test_34_claim_next_reconcile.py). It makes the claim refs (the lock) and the
-in-progress labels (the projection) agree.
+test_34_claim_next_reconcile.py). Every rule it has left is about a CLAIM REF.
 
-Under protocol/6 an expired LEASE is not one of its jobs: expiry is applied by
-whoever reads the queue and the next claim steals it, so the pass writes nothing
-for one. What survives as rule 2 is the task that keeps expiring — after
-LEASE_EXPIRY_ESCALATE steals it stops circulating and becomes the operator's
-call."""
+Two things it deliberately does not do. An expired LEASE is not its job
+(protocol/6): expiry is applied by whoever reads the queue and the next claim
+steals it, so the pass writes nothing for one. And the `in-progress` LABEL is not
+its job either (protocol/7): the label is write-only, so a missing one and an
+orphan one are both left exactly as found. What survives as rule 2 is the task
+that keeps expiring — after LEASE_EXPIRY_ESCALATE steals it stops circulating and
+becomes the operator's call."""
 import unittest
 
 from harness import KrakenConformanceTest, expiry_marker, lease_ttl
@@ -31,7 +32,9 @@ class ReclaimStaleTests(KrakenConformanceTest):
         self.mk_issue(2, "live worker", "kraken-task", "project:app", "in-progress")
         self.mk_claim_ref(2, "live-worker", age_seconds=5, mtype="heartbeat", msg="still going")
 
-        # #3 ORPHAN PROJECTION — in-progress label, NO ref. Rule 4: requeue.
+        # #3 STALE BADGE — in-progress label, NO ref (a crashed release).
+        #    protocol/6 requeued this; protocol/7 leaves it: the task is already
+        #    startable, because the label never held it.
         self.mk_issue(3, "crashed release", "kraken-task", "project:app", "in-progress")
 
         # #4 ORPHAN LOCK — a ref left behind on an escalated (needs-decision)
@@ -39,7 +42,9 @@ class ReclaimStaleTests(KrakenConformanceTest):
         self.mk_issue(4, "escalated but ref lingered", "kraken-task", "project:app", "needs-decision")
         self.mk_claim_ref(4, "gone-worker", age_seconds=60)
 
-        # #5 HEAL — a fresh ref whose in-progress projection never landed. Rule 3.
+        # #5 MISSING BADGE — a fresh ref whose in-progress projection never
+        #    landed. protocol/6 healed it; protocol/7 leaves it: the lease holds
+        #    the task, and nothing reads the label.
         self.mk_issue(5, "label projection crashed", "kraken-task", "project:app")
         self.mk_claim_ref(5, "healthy-worker", age_seconds=5)
 
@@ -74,19 +79,19 @@ class ReclaimStaleTests(KrakenConformanceTest):
         self.assertEqual(self.claim_ref(7), expired_sha, "#7 (expired) ref was touched")
         self.assertEqual(self.comment_count(7), 0, "#7 (expired) got a comment")
 
-        # #3 requeued: in-progress removed, a bot note posted.
-        self.assertFalse(self.has_label(3, "in-progress"), "#3 (orphan projection) still in-progress")
-        self.assertIn('<!-- kraken {"type":"stale-claim"', self.last_comment(3), "#3 missing requeue note")
+        # #3 untouched: the badge stays, and no comment is spent saying so.
+        self.assertTrue(self.has_label(3, "in-progress"), "#3 (stale badge) was rewritten")
+        self.assertEqual(self.comment_count(3), 0, "#3 (stale badge) got a spurious comment")
 
         # #4 orphan lock: ref deleted, needs-decision label untouched, no comment.
         self.assertFalse(self.claim_ref_exists(4), "#4 (orphan lock) ref not deleted")
         self.assertTrue(self.has_label(4, "needs-decision"), "#4 lost its needs-decision label")
         self.assertEqual(self.comment_count(4), 0, "#4 (orphan lock) got a spurious comment")
 
-        # #5 healed: in-progress restored, ref intact, no comment.
-        self.assertTrue(self.has_label(5, "in-progress"), "#5 (heal) label not restored")
-        self.assertTrue(self.claim_ref_exists(5), "#5 (heal) ref wrongly deleted")
-        self.assertEqual(self.comment_count(5), 0, "#5 (heal) got a spurious comment")
+        # #5 untouched: no badge written, ref intact, no comment.
+        self.assertFalse(self.has_label(5, "in-progress"), "#5 (missing badge) was healed")
+        self.assertTrue(self.claim_ref_exists(5), "#5 (missing badge) ref wrongly deleted")
+        self.assertEqual(self.comment_count(5), 0, "#5 (missing badge) got a spurious comment")
 
         # #6 orphan lock on a closed issue: ref deleted.
         self.assertFalse(self.claim_ref_exists(6), "#6 (closed) ref not deleted")

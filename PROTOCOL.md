@@ -1,6 +1,6 @@
 # The Kraken Coordination Protocol
 
-**Version: `kraken-protocol/6`**
+**Version: `kraken-protocol/7`**
 
 This document is the normative specification of the coordination contract
 between a task queue built on GitHub Issues and the workers that drain it. It
@@ -20,11 +20,37 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY**
 are to be interpreted as described in RFC 2119.
 
 **Versioning.** Backward-incompatible changes to this contract bump the
-integer (`kraken-protocol/6` and onward); clarifications and strictly additive
+integer (`kraken-protocol/7` and onward); clarifications and strictly additive
 rules amend this document in place by PR. An implementation states the protocol
 version it targets (this plugin: in `.claude-plugin/plugin.json`), and the
 `Kraken-Task:` commit trailer's `kraken@<version>` maps any delivered commit
 back to a protocol revision via the release notes.
+
+**What changed in `kraken-protocol/7`.** The `in-progress` label became
+**write-only**. Through protocol/6 it was the claim ref's *projection* and it was
+**read in decisions**: it made a task `held`, so the claim guard had to refuse on
+it — but only conditionally, since the lease behind it might have expired, which
+forced the guard to consult the lease mid-refusal. Two sources of truth for one
+fact then had to be kept in agreement, and two of the reconciler's four rules
+(§6) existed for nothing else: restore a label a crashed claim never wrote, strip
+one a crashed release never removed.
+
+protocol/7 observes that only the label's *readers* made any of that necessary.
+The **lease alone** decides whether somebody is working on a task (§5); the label
+is written for the human scanning the GitHub issue list and is **never** consulted
+— not by the claim guard, not by the startable filter, not by the requeue
+derivation, not by an operator console. Writers are unchanged: every transition
+still sets and clears it exactly as before, so the queue still reads the same in
+the UI. What goes away is the branch, the disagreement, and the repairs for it —
+the label may lag the lease, and lagging costs a stale badge and nothing else.
+
+This is a backward-incompatible change — a protocol/6 worker treats an
+`in-progress` label as holding, so in a mixed fleet it will skip a task a
+protocol/7 worker leaves labeled and correctly considers free — hence the integer
+bump. It needs **no migration**: nothing about the label's *writes* changed, and a
+protocol/7 worker takes a strict superset of the tasks a protocol/6 worker would.
+Retired: reconciler rules 3 (**heal**) and 4 (**orphan projection**), and the
+claim guard's `in-progress` exception (§5.2).
 
 **What changed in `kraken-protocol/6`.** The claim ref became a **lease**, and
 the claim ref name gained a **generation**. Through protocol/5 the ref was a lock
@@ -200,17 +226,27 @@ so the label is not a coordination invariant and needs no `PROTOCOL_VERSION` bum
 Colors and label descriptions are SHOULD (they make every kraken queue read
 the same — see `skills/init/SKILL.md`); the label *names* are MUST.
 
-The `in-progress` label is the **projection** of the claim ref (§5), not the
-lock itself: a worker sets it right after it wins the CAS, and the reconciler
-(§6) restores the two to agreement if a crash leaves them out of step. The other
-two held labels are set by uncontended transitions (§7, §8).
+The `in-progress` label is **write-only**. It is the human-facing projection of
+the claim ref (§5) — refs are invisible in the GitHub UI, so the label is what
+makes a claimed task visible in an issue list — and a conforming reader **MUST
+NOT** consult it in any decision: not the claim guard (§5.2), not the startable
+filter, not the requeue derivation (§6), not an operator console. Every
+transition still writes it (a worker **MUST** add it on a won claim and clear it
+on escalation, delivery and release), but because nothing reads it back, a label
+that lags the lease is a stale badge and never a coordination error. Nothing
+repairs it, and nothing needs to.
 
-A task is **held** when it carries `in-progress`, `needs-decision`, or
-`awaiting-merge`, **or when a claim ref exists for it** (§5); it is **startable**
-when it is open, labeled `kraken-task` + `project:<name>`, not held, and every
-blocked-by issue is closed. A task MUST carry at most one held label at a time —
-stacking them (e.g. `in-progress` + `awaiting-merge`) is state corruption, and
-the claim guard (§5) exists to prevent it.
+The other two state labels are the opposite: `needs-decision` and
+`awaiting-merge` have no lock behind them, so the label **is** the state, and
+readers decide on it directly. They are set by uncontended transitions (§7, §8).
+
+A task is **held** when it carries `needs-decision` or `awaiting-merge`, **or
+when a live claim ref exists for it** (§5); it is **startable** when it is open,
+labeled `kraken-task` + `project:<name>`, not held, and every blocked-by issue is
+closed. A task MUST carry at most one state label at a time — stacking them
+(e.g. `in-progress` + `awaiting-merge`) is a corrupt *display*, and the writers
+above are ordered so it cannot arise; only the two held labels can corrupt
+coordination, and the claim guard (§5) refuses on both.
 
 Legal transitions and who performs them:
 
@@ -362,9 +398,9 @@ That ref is a **lease**, not a lock held forever. Its terms:
   Renewal is the heartbeat (§6).
 - **The reader applies the expiry.** A lease whose age is **≥ TTL** holds
   nothing: a reader **MUST** treat it as expired — it does not make a task
-  `held`, and neither does the `in-progress` label projected from it. No job,
-  no pass and no operator is involved in an expiry; it is a property of the
-  read.
+  `held`. No job, no pass and no operator is involved in an expiry; it is a
+  property of the read. (The `in-progress` label the holder wrote does not hold
+  the task either, expired or not — it is write-only, §3.)
 - **An unreadable clock is an expired lease.** If the ref's commit (or its date)
   cannot be read, nothing proves the holder alive, and a reader **MUST** treat
   the lease as expired — failing **open**, toward the steal. A lease must never
@@ -379,18 +415,18 @@ The sequence is fixed:
    priority tier. Label filtering SHOULD be done client-side for determinism.
 2. **Dependency check**: skip any candidate whose blocked-by issues are not
    all closed.
-3. **Guard**: re-fetch the issue's current labels. If it is now held, the
-   worker MUST skip it without writing anything. `in-progress` is the exception
-   that proves the lease rule: it is a lease's *projection*, so it holds only
-   while the lease behind it does — a worker MUST consult the lease before
-   refusing on that label alone.
+3. **Guard**: re-fetch the issue's current labels. If it now carries
+   `needs-decision` or `awaiting-merge`, the worker MUST skip it without writing
+   anything. Those are the only two labels the guard reads: `in-progress` is
+   write-only (§3), so a task wearing one is guarded by its **lease** or by
+   nothing at all.
 
-   Conversely, a **live lease that is not ours holds the task whatever the
-   labels say**, including in the crash window between a won CAS and its label
-   projection. A worker MUST NOT attempt the CAS there: the generation it would
-   create is the *next* one, so the attempt would succeed and take a live lease.
-   The read answers it instead, and the verdict is a **loss**, not an unclear
-   task — somebody owns it.
+   A **live lease that is not ours holds the task whatever the labels say**,
+   including in the crash window between a won CAS and its label projection, and
+   including when no `in-progress` label is present. A worker MUST NOT attempt
+   the CAS there: the generation it would create is the *next* one, so the
+   attempt would succeed and take a live lease. The read answers it instead, and
+   the verdict is a **loss**, not an unclear task — somebody owns it.
 4. **CAS**: create the claim commit, then create the ref
    `refs/kraken/claims/N/<G+1>` pointing at it, where `G` is the highest
    generation observed on the issue (`0` when it carries no claim ref at all).
@@ -405,8 +441,10 @@ The sequence is fixed:
    state (so a lifecycle hook can auto-release), post the `lease-expired`
    comment if this was a steal, add the `in-progress` label, then post the
    `claim` comment (disclaimer + prose; the machine payload already rides the
-   ref). A failure at this step leaves the task **held by the lease** — the
-   reconciler (§6) heals a missing label on its next pass.
+   ref). A failure at this step leaves the task **held by the lease**, which is
+   the only thing that was holding it anyway: the label is write-only (§3), so a
+   projection that never landed costs a missing badge and nothing is expected to
+   repair it. The next transition on the task writes the next label.
 
 ### 5.2.1 Why a steal is not a special case
 
@@ -496,8 +534,8 @@ task within one TTL.
   in seconds instead — nothing normative depends on it, and a harness without
   such machinery is not a less conforming worker, only a slower-to-recover one.
 - **The reader reconciles.** A worker **MUST** reconcile the claim refs (the
-  leases) with the `in-progress` labels (the projection) before it claims, over
-  the queue read it is performing anyway. Reconciliation is *not* delegated to
+  leases) with the queue before it claims, over the queue read it is performing
+  anyway. Reconciliation is *not* delegated to
   the coordination repo: a stale claim obstructs exactly one party — the next
   worker that wants to claim — and no other observer of it exists, so the party
   that cares is the party that repairs. A conforming coordination repo therefore
@@ -506,13 +544,19 @@ task within one TTL.
   (the reference implementation exposes it as `kraken.py reap`); doing so is an
   ergonomic, never a precondition.
 
-  **An expired lease is not one of the reconciler's jobs.** Expiry is applied on
-  the read (§5.1) and the next claim steals it, so a reconciler that "repaired"
-  an expired lease would only escalate a task the next drain was about to pick
-  up. What remains is anchored to the **claim ref's commit date** — **not** the
+  **The reconcile is about leases, and only leases.** Two things are explicitly
+  *not* its job. An **expired lease** is not: expiry is applied on the read
+  (§5.1) and the next claim steals it, so a reconciler that "repaired" one would
+  only escalate a task the next drain was about to pick up. A **stray
+  `in-progress` label** is not either — neither a missing one nor an orphan one:
+  the label is write-only (§3), so it holds nothing, hides nothing and misroutes
+  nothing, and the next transition on the task overwrites it. (protocol/6 had a
+  rule for each of those two label cases; protocol/7 retired both.)
+
+  What remains is anchored to the **claim ref's commit date** — **not** the
   issue's `updatedAt`, and nothing on the issue timeline resets it, so a human
   commenting on a dead worker's issue shortens time-to-triage rather than
-  extending the lease. The reconcile applies, per claim ref and per stray label:
+  extending the lease. The reconcile applies, per claim ref:
   1. **Orphan lock** — a ref on an issue that is no longer an open task, or on
      one already labeled `needs-decision`/`awaiting-merge` (a terminal
      transition whose ref delete was lost): delete the ref, touch nothing else.
@@ -525,13 +569,9 @@ task within one TTL.
      telling nobody. Past the threshold it stops being stolen and becomes the
      operator's call. A **live** lease is never reclaimed by this rule, however
      long the task's history of steals: whoever holds it is working.
-  3. **Heal** — a **live** lease on an issue missing its `in-progress` label (a
-     claim whose label projection did not land): add the label. Restoring the
-     label for an *expired* lease would re-hold a task the reader just decided is
-     free, so the rule keys on liveness.
-  4. **Orphan projection** — an open `in-progress` issue with **no** ref (a
-     crashed release, or a claim made before protocol/4): remove the label so
-     the task requeues, leaving a `stale-claim` comment saying why.
+
+  Both rules are keyed on a claim ref, so a task with no ref is never this pass's
+  business, whatever labels it wears.
 
   The rules are ordered by the same rule §5 gives every transition — writes
   first, **ref delete last** — so a reconcile interrupted part-way leaves the
@@ -574,8 +614,9 @@ task within one TTL.
   marker is subsumed by the §4 accepted edge — the standalone line, or removing
   the label by hand, is the operator's path.)
 
-  `in-progress` is **not** requeueable this way: an `in-progress` label with no
-  ref behind it is rule 4 above, a repair, not a requeue.
+  The derivation ranges over the two held labels only. `in-progress` is not one
+  of them and never needs lifting: it holds nothing (§3), so a task wearing a
+  stale one is already queued.
 
 ## 7. Escalation
 

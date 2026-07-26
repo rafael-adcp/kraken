@@ -5,10 +5,12 @@ of doing so is O(1) in the number of live claims, not O(N).
 
 Three things are under test, all against the real gh stub:
 
-  1. **The four rules fire from the claim path.** `claim-next` alone (never
-     `reap`) reclaims a dead worker's claim, drops an orphan lock, heals a
-     crashed projection and requeues an orphan label — and then claims out of the
-     state it just repaired, in the SAME invocation.
+  1. **Both rules fire from the claim path.** `claim-next` alone (never `reap`)
+     reclaims a dead worker's claim and drops an orphan lock — and then claims
+     out of the state it just repaired, in the SAME invocation. Nothing it does
+     involves the `in-progress` label: under protocol/7 that label is write-only,
+     so a task wearing a stale one is simply startable and a live lease wearing
+     none is simply held.
   2. **The reconcile costs one batched read.** Growing the number of live claim
      refs from 1 to 20 must not grow the call count: the ref dates resolve
      through a single aliased GraphQL query, the way `resolve_depends_on` does.
@@ -26,7 +28,7 @@ from kraken import LEASE_EXPIRY_ESCALATE
 
 
 class ClaimNextReconcileTests(KrakenConformanceTest):
-    def test_the_claim_path_runs_the_four_rules(self):
+    def test_the_claim_path_runs_the_reconcile_rules(self):
         # #1 UNFINISHABLE — an expired lease on a task already stolen
         # LEASE_EXPIRY_ESCALATE times. Rule 2: reclaim to needs-decision. (A
         # FIRST expiry is not a rule at all under protocol/6 — it is stolen, see
@@ -42,7 +44,9 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         self.mk_claim_ref(2, "live-worker", age_seconds=5, mtype="heartbeat",
                           msg="still going")
 
-        # #3 ORPHAN PROJECTION — in-progress label, no ref. Rule 4: requeue.
+        # #3 STALE BADGE — in-progress label, no ref (a crashed release). No rule
+        #    fires: the label holds nothing, so the task is already startable and
+        #    this drain claims it outright.
         self.mk_issue(3, "crashed release", "kraken-task", "project:app", "in-progress")
 
         # #4 ORPHAN LOCK — a ref left on an escalated issue. Rule 1: drop it.
@@ -50,7 +54,9 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
                       "needs-decision")
         self.mk_claim_ref(4, "gone-worker", age_seconds=60)
 
-        # #5 HEAL — a fresh ref whose in-progress projection never landed. Rule 3.
+        # #5 MISSING BADGE — a fresh ref whose in-progress projection never
+        #    landed. No rule fires either: the LEASE holds the task, badge or no
+        #    badge, so it is not offered and not repaired.
         self.mk_issue(5, "projection crashed", "kraken-task", "project:app")
         self.mk_claim_ref(5, "healthy-worker", age_seconds=5)
 
@@ -77,12 +83,16 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         self.assertTrue(self.claim_ref_exists(2), "#2 lost its lock while alive")
         self.assertEqual(self.comment_count(2), 0, "#2 got a spurious comment")
 
-        # Rule 4 — #3's orphan label removed... and then claimed by this very
-        # drain, out of the state it just repaired, with no second queue fetch.
-        self.assertTrue(self.claim_ref_exists(3), "#3 was not claimed after requeue")
-        self.assertTrue(self.has_label(3, "in-progress"), "#3 not re-projected")
+        # #3 — claimed outright. protocol/6 spent a label write and a comment to
+        # "requeue" it first; protocol/7 skips straight to the claim, and the
+        # badge it already wore is simply re-asserted by the projection.
+        self.assertTrue(self.claim_ref_exists(3), "#3 was not claimed")
+        self.assertTrue(self.has_label(3, "in-progress"), "#3 not projected")
         self.assertIn("claim-next: claimed issue=3 worker=w-drain", r.out.split("\n"),
-                      "the drain did not claim the task it had just requeued")
+                      "the drain did not claim the task wearing a stale badge")
+        self.assertNotIn('<!-- kraken {"type":"stale-claim"',
+                         "\n".join(self.comment_bodies(3)),
+                         "#3 got a requeue note for a label that held nothing")
 
         # Rule 1 — both orphan locks dropped, nothing else touched.
         self.assertFalse(self.claim_ref_exists(4), "#4 orphan lock survived")
@@ -90,8 +100,8 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         self.assertEqual(self.comment_count(4), 0, "#4 got a spurious comment")
         self.assertFalse(self.claim_ref_exists(6), "#6 orphan lock survived")
 
-        # Rule 3 — #5's projection healed, its lock intact.
-        self.assertTrue(self.has_label(5, "in-progress"), "#5 not healed")
+        # #5 — left exactly as found: no badge written, lock intact, no comment.
+        self.assertFalse(self.has_label(5, "in-progress"), "#5 was healed")
         self.assertTrue(self.claim_ref_exists(5), "#5 lost its live lock")
         self.assertEqual(self.comment_count(5), 0, "#5 got a spurious comment")
 
