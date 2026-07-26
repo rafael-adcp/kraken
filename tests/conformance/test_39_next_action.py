@@ -135,6 +135,27 @@ class NextActionTests(KrakenConformanceTest):
         self.assertFalse(self.has_label(7, "in-progress"),
                          "the finished task was re-claimed")
 
+    def test_blocked_by_a_claim_in_another_repo(self):
+        # The one-task-at-a-time rule is repo-independent, so the claim that
+        # blocks this drain can live somewhere else entirely. The envelope has to
+        # say WHERE, or a worker resolves it against the wrong repo.
+        self.mk_issue(9, "a task here", "kraken-task", "project:app")
+        os.makedirs(self.kraken_state_dir, exist_ok=True)
+        with open(self.claim_state_file("w1"), "w", encoding="utf-8") as fh:
+            json.dump({"repo": "OWNER/other", "issue": "42", "worker": "w1"}, fh)
+
+        r, env = self.envelope("OWNER/tasks", "app", "w1")
+        self.assertEqual(r.rc, 11, "a claim held elsewhere exits 11")
+        self.assertEqual(env["action"], "blocked", "expected a blocked verdict")
+        self.assertEqual(env["holding"], {"repo": "OWNER/other", "issue": 42},
+                         "the blocking claim is not named")
+        self.assertNotIn("issue", env,
+                         "a bare top-level issue would read against OWNER/tasks")
+        self.assertIn("OWNER/other 42 w1", env["then"]["release"],
+                      "then.release must target the held claim, not the drain")
+        self.assertFalse(self.has_label(9, "in-progress"),
+                         "a blocked worker must claim nothing")
+
     def test_idle_and_unknown_project(self):
         self.mk_label("project:app")
         r, env = self.envelope("OWNER/tasks", "app", "w1")

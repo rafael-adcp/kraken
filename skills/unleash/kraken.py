@@ -1693,12 +1693,22 @@ def task_brief(title, body):
 
 def next_action_envelope(action, repo, worker, *, issue=None, resumed=None,
                          brief=None, lease=None, reason=None, detail=None,
-                         script=None):
+                         holding=None, script=None):
     """The one JSON shape next-action emits. `action` is the verdict, `reason` a
     stable machine slug for it, and `detail` the human sentence — so a consumer
     branches on the slug and a human reads the sentence, never the other way
-    round. `then` is attached only to `execute`, because it is the only verdict
-    under which a write is legal."""
+    round.
+
+    `holding` is `{"repo", "issue"}` naming a claim this worker must resolve, and
+    it exists because a `blocked` claim may live in a **different repo** than the
+    one being drained: pairing the top-level `repo` with that claim's issue
+    number would name a task that does not exist. So `blocked` reports the claim
+    under `holding` and never as a bare top-level `issue`.
+
+    `then` is attached wherever a write is actually legal: to `execute` for the
+    task in hand, and to `blocked` for the claim that has to be resolved first —
+    built against **that** claim's repo and issue. Emitting `blocked` without it
+    would tell a worker to run a transition it has no way to construct."""
     env = {"action": action, "repo": repo, "worker": worker}
     if issue is not None:
         env["issue"] = int(issue)
@@ -1708,12 +1718,17 @@ def next_action_envelope(action, repo, worker, *, issue=None, resumed=None,
         env["reason"] = reason
     if detail:
         env["detail"] = detail
+    if holding is not None:
+        env["holding"] = {"repo": holding["repo"], "issue": int(holding["issue"])}
     if brief is not None:
         env["brief"] = brief
     if lease is not None:
         env["lease"] = lease
     if action == "execute" and issue is not None:
         env["then"] = then_commands(repo, issue, worker, script=script)
+    elif action == "blocked" and holding is not None:
+        env["then"] = then_commands(holding["repo"], int(holding["issue"]),
+                                    worker, script=script)
     return env
 
 
@@ -1826,6 +1841,15 @@ def _resume(record, repo, worker, ttl, now, script):
     action = verdict  # the remaining verdicts are the action names themselves
     if action != "execute":
         diag(f"next-action: {action} issue={issue} ({detail['reason']})")
+        # `blocked` names the claim under `holding` (it may be in another repo,
+        # so a bare top-level issue would read against the wrong one) and carries
+        # the commands that resolve it. The other verdicts are about the task in
+        # this repo, and none of them makes a write legal.
+        if action == "blocked":
+            return (NEXT_ACTION_EXIT[action], next_action_envelope(
+                action, repo, worker, reason=detail["reason"],
+                detail=detail.get("detail"), script=script,
+                holding={"repo": record["repo"] or repo, "issue": issue}))
         return (NEXT_ACTION_EXIT[action], next_action_envelope(
             action, repo, worker, issue=issue, reason=detail["reason"],
             detail=detail.get("detail"), script=script))
@@ -1875,10 +1899,16 @@ def next_action(repo, project, worker, ttl=None, now=None, script=None):
                    "unscoped",
             script=script))
     if rc == EXIT_NOT_CLEAR:
+        # A claim appeared between the resume check and the acquisition. Re-read
+        # the record so this envelope, like the other `blocked`, names the claim
+        # to resolve and carries the commands that resolve it.
+        late = open_claim_record(worker)
         return (EXIT_NOT_CLEAR, next_action_envelope(
             "blocked", repo, worker, reason="claim-open",
             detail="this worker already holds an open claim — resolve it "
                    "(deliver / escalate / release) first",
+            holding=({"repo": late["repo"] or repo, "issue": late["issue"]}
+                     if late else None),
             script=script))
     return (EXIT_TRANSPORT, next_action_envelope(
         "retry", repo, worker, reason="transport",
@@ -1895,6 +1925,8 @@ def render_next_action(env):
     if "issue" in env:
         head += f" issue={env['issue']}"
     head += f" repo={env['repo']} worker={env['worker']}"
+    if env.get("holding"):
+        head += f" holding={env['holding']['repo']}#{env['holding']['issue']}"
     if env.get("resumed") is not None:
         head += f" resumed={str(env['resumed']).lower()}"
     print(head)
@@ -2093,8 +2125,8 @@ def cmd_note(args):
     marker (PROTOCOL.md §4) — the structural signal that makes the §6 requeue
     derivation read it as worker-authored. It carries no machine state: it changes no label and
     touches no claim ref, so the task stays exactly where it was — the missing
-    worker-authored write the skill otherwise had you hand-assemble (SKILL.md
-    step 2a / Conventions), disclaimer and all."""
+    worker-authored write the skill otherwise had you hand-assemble, disclaimer
+    and all. next-action offers it as `then.note`."""
     repo, issue, worker, body_file = args.repo, args.issue, args.worker, args.body_file
     if not os.path.isfile(body_file):
         print(f"note: no such file {body_file}", file=sys.stderr)

@@ -1814,12 +1814,34 @@ class NextActionEnvelopeTests(unittest.TestCase):
             self.assertIn('"/plugins/with space/kraken.py"', command,
                           "then.%s does not quote a path containing spaces" % name)
 
-    def test_non_execute_verdicts_offer_no_write(self):
-        for action in ("idle", "abandon", "blocked", "stop", "retry"):
+    def test_verdicts_with_no_legal_write_offer_none(self):
+        for action in ("idle", "abandon", "stop", "retry"):
             env = kraken.next_action_envelope(action, "OWNER/tasks", "env-1",
                                               issue=12, reason="x")
             self.assertNotIn("then", env,
                              "%s must offer no next write — none is legal" % action)
+
+    def test_blocked_names_the_held_claim_and_targets_it(self):
+        # The held claim may live in ANOTHER repo. Pairing the top-level repo
+        # with its issue number would name a task that does not exist, and a
+        # worker acting on it would write to the wrong repo's issue.
+        env = kraken.next_action_envelope(
+            "blocked", "OWNER/tasks", "env-1", reason="claim-elsewhere",
+            holding={"repo": "OWNER/other", "issue": "7"},
+            script="/plugins/kraken.py")
+        self.assertNotIn("issue", env,
+                         "blocked must not carry a bare top-level issue — it "
+                         "would read against the repo being drained")
+        self.assertEqual(env["holding"], {"repo": "OWNER/other", "issue": 7},
+                         "the held claim is not named")
+        # A write IS legal here — it is what resolves the block — so the commands
+        # must be present and must target the HELD claim.
+        for name in ("deliver", "escalate", "release"):
+            self.assertIn("OWNER/other 7 env-1", env["then"][name],
+                          "then.%s does not target the held claim" % name)
+            self.assertNotIn("OWNER/tasks", env["then"][name],
+                             "then.%s targets the drained repo, not the held "
+                             "claim" % name)
 
     def test_every_action_has_an_exit_code(self):
         self.assertEqual(set(kraken.NEXT_ACTIONS), set(kraken.NEXT_ACTION_EXIT),

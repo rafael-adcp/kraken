@@ -59,7 +59,7 @@ instruction:
 | `execute` | `0` | You hold this task. `resumed` says whether you just claimed it or are picking it back up. | Work it — the next section. Then run one of `then.deliver` / `then.escalate` / `then.release`. |
 | `idle` | `3` | Nothing startable in your project. | The drain is done — go to **Staying in ambush**. |
 | `abandon` | `10` | A task you were holding is no longer yours: your lease expired and another worker took it. | **Write nothing to it.** Say so, then run the loop again. Your branch and PR stay; whoever holds the task inherits them. |
-| `blocked` | `11` | You already hold an open claim that has to be resolved first. | Resolve it (deliver / escalate / release), then re-run. |
+| `blocked` | `11` | You already hold an open claim that has to be resolved first — `holding` names it (`repo` + `issue`), and it may be in a **different** repo than the one you are draining. | Resolve that claim with this envelope's own `then.deliver` / `then.escalate` / `then.release` — they are built for `holding`, not for the repo you asked about — then re-run. |
 | `stop` | `13` | The repo carries no `project:<name>` label, so this worker would filter every task out and read as an empty queue forever. | Stop and tell me. Fix the spelling, or create the label with `/kraken:init`. Never fall back to draining unscoped. |
 | `retry` | `20` | A read or a write did not land — the state is unknown. | Do not write on a guess. Re-check the task's real state, then re-run. |
 
@@ -87,6 +87,13 @@ compact result — task number, final label, PR URL, one line — so the driver'
 stays flat over a long drain. No subagents? Run the task inline; the isolation is an
 optimization, never part of the contract.
 
+**That read is not optional.** A subagent that cannot read the pointed file — wrong
+path, unreadable file — **aborts the task and says so**; it never proceeds on partial
+rules. And if a subagent errors out for any reason, leave the task labeled honestly:
+either keep it `in-progress` for triage, or hand it back with `then.release` (which
+posts the `released` marker and deletes the claim ref). **Never just strip the label** —
+that leaves the claim ref standing and the task reads as held until the lease expires.
+
 ## What is yours: the judgment
 
 Inside an `execute`:
@@ -111,10 +118,15 @@ Inside an `execute`:
    push. **"Done" means delivered for review, never closed** — the task closes when the
    work truly lands.
 
-If `then.deliver`, `then.escalate` or `then.release` exits `10`, your lease was taken
-while you were quiet: **nothing was written**, the task belongs to another worker now,
-and your branch and PR are still there for whoever holds it. Stop working it, say so,
-and run the loop again.
+Two exit codes matter on the `then.*` writes themselves:
+
+- **`10`** — your lease was taken while you were quiet. **Nothing was written**, the task
+  belongs to another worker now, and your branch and PR are still there for whoever holds
+  it. Stop working it, say so, and run the loop again.
+- **`20`** — transport failure, and the write **may have half-landed**. Do not retry
+  blindly and do not move on while a claim of yours is ambiguous: re-check the issue's
+  real state first. Running `next-action` again is the cheapest way to do that — it
+  re-reads the lease and tells you where you actually stand.
 
 ## Renewing your lease
 
@@ -132,8 +144,8 @@ before you do anything else.
 
 ## Staying in ambush
 
-On `idle`: if I passed `--once`, you are done — report the drain summary (delivered /
-needs-decision / untouched) and end the turn.
+On `idle`: if I passed `--once`, you are done — report the drain summary by the labels
+I filter on (`awaiting-merge` / `needs-decision` / untouched) and end the turn.
 
 Otherwise stay in ambush behind a **zero-token watcher** — a read-only queue poll that
 invokes no model until a task is actually startable:
