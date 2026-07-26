@@ -1,5 +1,5 @@
 {
-  "description": "An OPTIMIZATION over lease expiry, never the recovery mechanism: under kraken-protocol/6 a claim is a lease that frees itself within one TTL (PROTOCOL.md §5), and these hooks just hand it back sooner. SessionEnd (graceful exit) auto-releases so the task requeues in seconds instead of at the TTL (PROTOCOL.md §9, coordination-repo #13); StopFailure matcher rate_limit (a usage limit kills the turn but not the session, so SessionEnd never fires) auto-releases too and stamps the wake-retry flag kraken.py watch uses to resume the drain after the limit window resets (#60). A harness with no hook events is not a less conforming worker.",
+  "description": "An OPTIMIZATION over lease expiry, never the recovery mechanism: under kraken-protocol/7 a claim is a lease that frees itself within one TTL (PROTOCOL.md §5), and these hooks just hand it back sooner. SessionEnd (graceful exit) auto-releases so the task requeues in seconds instead of at the TTL (PROTOCOL.md §9, coordination-repo #13); StopFailure matcher rate_limit (a usage limit kills the turn but not the session, so SessionEnd never fires) auto-releases too and stamps the wake-retry flag kraken.py watch uses to resume the drain after the limit window resets (#60). A harness with no hook events is not a less conforming worker.",
   "hooks": {
     "SessionEnd": [
       {

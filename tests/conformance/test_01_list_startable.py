@@ -8,7 +8,11 @@ from harness import KrakenConformanceTest
 class ListStartableTests(KrakenConformanceTest):
     def test_list_startable(self):
         self.mk_issue(1, "old startable", "kraken-task", "project:app")
+        # What holds #2 is its LIVE LEASE, not the badge beside it: under
+        # protocol/7 the label is write-only, so a claim ref is what a claimed
+        # task actually looks like to the filter.
         self.mk_issue(2, "claimed", "kraken-task", "project:app", "in-progress")
+        self.mk_claim_ref(2, "w-other", age_hours=0)
         self.mk_issue(3, "other project", "kraken-task", "project:other")
         self.mk_issue(4, "young startable", "kraken-task", "project:app")
         self.mk_issue(5, "delivered", "kraken-task", "project:app", "awaiting-merge")

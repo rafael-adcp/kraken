@@ -145,7 +145,7 @@ bouncing) a PR. The tentacles drive everything else.
 
 The coordination contract — task shape, state machine, the machine marker,
 the claim algorithm — is normatively specified in
-[`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/6`); it is agent-agnostic, so any
+[`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/7`); it is agent-agnostic, so any
 tool that follows it can be a tentacle on the same queue. How a worker executes it
 lives in [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md) — a loop around
 `kraken.py next-action`, which answers "what do I do now" with a JSON envelope so
@@ -167,7 +167,7 @@ reuses it through [`AGENTS.md`](AGENTS.md) with **no deltas at all**.
    <details>
    <summary>Not running the plugin? The same setup by hand</summary>
 
-   **One file.** Under `kraken-protocol/6` the coordination repo runs nothing —
+   **One file.** Under `kraken-protocol/7` the coordination repo runs nothing —
    no workflows, and no vendored copy of the transition program for them to
    exec. Stale claims, an answered task's requeue and queue-entry validation are
    all derived by the reader, on the queue read a worker or `status` performs
@@ -334,7 +334,7 @@ delivered, the result with the acceptance check executed, and the close:
 | **GitHub Copilot coding agent** | Issue assignment (native GitHub) | Hosted sandbox; nothing beyond GitHub Actions | No | Code is on GitHub and the task needs nothing the platform doesn't already give it |
 | **Claude Code cloud / scheduled agents** | A schedule waking a managed sandbox | Zero — the sandbox is managed for you | No | You want scheduled runs with no environment to keep and the sandbox suits the work |
 | **`claude-code-action` in CI** | An event trigger (push / PR / label) | Ephemeral, disposable CI runner | No | Automation is CI-shaped and a fresh runner is the correct environment |
-| **Kraken** | An issue queue drained via [`kraken-protocol/6`](PROTOCOL.md) | Your prepared, long-lived environment | Yes | The environment is the point — work must run where your services, data, and credentials already live, with named, audited workers |
+| **Kraken** | An issue queue drained via [`kraken-protocol/7`](PROTOCOL.md) | Your prepared, long-lived environment | Yes | The environment is the point — work must run where your services, data, and credentials already live, with named, audited workers |
 
 By 2026 the obvious reflex is "doesn't this already exist?" — assigning an issue
 to an agent is native GitHub, Claude Code runs scheduled agents in the cloud, and
@@ -371,7 +371,7 @@ a fresh, ephemeral runner is exactly the clean context you want; nothing here
 beats that, so wire it up. Kraken is for the other case: a queue you drain
 unattended against long-lived services and a toolchain that would cost minutes
 to rebuild on every runner. And because a tentacle speaks the agent-agnostic
-[`kraken-protocol/6`](PROTOCOL.md), the queue isn't wed to one vendor's action —
+[`kraken-protocol/7`](PROTOCOL.md), the queue isn't wed to one vendor's action —
 any tool that follows the protocol can drain it. **Prefer `claude-code-action`
 when** your automation is CI-shaped and a disposable runner is the correct
 environment; prefer Kraken when the environment is the point and you want no
@@ -448,8 +448,7 @@ lease is still its own, and refuses if it is not.
 You only hear about it if a task defeats **three** workers in a row: at that
 point stealing it again would just burn a fourth, so it goes to
 `needs-decision` for you to triage. (The same read also cleans up after itself:
-an orphaned lock is deleted, and an `in-progress` label with no lease behind it
-is requeued.)
+a lock left on a task that already moved on is deleted.)
 
 Want a different clock? `KRAKEN_LEASE_TTL_SECONDS` sets the TTL; the renewal
 interval is always a third of it (`kraken.py contract lease-renew`).
@@ -465,7 +464,7 @@ auto-release never fires. What does fire is Claude Code's **`StopFailure`** hook
 (a turn ended by an API error), and Kraken registers it with matcher
 `rate_limit`: the bundled hook **releases the held claim on the spot** — a
 `released` marker with `reason: usage limit` and the claim ref deleted — so the task is
-back on the queue in seconds instead of squatting `in-progress`, free for any
+back on the queue in seconds instead of sitting on a lease nobody is renewing, free for any
 worker on an account that still has quota. (`gh` still works at limit time;
 only the model API is blocked, which is why the release can land.)
 
@@ -478,8 +477,9 @@ with the whole thread in hand. No operator gesture needed.
 
 The lease is the backstop for the residue — the hook itself failing, or a hard
 kill: 30 minutes without a renewal and the task is free for the next worker
-regardless, no hook involved. The manual shortcut also still works: remove
-`in-progress` from a stuck issue and it is startable again immediately.
+regardless, no hook involved. (Removing the `in-progress` label by hand does
+*nothing* here — it's a badge for you, not the lock. The lock is the claim ref,
+and only the lease's clock or an explicit release opens it.)
 
 </details>
 
@@ -520,7 +520,7 @@ GitHub Actions) is open work —
 <details>
 <summary><b>Is the Copilot CLI worker as self-healing as the Claude Code one?</b></summary>
 
-Yes — and as of `kraken-protocol/6` that includes recovery **latency**, which is
+Yes — and under `kraken-protocol/7` that includes recovery **latency**, which is
 the part that used to differ. A claim is a **lease** that expires 30 minutes
 after its last renewal, and expiry is applied by whoever reads the queue. So a
 worker that dies in any harness, in any way, frees its task within one TTL with

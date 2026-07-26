@@ -1087,14 +1087,14 @@ class StatusComputeTests(unittest.TestCase):
         self.assertEqual([r["number"] for r in report["in_flight"]], [50])
         self.assertEqual(report["in_flight"][0]["worker"], "w9")
 
-    def test_in_progress_label_without_a_ref_is_unknown_age(self):
-        # An orphan projection (label, no ref): surfaced in flight but with no
-        # worker/age — the reaper will requeue it.
+    def test_in_progress_label_without_a_ref_is_not_in_flight(self):
+        # A stale badge (label, no ref). Under protocol/6 the console showed it
+        # as in flight with no worker and no age, and the reaper requeued it.
+        # Under protocol/7 nothing repairs the label, so reading it would strand
+        # that "worker unknown" row forever — the lease alone says who is running.
         nodes = [self._node(99, "silent", ["kraken-task", "project:app", "in-progress"])]
         report = self._call(nodes, projects=["app"])
-        item = report["in_flight"][0]
-        self.assertIsNone(item["heartbeat_age_seconds"])
-        self.assertIsNone(item["worker"])
+        self.assertEqual(report["in_flight"], [])
 
     def test_project_filter(self):
         nodes = [
@@ -1415,14 +1415,16 @@ class ExpiryCountTests(unittest.TestCase):
 
 
 class ReconcilerPlanTests(unittest.TestCase):
-    """reconcile_plan's four rules as a PURE decision (PROTOCOL.md §6) — no
+    """reconcile_plan's two rules as a PURE decision (PROTOCOL.md §6) — no
     transport at all, because the whole point of protocol/5 is that the rules run
     off the queue read a reader already has. `nodes` carries only OPEN kraken-task
     issues, which is what makes rule 1 free: a ref whose issue is absent from that
     walk is a lock over a closed (or no-longer-task) issue.
 
-    Under protocol/6 an EXPIRED lease is deliberately NOT in here: it is unheld,
-    the claim path steals it, and the reconciler writes nothing."""
+    Two things are deliberately NOT in here. An EXPIRED lease (protocol/6): it is
+    unheld, the claim path steals it, and the reconciler writes nothing. And the
+    `in-progress` LABEL in any state (protocol/7): it is write-only, so neither a
+    missing one nor an orphan one is a repair anybody is owed."""
 
     def _rules(self, plan):
         return sorted((a["rule"], a["issue"]) for a in plan)
@@ -1470,29 +1472,27 @@ class ReconcilerPlanTests(unittest.TestCase):
         nodes = [_task_node(1, ["kraken-task", "in-progress"], comments=comments)]
         self.assertEqual(kraken.reconcile_plan(nodes, _leases(i1=10)), [])
 
-    def test_rule3_heal_missing_label(self):
+    def test_a_live_lease_with_no_label_plans_nothing(self):
+        # protocol/6 healed this (rule 3: re-add the badge a crashed claim never
+        # wrote). Nothing reads the badge now, and the lease already holds the
+        # task, so the repair buys a prettier issue list and one write.
         nodes = [_task_node(5, ["kraken-task"])]
-        plan = kraken.reconcile_plan(nodes, _leases(i5=10))
-        self.assertEqual(self._rules(plan), [("heal", 5)])
+        self.assertEqual(kraken.reconcile_plan(nodes, _leases(i5=10)), [])
 
-    def test_heal_never_re_holds_an_expired_lease(self):
-        # Restoring in-progress for a lease the reader just declared free would
-        # put the task back behind a label with nothing behind IT.
-        nodes = [_task_node(5, ["kraken-task"])]
-        expired_age = kraken.LEASE_DEFAULT_TTL_SECONDS + 60
-        self.assertEqual(kraken.reconcile_plan(nodes, _leases(i5=expired_age)), [])
+    def test_an_orphan_in_progress_label_plans_nothing(self):
+        # protocol/6 requeued this (rule 4: a label with no ref behind it). Under
+        # protocol/7 the task is ALREADY queued — the label never held it — so
+        # there is nothing to requeue and no comment to post.
+        self.assertEqual(
+            kraken.reconcile_plan([_task_node(3, ["kraken-task", "in-progress"])], {}),
+            [])
 
-    def test_rule4_requeue_orphan_projection(self):
-        plan = kraken.reconcile_plan(
-            [_task_node(3, ["kraken-task", "in-progress"])], {})
-        self.assertEqual(self._rules(plan), [("requeue", 3)])
-
-    def test_agreeing_state_plans_nothing(self):
+    def test_a_queue_with_nothing_to_repair_plans_nothing(self):
         nodes = [_task_node(2, ["kraken-task", "in-progress"]),
                  _task_node(9, ["kraken-task"]),
                  _task_node(10, ["kraken-task", "awaiting-merge"])]
         self.assertEqual(kraken.reconcile_plan(nodes, _leases(i2=10)), [],
-                         "a queue that already agrees must cost zero writes")
+                         "a queue holding one live lease must cost zero writes")
 
 
 class ReconcilerApplyTests(unittest.TestCase):
@@ -1548,28 +1548,28 @@ class ReconcilerApplyTests(unittest.TestCase):
         buf, err = StringIO(), StringIO()
         with redirect_stdout(buf), redirect_stderr(err):
             counts = kraken.apply_reconcile(
-                "o/tasks", [{"rule": "heal", "issue": 5, "reason": "x"}], "w")
+                "o/tasks",
+                [{"rule": "reclaim", "issue": 5, "reason": "x", "held": True,
+                  "gens": [1]}], "w")
         self.assertIsNone(counts)
-        self.assertIn("gh-failure stage=heal issue=5", err.getvalue())
+        self.assertIn("gh-failure stage=labels issue=5", err.getvalue())
 
     def test_project_reconcile_folds_the_plan_into_the_read(self):
         # The drain must see the state it just repaired without re-fetching it.
         nodes = [_task_node(1, ["kraken-task", "in-progress"]),
-                 _task_node(3, ["kraken-task", "in-progress"]),
                  _task_node(5, ["kraken-task"])]
         leases = _leases(i1=10, i5=10, i6=10)
         plan = [{"rule": "reclaim", "issue": 1, "reason": "x", "held": True,
                  "gens": [1]},
-                {"rule": "requeue", "issue": 3, "reason": "x"},
-                {"rule": "heal", "issue": 5, "reason": "x"},
                 {"rule": "orphan-lock", "issue": 6, "reason": "x", "gens": [1]}]
         kraken.project_reconcile(plan, nodes, leases)
         self.assertEqual(sorted(leases), [5],
                          "reclaimed/orphan leases must be dropped")
         labels = {n["number"]: set(kraken.label_names_of(n)) for n in nodes}
         self.assertEqual(labels[1], {"kraken-task", "needs-decision"})
-        self.assertEqual(labels[3], {"kraken-task"})
-        self.assertEqual(labels[5], {"kraken-task", "in-progress"})
+        # #5's live lease is untouched, badge or no badge: the fold mirrors the
+        # writes, and protocol/7 plans no label write for it.
+        self.assertEqual(labels[5], {"kraken-task"})
 
 
 class WakeRetryDueTests(unittest.TestCase):

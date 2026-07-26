@@ -1,6 +1,6 @@
 ---
 name: status
-description: Read-only console of a kraken queue — everything the operator reads in one place. Runs `kraken.py status`, which computes the review queue (awaiting-merge, with PR links), the decision queue (needs-decision), what is still in-progress (worker name + lease age, flagging expired leases), a merged-PR-but-open-issue orphan flag, and the launch recon (project: labels), then renders that output. No writes, no label changes.
+description: Read-only console of a kraken queue — everything the operator reads in one place. Runs `kraken.py status`, which computes the review queue (awaiting-merge, with PR links), the decision queue (needs-decision), what is still in flight (every live claim ref — worker name + lease age, flagging expired leases), a merged-PR-but-open-issue orphan flag, and the launch recon (project: labels), then renders that output. No writes, no label changes.
 ---
 
 # Kraken — surface the depths
@@ -10,7 +10,7 @@ repo. The whole computation lives in `kraken.py status` — the review queue and
 decision queue (what needs me), what is still in flight (and which of those claims
 have gone silent), the one blind spot the state machine has (an `awaiting-merge` task
 whose PR is already merged but whose issue was never closed — the reconcile only watches
-`in-progress`, so these can sit forever), the queue-entry hygiene report (tasks no
+claim refs, and a delivered task has none, so these can sit forever), the queue-entry hygiene report (tasks no
 worker can start as filed), and the launch recon (which projects live in this queue). You run the subcommand and render
 its output. You read the queue; you never touch it.
 

@@ -41,10 +41,10 @@ check_label() {
   for f in "$@"; do grep -qF -- "$label" "$f" || missing="$missing $f"; done
   [ -n "$missing" ] && err "label '$label' missing from:$missing"
 }
-# init creates all four; status surfaces only the three human-facing labels;
-# the lister owns the startable filter (all four); claim guards the three held
-# labels; escalate/deliver each swap in-progress for their target; release only
-# touches in-progress.
+# init creates all four; status surfaces only the three human-facing labels; the
+# lister owns the startable filter; claim guards the two held labels and writes
+# in-progress as a write-only badge (§3); escalate/deliver each swap in-progress
+# for their target; release only touches in-progress.
 check_label "kraken-task"    "$SKILL" "$INIT" "$README" "$PROTOCOL" "$TEMPLATE" "$LISTER"
 check_label "in-progress"    "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER"
 check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$ESCALATE"

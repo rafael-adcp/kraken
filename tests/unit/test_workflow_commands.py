@@ -185,9 +185,10 @@ class ValidationBodyTests(unittest.TestCase):
 
 
 class StaleClaimBodyTests(unittest.TestCase):
-    """The reconciler's comments. Under protocol/5 a WORKER posts them (the
-    reconcile rides the claim path), so unlike protocol/4's Actions-bot version
-    they carry the §4 attribution disclaimer."""
+    """The reconciler's comment — the reclaim note, and since protocol/7 the only
+    one it writes. Under protocol/5 a WORKER posts it (the reconcile rides the
+    claim path), so unlike protocol/4's Actions-bot version it carries the §4
+    attribution disclaimer."""
 
     def test_carries_reason_prose_and_marker(self):
         body = kraken.stale_claim_body("w1", "the lease expired 3 times")
@@ -198,11 +199,6 @@ class StaleClaimBodyTests(unittest.TestCase):
     def test_carries_the_worker_disclaimer(self):
         body = kraken.stale_claim_body("w1", "no worker heartbeat on record")
         self.assertTrue(body.startswith(kraken.disclaimer("w1")))
-
-    def test_orphan_projection_note_is_attributed_too(self):
-        body = kraken.orphan_projection_body("w1")
-        self.assertTrue(body.startswith(kraken.disclaimer("w1")))
-        self.assertIn('"reason":"in-progress label with no claim ref"', body)
 
 
 # --- cmd_reap: the stand-alone reconcile pass, transport mocked --------------
@@ -302,7 +298,7 @@ class ReapCommandTests(unittest.TestCase):
         self.assertEqual(self.swaps, [])
         self.assertEqual(self.posts, [])
         self.assertEqual(self.deleted, [])
-        self.assertIn("reclaimed=0 orphan_locks=0 healed=0 requeued=0", out)
+        self.assertIn("reclaimed=0 orphan_locks=0", out)
 
     def test_live_worker_left_alone(self):
         rc, out = self._run([self._node(2, ["kraken-task", "in-progress"])],
@@ -311,7 +307,7 @@ class ReapCommandTests(unittest.TestCase):
         self.assertEqual(self.swaps, [])
         self.assertEqual(self.posts, [])
         self.assertEqual(self.deleted, [])
-        self.assertIn("reclaimed=0 orphan_locks=0 healed=0 requeued=0", out)
+        self.assertIn("reclaimed=0 orphan_locks=0", out)
 
     def test_reclaim_is_attributed_to_the_named_worker(self):
         node = self._node(1, ["kraken-task", "in-progress"],
@@ -379,7 +375,6 @@ class RequeueVerdictTests(unittest.TestCase):
         # requeue the escalation they just posted. This is what retires the
         # protocol/4 `user.type == Bot` gate.
         for body in (kraken.stale_claim_body("w1", "silent"),
-                     kraken.orphan_projection_body("w1"),
                      kraken.validation_body([kraken.VALIDATE_GOAL_MISSING]),
                      kraken.compose_note("w1", "still working")):
             comments = [_worker_cmt(), _cmt(body)]
@@ -441,12 +436,20 @@ class RequeuedLabelsTests(unittest.TestCase):
                           [_worker_cmt(), _cmt("do option B")])
         self.assertEqual(kraken.requeued_labels(node, {1: "sha"}), ())
 
-    def test_in_progress_is_never_requeued_by_a_reply(self):
-        # An in-progress label with no ref is the reconciler's rule 4 (a repair),
-        # not a requeue — two mechanisms for one label would race.
+    def test_in_progress_needs_no_lifting(self):
+        # Nothing to lift: the badge is write-only (§3), so the task is already
+        # queued and the derivation has no held label to report.
         node = self._node(1, ["kraken-task", "in-progress"],
                           [_worker_cmt(), _cmt("any news?")])
         self.assertEqual(kraken.requeued_labels(node, {}), ())
+
+    def test_a_stale_badge_cannot_suppress_a_requeue(self):
+        # Both labels at once — a crashed escalate that left the badge on. Under
+        # protocol/6 the in-progress label short-circuited the whole derivation,
+        # so the operator's answer was silently ignored. It holds nothing now.
+        node = self._node(1, ["kraken-task", "in-progress", "needs-decision"],
+                          [_worker_cmt(), _cmt("do option B")])
+        self.assertEqual(kraken.requeued_labels(node, {}), ("needs-decision",))
 
     def test_an_unheld_task_lifts_nothing(self):
         node = self._node(1, ["kraken-task"], [_cmt("just chatter")])

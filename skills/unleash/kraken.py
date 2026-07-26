@@ -13,7 +13,7 @@ and quoting hazards they had to defend against by hand. Moving to Python kills
 that whole class of bug and lets pagination (the queue listing, the comment
 history the coordination workflows read) be handled once, correctly.
 
-Claiming (kraken-protocol/6) is a true compare-and-swap: creating the claim
+Claiming (kraken-protocol/7) is a true compare-and-swap: creating the claim
 ref `refs/kraken/claims/<issue>/<generation>` succeeds for exactly one caller —
 GitHub answers HTTP 422 to everyone else — so the ref IS the arbiter, and its
 commit's server-stamped date IS the lease timestamp. The ref is a LEASE, not an
@@ -78,9 +78,17 @@ EXIT_TRANSPORT = 20
 EXIT_NONE = 3  # claim-next: nothing startable to claim (not empty-vs-error ambiguous)
 EXIT_USAGE = 2
 
-# A task carrying any of these is held, never startable. `in-progress` is the
-# projection of the claim ref; the other two are operator-facing states.
-HELD_LABELS = ("in-progress", "needs-decision", "awaiting-merge")
+# A task carrying either of these is held, never startable. Both are
+# operator-facing states with no lock behind them, which is exactly why a label
+# can decide them: the label IS the state.
+#
+# `in-progress` is deliberately absent. It is the claim ref's projection, and a
+# projection read by a decision is a second source of truth that then has to be
+# reconciled with the first. Under protocol/7 it is WRITE-ONLY: written for the
+# human reading the issue list, never consulted by the claim guard, the startable
+# filter, the requeue derivation or the console. The lease alone says whether
+# somebody is working, so a label that lags it costs nothing but a stale badge.
+HELD_LABELS = ("needs-decision", "awaiting-merge")
 
 # A scheduling preference, not a state: a startable task carrying this label is
 # offered ahead of normal ones (createdAt FIFO still breaks ties within each
@@ -93,8 +101,10 @@ PRIORITY_LABEL = "priority:high"
 # protocol/5 moves the reconcile of that clock onto the READER (§6), so a
 # conforming coordination repo runs no scheduled job of its own; protocol/6 gives
 # that clock an expiry — the claim ref is a LEASE, and a reader that finds one
-# older than the TTL steals it instead of treating it as held.
-PROTOCOL_VERSION = 6
+# older than the TTL steals it instead of treating it as held; protocol/7 makes
+# the `in-progress` label WRITE-ONLY, so the lease is the only thing any decision
+# reads and the two can no longer disagree.
+PROTOCOL_VERSION = 7
 
 # Installed plugin version, single-sourced from the manifest the release workflow
 # bumps; read at runtime for the Kraken-Task trailer, never a second literal.
@@ -120,7 +130,7 @@ def plugin_version(manifest=PLUGIN_MANIFEST):
 
 # --- diagnostic output -------------------------------------------------------
 # Every transition prints one-line diagnostics a human (or a shell) reads off
-# stdout: "claim: held issue=7 label=in-progress", "reap: healed issue=9 …".
+# stdout: "claim: held issue=7 label=needs-decision", "reap: reclaimed issue=9 …".
 # `next-action` (below) owns stdout for its JSON envelope, so it routes those
 # same lines to stderr for the duration of its run — identical text, identical
 # order, just off the machine channel. Only the functions next-action reaches
@@ -401,8 +411,9 @@ def comment_records(repo, issue):
 # server picks one, and the loser is told. Deleting a superseded generation is
 # garbage collection — losing that delete costs a stray ref, never a lease.
 #
-# Refs are UI-invisible: the in-progress label is a projection written after the
-# CAS.
+# Refs are UI-invisible, which is the whole reason the in-progress label exists:
+# it is written after the CAS so a human scanning the issue list can see the ref
+# they cannot. Nothing reads it back (§3).
 
 CLAIM_REF_PREFIX = "refs/kraken/claims/"
 # Generation of a bare refs/kraken/claims/<issue> — the shape protocol/5 wrote.
@@ -1027,10 +1038,11 @@ def resolve_depends_on(repo, targets):
 # The comment window rides the queue walk (QUEUE_COMMENT_WINDOW), so the
 # derivation costs no request of its own.
 
-# The held labels an operator reply can lift. `in-progress` is deliberately NOT
-# one: an in-progress label with no ref behind it is the reconciler's rule 4
-# (§6), a repair, not a requeue — two mechanisms for one label would race.
-REQUEUEABLE_LABELS = ("needs-decision", "awaiting-merge")
+# The labels a reply can lift are exactly the labels that hold (HELD_LABELS):
+# both are operator-facing states, and answering one is what ends it. Under
+# protocol/6 this was a second, narrower tuple because `in-progress` held without
+# being requeueable; protocol/7 made that label write-only, so the two sets
+# coincide and one name is enough.
 
 
 def is_worker_comment(body):
@@ -1121,13 +1133,13 @@ def requeued_labels(node, live):
     A **live lease** outranks any reading of the timeline: the lock is the truth
     (§5), and a comment on a claimed task is context for its worker, not a
     requeue. An EXPIRED lease outranks nothing — it holds no task (§6), so
-    `live` is the live-lease view, never the raw ref list."""
+    `live` is the live-lease view, never the raw ref list. The lease is the ONLY
+    thing that outranks the thread here: `in-progress` is write-only (§3), so a
+    stale badge left on a task cannot suppress a requeue the operator earned."""
     if node["number"] in live:
         return ()
     labels = set(label_names_of(node))
-    if "in-progress" in labels:
-        return ()
-    held = tuple(h for h in REQUEUEABLE_LABELS if h in labels)
+    held = tuple(h for h in HELD_LABELS if h in labels)
     if not held:
         return ()
     return held if requeue_verdict(held, comment_nodes_of(node)) else ()
@@ -1172,12 +1184,12 @@ def classify_queue(repo, project, include_body=False, read=None):
     which is how claim-next classifies the state its reconcile pass just
     produced without re-fetching it.
 
-    Held means: a held label (the projection) OR a **live lease** (the lock).
-    Reading both keeps the filter honest across the crash window between a won
-    CAS and its label projection — a ref-held task is never offered as
-    startable just because the label has not landed yet. An EXPIRED lease holds
-    nothing (§5): the task is offered, and the claim that follows steals the
-    lease.
+    Held means: a held label (needs-decision / awaiting-merge — an operator-facing
+    state) OR a **live lease** (the lock). Those are the only two kinds of hold
+    there are, and they do not overlap: `in-progress` is write-only (§3), so the
+    lease answers for it and a task wearing a stale badge with no live lease is
+    offered like any other. An EXPIRED lease holds nothing either (§5): the task
+    is offered, and the claim that follows steals the lease.
 
     A held LABEL is not the last word, though: a task whose operator has already
     replied is requeued by derivation (§6, requeued_labels) and rejoins the
@@ -1215,12 +1227,6 @@ def classify_queue(repo, project, include_body=False, read=None):
         # A held label only holds while the operator has not answered: the
         # requeue derivation lifts the ones an operator reply already cleared.
         still_held = set(HELD_LABELS) - set(requeued_labels(node, live))
-        if number in leases and number not in live:
-            # The lease expired. `in-progress` is only its projection, so it
-            # holds no better than the lease itself does — the claim that
-            # follows steals both (§5). The other two held labels are not
-            # projections of a lease and still hold.
-            still_held.discard("in-progress")
         if any(h in label_names for h in still_held) or number in live:
             rows.append([number, title, created, "held", body])
             continue
@@ -1333,21 +1339,22 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
     it observed no claim ref. It decides the generation the CAS starts from — a
     free task takes generation 1, and a task whose lease expired takes the one
     ABOVE its holder. That is the whole of what a "steal" is: not a different
-    algorithm, a different starting rung. `in-progress` is an expired lease's
-    projection, so stealing implies that label is stale too.
+    algorithm, a different starting rung.
 
     `probe_lease` is the named-claim path's substitute for that observation: a
     drain reads every lease with the queue, a `claim <issue>` has read nothing,
     so it looks the lease up itself — but only once the cheap label guard has
     already let the task through, so a task held by `needs-decision` or
-    `awaiting-merge` still costs exactly one read to refuse."""
+    `awaiting-merge` still costs exactly one read to refuse.
+
+    The guard reads two labels, not three: `in-progress` is write-only (§3), so
+    the lease below decides everything it used to. That collapses what was this
+    function's hardest branch — a label that held only conditionally, probed
+    mid-guard — into the plain rule the lock already stated."""
     ttl = lease_ttl_seconds(ttl)
 
     def _stealing(l):
         return l is not None and not l["live"] and l["worker"] != worker
-
-    if _stealing(lease):
-        allow_held = tuple(allow_held) + ("in-progress",)
 
     # 1. Guard — re-fetch labels; a held task is skipped with zero writes.
     label_names = issue_label_names(repo, issue)
@@ -1356,33 +1363,24 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
         return EXIT_TRANSPORT
     for held in HELD_LABELS:
         if held in label_names and held not in allow_held:
-            # `in-progress` is a LEASE's projection (§5): it holds exactly as
-            # long as the lease behind it does. Refusing on the label alone
-            # would make an expired lease unstealable through this path.
-            if held == "in-progress" and probe_lease and lease is None:
-                lease = probe_lease_state(repo, issue, ttl)
-                if lease is False:
-                    diag(f"claim: gh-failure issue={issue} stage=lease")
-                    return EXIT_TRANSPORT
-                if _stealing(lease):
-                    allow_held = tuple(allow_held) + ("in-progress",)
-                    continue
             diag(f"claim: held issue={issue} label={held}")
             return EXIT_NOT_CLEAR
     if probe_lease and lease is None:
-        # Labels are clear, but a lease can still exist in the crash window
-        # between a won CAS and its label projection. Read it before the CAS:
-        # not to decide ownership, but because the generation to create is the
-        # one above whatever is actually there — creating a LOWER one would
-        # "win" a ref nobody is holding by while the real holder works on.
+        # Labels say nothing about who is working — that is the lease's job, and
+        # this path has not read one yet. It answers both questions at once: who
+        # holds the task (the check below), and which generation the CAS must
+        # create — the one above whatever is actually there, since creating a
+        # LOWER one would "win" a ref nobody is holding by while the real holder
+        # works on.
         lease = probe_lease_state(repo, issue, ttl)
         if lease is False:
             diag(f"claim: gh-failure issue={issue} stage=lease")
             return EXIT_TRANSPORT
 
     # A live lease that is not ours holds the task whatever the labels say — the
-    # lock outranks its own projection (§5), including in the crash window where
-    # no label has landed yet. This is a LOST claim, not an unclear one: somebody
+    # lock is the whole of "somebody is working on this" (§5), including in the
+    # crash window where no label has landed yet, and including when the badge
+    # says otherwise. This is a LOST claim, not an unclear one: somebody
     # owns the task. Under protocol/5 the same case surfaced by attempting the
     # CAS and reading its 422; the generation ladder makes that attempt worse
     # than useless — creating the next generation would SUCCEED and take a live
@@ -1393,11 +1391,7 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
 
     steal = lease if _stealing(lease) else None
     # The requeued labels still on the issue: dropped as part of the projection.
-    # Never `in-progress` — on a steal it is already the right projection, just
-    # of the wrong lease, and the step below re-asserts it. Stripping and
-    # re-adding it would spend two writes to reach the state it is already in.
-    stale_held = [h for h in HELD_LABELS
-                  if h in label_names and h in allow_held and h != "in-progress"]
+    stale_held = [h for h in HELD_LABELS if h in label_names and h in allow_held]
 
     # 2. CAS — an orphan claim commit, then the create that arbitrates: the
     #    generation above whatever was observed. It is the SAME conflict-failing
@@ -1428,7 +1422,10 @@ def _claim_once(repo, issue, worker, allow_held=(), lease=None, ttl=None,
 
     # 3. Projection. State file FIRST so lifecycle hooks can release the claim even
     #    if the writes below fail; then the in-progress label and claim comment. A
-    #    failure here leaves the claim HELD — exit 20 says re-check, reaper heals.
+    #    failure here leaves the claim HELD by the lease — exit 20 says re-check.
+    #    The label is the only thing that can be left behind, and nothing reads it
+    #    (§3): the task stays correctly held, just without its badge, until the
+    #    terminal transition writes the next one.
     write_claim_state(repo, issue, worker)
     if steal is not None and not post_comment(
             repo, issue, lease_expired_body(worker, steal)):
@@ -2518,15 +2515,15 @@ def compute_status(repo, project, nodes, now, *, leases, commit_meta,
                            "merge_state_unknown": merge_state_unknown})
         elif "needs-decision" in labels:
             decision.append({"number": number, "title": title})
-        elif "in-progress" in labels or number in leases:
-            # In flight: the label projection OR the lease itself — a claim whose
-            # label has not landed yet is still running work.
-            worker, msg, anchor = None, None, None
-            age = None
-            lease = leases.get(number)
-            if lease:
-                worker, msg, anchor = claim_meta_of(lease["sha"], commit_meta)
-                age = lease["age"]
+        elif number in leases:
+            # In flight is the LEASE, never the label (§3): the label is written
+            # for the human reading the issue list and nothing repairs it, so a
+            # console that read it would strand a "worker unknown" row on every
+            # task whose release crashed — forever. Keying on the lease also
+            # covers the opposite window, a claim whose label has not landed yet.
+            lease = leases[number]
+            worker, msg, anchor = claim_meta_of(lease["sha"], commit_meta)
+            age = lease["age"]
             # An expired lease is not a claim any more: the next drain to read
             # the queue steals it, no repair pass involved. The console still has
             # to say so out loud — a lease due to expire in a minute looks
@@ -2536,7 +2533,7 @@ def compute_status(repo, project, nodes, now, *, leases, commit_meta,
                               "heartbeat_anchor": anchor,
                               "heartbeat_age_seconds": age,
                               "heartbeat_msg": msg,
-                              "stale": not (lease and lease["live"])})
+                              "stale": not lease["live"]})
 
     if project:
         projects = [project]
@@ -2901,19 +2898,23 @@ def render_init(report):
 # with the worker side.
 
 # --- the reconciler (PROTOCOL.md §6) -----------------------------------------
-# The claim ref is the lease and its commit date the lease timestamp, so the
-# leases and the in-progress projection have to be made to agree. Under
-# protocol/5 the READER does that, not a cron in the coordination repo: a dead
-# worker's lease obstructs exactly one party — the next worker who wants to claim
-# — and there is no other observer of it, so the reconcile rides the claim path
-# (cmd_claim_next) on the queue read it already paid for. `reap` keeps the same
-# pass as an operator-side escape hatch; both go through the pure planner below,
-# so the two entry points can never drift.
+# The claim ref is the lease and its commit date the lease timestamp. Under
+# protocol/5 the READER reconciles it, not a cron in the coordination repo: a
+# dead worker's lease obstructs exactly one party — the next worker who wants to
+# claim — and there is no other observer of it, so the reconcile rides the claim
+# path (cmd_claim_next) on the queue read it already paid for. `reap` keeps the
+# same pass as an operator-side escape hatch; both go through the pure planner
+# below, so the two entry points can never drift.
 #
-# Under protocol/6 this pass got SMALLER, not bigger. An expired lease is no
-# longer something the reconciler repairs — it is simply not held, and the claim
-# steals it (§5), which costs no write and needs no escalation. What survives is
-# the case expiry cannot fix on its own: a task that keeps expiring.
+# This pass has only ever got SMALLER. Protocol/6 dropped the expired lease from
+# it: an expired lease is not a repair, it is simply not held, and the claim
+# steals it (§5) at no write. Protocol/7 dropped the other half — the two rules
+# that existed to make the `in-progress` label and the leases agree (heal a
+# missing label, strip an orphan one). Nothing reads that label now (§3), so
+# there is nothing to agree WITH and no disagreement to repair.
+#
+# What is left is exactly the state the leases cannot fix on their own: a lock
+# over a task that has moved on, and a task that keeps expiring.
 
 # Who a stand-alone `reap` attributes its comments to when the operator names no
 # worker. A drain passes its own worker name instead: under protocol/5 the
@@ -2935,19 +2936,6 @@ def stale_claim_body(worker, reason):
     return compose_comment(
         worker, prose, {"type": "stale-claim", "reason": reason}
     )
-
-
-def orphan_projection_body(worker):
-    """The reconciler's requeue note for an in-progress label with no claim ref
-    behind it — a crashed release, or a claim made before protocol/4. Same
-    authorship and disclaimer rule as stale_claim_body."""
-    reason = "in-progress label with no claim ref"
-    prose = (
-        "This task carried the in-progress label with no live claim ref behind "
-        "it (a crashed release, or a claim from before protocol/4). The label "
-        "was removed and the task rejoins the queue."
-    )
-    return compose_comment(worker, prose, {"type": "stale-claim", "reason": reason})
 
 
 def expiry_count(node):
@@ -2981,14 +2969,14 @@ def reconcile_plan(nodes, leases, max_expiries=LEASE_EXPIRY_ESCALATE):
          always hangs — would otherwise be stolen, dropped, stolen again for as
          long as the queue has workers, each round burning a drain and telling
          nobody. Anything below the threshold is not the reconciler's business:
-         the lease is simply not held, and the claim path steals it;
-      3. **heal** — a LIVE lease on an issue missing its in-progress label (a
-         claim whose label projection never landed): add the label;
-      4. **requeue** — an open in-progress issue with NO ref (a crashed release,
-         or a claim from before protocol/4): remove the label.
+         the lease is simply not held, and the claim path steals it.
 
-    Rule 3 keys on a live lease on purpose: restoring in-progress for an expired
-    one would re-hold a task the reader just decided is free.
+    Both rules are about the LEASE. Under protocol/6 there were two more, both
+    about the in-progress LABEL: restore one a crashed claim never wrote, strip
+    one a crashed release never removed. Protocol/7 made that label write-only
+    (§3), so a wrong badge misleads nobody and misroutes nothing — it is not a
+    repair the reader owes anyone, and the next transition on the task overwrites
+    it anyway.
 
     `nodes` is the open-kraken-task walk (repo-wide, before any project filter),
     so rule 1 needs no per-ref issue read: a ref on an issue absent from that
@@ -2998,12 +2986,14 @@ def reconcile_plan(nodes, leases, max_expiries=LEASE_EXPIRY_ESCALATE):
     time-to-triage rather than extending the lease.
 
     Returns a list of `{"rule", "issue", "reason"}` actions ordered by rule then
-    issue number; an empty list means the projection already agrees with the
-    leases (the overwhelmingly common case, and it costs zero writes)."""
+    issue number; an empty list means every lease is one a worker is entitled to
+    hold (the overwhelmingly common case, and it costs zero writes)."""
     open_labels = {n["number"]: set(label_names_of(n)) for n in nodes}
     by_number = {n["number"]: n for n in nodes}
     plan = []
 
+    # Every rule is keyed on a lease, so the walk is over the refs — a task with
+    # no ref has nothing for this pass to repair, whatever labels it wears.
     for num in sorted(leases):
         labels = open_labels.get(num)
         if (labels is None or "needs-decision" in labels
@@ -3017,22 +3007,14 @@ def reconcile_plan(nodes, leases, max_expiries=LEASE_EXPIRY_ESCALATE):
             expiries = expiry_count(by_number[num])
             if expiries >= max_expiries:
                 plan.append({"rule": "reclaim", "issue": num,
+                             # The escalation writes needs-decision, and clears
+                             # the in-progress badge if the task still wears one:
+                             # write-only does not mean write-and-forget.
                              "reason": f"the lease expired {expiries} times and "
                                        "no worker has finished the task",
                              "held": "in-progress" in labels,
                              "gens": leases[num]["gens"]})
             # Below the threshold: not held, not repaired — stolen by the claim.
-            continue
-
-        if "in-progress" not in labels:
-            plan.append({"rule": "heal", "issue": num,
-                         "reason": "in-progress label restored"})
-
-    for num in sorted(open_labels):
-        if num in leases or "in-progress" not in open_labels[num]:
-            continue
-        plan.append({"rule": "requeue", "issue": num,
-                     "reason": "in-progress label with no claim ref"})
 
     return plan
 
@@ -3050,7 +3032,7 @@ def apply_reconcile(repo, plan, worker):
     ends with the ref delete, so a crash leaves the task HELD and the next
     reader's rule 1 finishes the job — the task is never observably free while a
     reclaim is half-applied (§5's ordering rule)."""
-    counts = {"orphan-lock": 0, "reclaim": 0, "heal": 0, "requeue": 0}
+    counts = {"orphan-lock": 0, "reclaim": 0}
     for action in plan:
         rule, num = action["rule"], action["issue"]
 
@@ -3073,18 +3055,6 @@ def apply_reconcile(repo, plan, worker):
                 return _reconcile_failure("ref", num)
             diag(f"reap: reclaimed issue={num} ({action['reason']})")
 
-        elif rule == "heal":
-            if not swap_labels(repo, num, add="in-progress"):
-                return _reconcile_failure("heal", num)
-            diag(f"reap: healed issue={num} — in-progress label restored")
-
-        elif rule == "requeue":
-            if not swap_labels(repo, num, remove="in-progress"):
-                return _reconcile_failure("requeue", num)
-            if not post_comment(repo, num, orphan_projection_body(worker)):
-                return _reconcile_failure("comment", num)
-            diag(f"reap: requeued issue={num} ({action['reason']})")
-
         counts[rule] += 1
     return counts
 
@@ -3093,7 +3063,7 @@ def project_reconcile(plan, nodes, leases):
     """Fold an APPLIED plan back into the in-memory queue read, in place, so the
     drain that just reconciled classifies the reconciled state without paying for
     a second fetch. Mirrors exactly what apply_reconcile wrote — nothing more:
-    the leases it deleted and the labels it swapped."""
+    the leases it deleted, and the one label swap a reclaim performs."""
     by_number = {n["number"]: n for n in nodes}
     for action in plan:
         rule, num = action["rule"], action["issue"]
@@ -3102,14 +3072,9 @@ def project_reconcile(plan, nodes, leases):
         node = by_number.get(num)
         if node is None:
             continue
-        labels = set(label_names_of(node))
         if rule == "reclaim":
-            labels = (labels - {"in-progress"}) | {"needs-decision"}
-        elif rule == "heal":
-            labels = labels | {"in-progress"}
-        elif rule == "requeue":
-            labels = labels - {"in-progress"}
-        node["labels"] = {"nodes": [{"name": n} for n in sorted(labels)]}
+            labels = (set(label_names_of(node)) - {"in-progress"}) | {"needs-decision"}
+            node["labels"] = {"nodes": [{"name": n} for n in sorted(labels)]}
 
 
 def cmd_reap(args):
@@ -3118,10 +3083,12 @@ def cmd_reap(args):
     (leases included), then the plan. Exit 0 on success, 20 on any gh/transport
     failure.
 
-    Note what it will NOT do under protocol/6: free an expired lease. Expiry is
-    applied by whoever READS the queue, so an expired lease is already unheld and
-    needs no pass — running `reap` to "unstick" one is a no-op, and the drain
-    that claims next steals it."""
+    Note what it will NOT do. It does not free an expired lease (protocol/6):
+    expiry is applied by whoever READS the queue, so an expired lease is already
+    unheld — running `reap` to "unstick" one is a no-op, and the drain that
+    claims next steals it. And it does not touch the in-progress label
+    (protocol/7): the label is write-only (§3), so a task wearing a stale one is
+    already startable and there is nothing to repair."""
     repo = args.repo
     read = read_queue(repo, ttl=args.ttl)
     if read is None:
@@ -3136,8 +3103,7 @@ def cmd_reap(args):
 
     print(
         f"reap: done leases={len(leases)} reclaimed={counts['reclaim']} "
-        f"orphan_locks={counts['orphan-lock']} healed={counts['heal']} "
-        f"requeued={counts['requeue']}"
+        f"orphan_locks={counts['orphan-lock']}"
     )
     return EXIT_OK
 
@@ -3447,8 +3413,8 @@ def build_parser():
 
     p = sub.add_parser(
         "reap",
-        help="run the §6 reconcile stand-alone — reclaim stale claims, delete "
-             "orphan locks, heal/requeue projections (a drain does this itself)",
+        help="run the §6 reconcile stand-alone — reclaim repeatedly expired "
+             "claims, delete orphan locks (a drain does this itself)",
     )
     p.add_argument("repo")
     p.add_argument("worker", nargs="?", default=RECONCILER_WORKER,
