@@ -9,6 +9,7 @@ on:
   pull_request:
     paths:
       - "skills/unleash/*.py"
+      - "skills/unleash/kraken/**"
       - "tests/**"
       - ".github/workflows/conformance.yml"
   push:

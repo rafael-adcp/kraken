@@ -14,6 +14,8 @@ Stdlib only (unittest), no network, no gh.
 
 import os
 import sys
+import json
+import time
 import datetime
 import unittest
 from types import SimpleNamespace
@@ -25,6 +27,7 @@ SKILL_DIR = os.path.join(HERE, "..", "..", "skills", "unleash")
 sys.path.insert(0, os.path.abspath(SKILL_DIR))
 
 import kraken  # noqa: E402
+from fakes import FakeApi  # noqa: E402
 
 
 def disclaimer_body(worker, *rest):
@@ -217,31 +220,30 @@ class ReapCommandTests(unittest.TestCase):
     NOW = 1_800_000_000.0
 
     def setUp(self):
-        self._orig = {
-            "read_queue": kraken.read_queue,
-            "resolve_commit_meta": kraken.resolve_commit_meta,
-            "drop_generations": kraken.drop_generations,
-            "swap_labels": kraken.swap_labels,
-            "post_comment": kraken.post_comment,
-            "time": kraken.time.time,
-        }
+        self._orig_time = time.time
         self.swaps = []
         self.posts = []
         self.deleted = []
-        kraken.swap_labels = lambda repo, issue, remove=None, add=None: (
-            self.swaps.append((issue, remove, add)) or True)
-        kraken.post_comment = lambda repo, issue, body: (
-            self.posts.append((issue, body)) or True)
-        kraken.drop_generations = lambda repo, issue, gens: (
-            self.deleted.append(issue) or True)
-        kraken.time.time = lambda: self.NOW
+        time.time = lambda: self.NOW
 
     def tearDown(self):
-        for k, v in self._orig.items():
-            if k == "time":
-                kraken.time.time = v
-            else:
-                setattr(kraken, k, v)
+        time.time = self._orig_time
+
+    def _api(self):
+        def request(method, path, body=None):
+            # The only transport the applier reaches for beyond labels and
+            # comments is the ref delete, so record it as the DELETE it is.
+            issue, _gen = kraken.parse_claim_ref(path.split("/git/", 1)[1])
+            self.deleted.append(issue)
+            return (204, "")
+
+        return FakeApi(
+            "OWNER/tasks",
+            request=request,
+            swap_labels=lambda issue, remove=None, add=None: (
+                self.swaps.append((issue, remove, add)) or True),
+            post_comment=lambda issue, body: (
+                self.posts.append((issue, body)) or True))
 
     def _meta(self, seconds_ago):
         return {"committedDate": _iso(self.NOW - seconds_ago),
@@ -255,18 +257,20 @@ class ReapCommandTests(unittest.TestCase):
                                        for b in comments]}}
 
     def _run(self, nodes, refs, commit_meta, ttl=None, worker="reconciler"):
-        # Tests seed {issue: sha}; a lease is a generation ladder.
+        # Tests seed {issue: sha}; a lease is a generation ladder. The queue read
+        # is the injected collaborator — it has its own tests; what is under test
+        # here is the wiring from that read to the plan and the applier.
         ladders = {n: [(1, sha)] for n, sha in refs.items()}
-        kraken.read_queue = lambda repo, now=None, ttl=None: (
-            nodes, kraken.lease_state(ladders, commit_meta, self.NOW,
-                                      kraken.lease_ttl_seconds(ttl))
-        )
-        kraken.resolve_commit_meta = lambda repo, shas: commit_meta
-        args = SimpleNamespace(repo="OWNER/tasks", worker=worker, ttl=ttl)
+
+        def read(api, now=None, ttl=None):
+            return (nodes, kraken.lease_state(ladders, commit_meta, self.NOW,
+                                              kraken.lease_ttl_seconds(ttl)))
+
         buf = StringIO()
         with redirect_stdout(buf):
-            rc = kraken.cmd_reap(args)
-        return rc, buf.getvalue()
+            rc, counts = kraken.reconcile_pass(self._api(), worker, ttl,
+                                               read=read)
+        return rc, counts, buf.getvalue()
 
     @staticmethod
     def _expiries(n):
@@ -278,36 +282,39 @@ class ReapCommandTests(unittest.TestCase):
         # LEASE_EXPIRY_ESCALATE times and still nobody finished it.
         node = self._node(1, ["kraken-task", "in-progress"],
                           comments=self._expiries(kraken.LEASE_EXPIRY_ESCALATE))
-        rc, out = self._run([node], {1: "s1"},
-                            {"s1": self._meta(kraken.LEASE_DEFAULT_TTL_SECONDS + 60)})
+        rc, counts, _ = self._run(
+            [node], {1: "s1"},
+            {"s1": self._meta(kraken.LEASE_DEFAULT_TTL_SECONDS + 60)})
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertIn((1, "in-progress", "needs-decision"), self.swaps)
         self.assertEqual(len(self.posts), 1)
         self.assertIn("stale-claim", self.posts[0][1])
         self.assertIn(1, self.deleted)
-        self.assertIn("reap: done leases=1 reclaimed=1", out)
+        self.assertEqual((counts["leases"], counts["reclaim"]), (1, 1))
 
     def test_an_expired_lease_is_left_for_the_thief(self):
         # protocol/6: reap does NOT free an expired lease. The reader already
         # treats it as unheld, so a pass that "repaired" it would only escalate a
         # task the next drain would have picked up by itself.
-        rc, out = self._run([self._node(2, ["kraken-task", "in-progress"])],
-                            {2: "s2"},
-                            {"s2": self._meta(kraken.LEASE_DEFAULT_TTL_SECONDS + 60)})
+        rc, counts, _ = self._run(
+            [self._node(2, ["kraken-task", "in-progress"])],
+            {2: "s2"},
+            {"s2": self._meta(kraken.LEASE_DEFAULT_TTL_SECONDS + 60)})
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.swaps, [])
         self.assertEqual(self.posts, [])
         self.assertEqual(self.deleted, [])
-        self.assertIn("reclaimed=0 orphan_locks=0", out)
+        self.assertEqual((counts["reclaim"], counts["orphan-lock"]), (0, 0))
 
     def test_live_worker_left_alone(self):
-        rc, out = self._run([self._node(2, ["kraken-task", "in-progress"])],
-                            {2: "s2"}, {"s2": self._meta(0)})
+        rc, counts, _ = self._run(
+            [self._node(2, ["kraken-task", "in-progress"])],
+            {2: "s2"}, {"s2": self._meta(0)})
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.swaps, [])
         self.assertEqual(self.posts, [])
         self.assertEqual(self.deleted, [])
-        self.assertIn("reclaimed=0 orphan_locks=0", out)
+        self.assertEqual((counts["reclaim"], counts["orphan-lock"]), (0, 0))
 
     def test_reclaim_is_attributed_to_the_named_worker(self):
         node = self._node(1, ["kraken-task", "in-progress"],
@@ -322,16 +329,32 @@ class ReapCommandTests(unittest.TestCase):
         # on a task a default TTL would still consider held.
         node = self._node(7, ["kraken-task", "in-progress"],
                           comments=self._expiries(kraken.LEASE_EXPIRY_ESCALATE))
-        rc, _ = self._run([node], {7: "s7"}, {"s7": self._meta(300)}, ttl=60)
+        rc, _, _ = self._run([node], {7: "s7"}, {"s7": self._meta(300)}, ttl=60)
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertIn((7, "in-progress", "needs-decision"), self.swaps)
 
     def test_transport_failure_on_the_queue_read_is_twenty(self):
-        kraken.read_queue = lambda repo, now=None, ttl=None: None
-        args = SimpleNamespace(repo="OWNER/tasks", worker="w", ttl=None)
         with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-            rc = kraken.cmd_reap(args)
+            rc, counts = kraken.reconcile_pass(
+                self._api(), "w", None, read=lambda api, now=None, ttl=None: None)
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
+        self.assertIsNone(counts)
+
+    def test_cmd_reap_renders_the_summary(self):
+        # The one test that drives the argv-shaped entry point, so the summary
+        # line stays pinned. An empty queue needs no injection: the FakeApi
+        # answers the real walk with no issues and no claim refs.
+        empty_walk = {"data": {"repository": {"issues": {
+            "pageInfo": {"hasNextPage": False, "endCursor": ""}, "nodes": []}}}}
+        api = FakeApi("OWNER/tasks", graphql=lambda q: empty_walk,
+                      paginated=lambda path: [])
+        args = SimpleNamespace(repo="OWNER/tasks", worker="w", ttl=None, api=api)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            rc = kraken.cmd_reap(args)
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertIn("reap: done leases=0 reclaimed=0 orphan_locks=0",
+                      buf.getvalue())
 
 
 # --- the requeue derivation: held-state rules, no transport at all -----------
@@ -464,27 +487,24 @@ class ValidateCommandTests(unittest.TestCase):
             "### Notes\n\n_No response_")
 
     def setUp(self):
-        self._orig = {
-            "issue_label_names": kraken.issue_label_names,
-            "issue_body": kraken.issue_body,
-            "comment_records": kraken.comment_records,
-            "post_comment": kraken.post_comment,
-        }
         self.posts = []
-        kraken.post_comment = lambda repo, issue, body: (
-            self.posts.append((issue, body)) or True)
-        kraken.comment_records = lambda repo, issue: []
 
-    def tearDown(self):
-        for k, v in self._orig.items():
-            setattr(kraken, k, v)
+    def _api(self, **methods):
+        defaults = {
+            "post_comment": lambda issue, body: (
+                self.posts.append((issue, body)) or True),
+            "comment_records": lambda issue: [],
+        }
+        defaults.update(methods)
+        return FakeApi("OWNER/tasks", **defaults)
 
     def _run(self, issue, labels, body, prior_records=None):
-        kraken.issue_label_names = lambda repo, i: labels
-        kraken.issue_body = lambda repo, i: body
+        methods = {"issue_label_names": lambda i: labels,
+                   "issue_body": lambda i: body}
         if prior_records is not None:
-            kraken.comment_records = lambda repo, i: prior_records
-        args = SimpleNamespace(repo="OWNER/tasks", issue=str(issue))
+            methods["comment_records"] = lambda i: prior_records
+        args = SimpleNamespace(repo="OWNER/tasks", issue=str(issue),
+                               api=self._api(**methods))
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_validate(args)
         return rc
@@ -526,8 +546,9 @@ class ValidateCommandTests(unittest.TestCase):
         self.assertEqual(len(self.posts), 1)
 
     def test_transport_failure_on_labels_is_twenty(self):
-        kraken.issue_label_names = lambda repo, i: None
-        args = SimpleNamespace(repo="OWNER/tasks", issue="1")
+        args = SimpleNamespace(
+            repo="OWNER/tasks", issue="1",
+            api=self._api(issue_label_names=lambda i: None))
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_validate(args)
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
@@ -563,29 +584,38 @@ class CleanupCommandTests(unittest.TestCase):
     transport failure to exit 20."""
 
     def setUp(self):
-        self._orig = {
-            "issue_label_names": kraken.issue_label_names,
-            "swap_labels": kraken.swap_labels,
-            "claim_refs_of": kraken.claim_refs_of,
-            "drop_generations": kraken.drop_generations,
-        }
         self.removed = []
         self.ref_deletes = []
-        kraken.swap_labels = lambda repo, issue, remove=None, add=None: (
-            self.removed.append((issue, remove, add)) or True)
-        # cleanup also drops a leftover lease — every generation of it. Mock the
-        # read and the delete so the unit tests never reach the network.
-        kraken.claim_refs_of = lambda repo, issue: (True, [(1, "sha")])
-        kraken.drop_generations = lambda repo, issue, gens: (
-            self.ref_deletes.append((issue, list(gens))) or True)
 
-    def tearDown(self):
-        for k, v in self._orig.items():
-            setattr(kraken, k, v)
+    def _api(self, labels=None, swap=None, gens=(1,), refs_readable=True):
+        """cleanup also drops a leftover lease — every generation of it. The ref
+        ladder and its deletes are scripted at the transport, so the real
+        `claim_refs_of` prefix filter and the real delete path stay under test."""
+        issue_holder = {}
 
-    def _run(self, issue, labels):
-        kraken.issue_label_names = lambda repo, i: labels
-        args = SimpleNamespace(repo="OWNER/tasks", issue=str(issue))
+        def request(method, path, body=None):
+            if "/matching-refs/" in path:
+                if not refs_readable:
+                    return (500, "")
+                issue_holder["n"] = path.rsplit("/", 1)[1].split("?")[0]
+                return (200, json.dumps([
+                    {"ref": f"refs/kraken/claims/{issue_holder['n']}/{g}",
+                     "object": {"sha": f"sha{g}"}} for g in gens]))
+            issue, gen = kraken.parse_claim_ref(path.split("/git/", 1)[1])
+            self.ref_deletes.append((issue, gen))
+            return (204, "")
+
+        return FakeApi(
+            "OWNER/tasks",
+            request=request,
+            issue_label_names=lambda i: labels,
+            swap_labels=swap or (lambda issue, remove=None, add=None: (
+                self.removed.append((issue, remove, add)) or True)),
+        )
+
+    def _run(self, issue, labels, **api_kwargs):
+        args = SimpleNamespace(repo="OWNER/tasks", issue=str(issue),
+                               api=self._api(labels, **api_kwargs))
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_cleanup(args)
         return rc
@@ -615,14 +645,12 @@ class CleanupCommandTests(unittest.TestCase):
         # Even a label-clean closed task must not leave its lock behind: cleanup
         # drops the whole ladder, including a generation a steal failed to
         # collect (idempotent — a missing ref is fine).
-        kraken.claim_refs_of = lambda repo, issue: (True, [(1, "a"), (2, "b")])
-        rc = self._run(3, ["kraken-task", "project:app"])
+        rc = self._run(3, ["kraken-task", "project:app"], gens=(1, 2))
         self.assertEqual(rc, kraken.EXIT_OK)
-        self.assertEqual(self.ref_deletes, [("3", [1, 2])])
+        self.assertEqual(self.ref_deletes, [(3, 1), (3, 2)])
 
     def test_an_unreadable_ref_read_is_twenty(self):
-        kraken.claim_refs_of = lambda repo, issue: (False, [])
-        rc = self._run(3, ["kraken-task", "project:app"])
+        rc = self._run(3, ["kraken-task", "project:app"], refs_readable=False)
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
 
     def test_non_kraken_task_is_a_noop(self):
@@ -633,16 +661,16 @@ class CleanupCommandTests(unittest.TestCase):
         self.assertEqual(self.removed, [])
 
     def test_transport_failure_on_labels_is_twenty(self):
-        kraken.issue_label_names = lambda repo, i: None
-        args = SimpleNamespace(repo="OWNER/tasks", issue="1")
+        args = SimpleNamespace(repo="OWNER/tasks", issue="1",
+                               api=self._api(labels=None))
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_cleanup(args)
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
 
     def test_transport_failure_on_remove_is_twenty(self):
-        kraken.swap_labels = lambda repo, issue, remove=None, add=None: False
-        args = SimpleNamespace(repo="OWNER/tasks", issue="1")
-        kraken.issue_label_names = lambda repo, i: ["kraken-task", "in-progress"]
+        api = self._api(labels=["kraken-task", "in-progress"],
+                        swap=lambda issue, remove=None, add=None: False)
+        args = SimpleNamespace(repo="OWNER/tasks", issue="1", api=api)
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_cleanup(args)
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)

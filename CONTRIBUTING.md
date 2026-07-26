@@ -14,7 +14,7 @@ have a strict hierarchy when they disagree:
 | --- | --- | --- |
 | **The spec** | [`PROTOCOL.md`](PROTOCOL.md) | The normative, agent-agnostic contract (`kraken-protocol/7`): task shape, the label state machine, the machine marker, the claim algorithm. **It wins on any disagreement.** |
 | **The skills** | `skills/*/SKILL.md` | Prompts — markdown interpreted at runtime by an LLM. Prose here is *executable*: a subtle wording change can silently change an agent's behavior. |
-| **The mechanics** | `skills/unleash/kraken.py`, `scripts/`, `tests/` | The deterministic parts — the bundled transition program (the reference implementation of the worker side, one stdlib-only module with a subcommand per transition), the linter, and the conformance suite. |
+| **The mechanics** | `skills/unleash/kraken.py`, `scripts/`, `tests/` | The deterministic parts — the bundled transition program (the reference implementation of the worker side — `kraken.py` is the entry point, the `kraken/` package beside it the stdlib-only implementation, one subcommand per transition), the linter, and the conformance suite. |
 
 If a change to a skill and the spec ever conflict, the spec is the source of
 truth; fix the skill (or amend the spec by PR — see below), never leave them

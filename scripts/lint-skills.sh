@@ -18,16 +18,18 @@ PROTOCOL="PROTOCOL.md"
 AGENTS="AGENTS.md"
 PLUGIN=".claude-plugin/plugin.json"
 TEMPLATE="skills/unleash/task-template.yml"
-# Every label / machine-line / disclaimer emitter lives in kraken.py, so all the
-# per-emitter checks below resolve to that single module.
+# KRAKEN is the executable entry point (what `kcontract` below runs); the
+# emitters live in the package behind it, one module per layer, so each
+# per-emitter check below resolves to the module that actually owns the string.
 KRAKEN="skills/unleash/kraken.py"
-WATCHER="$KRAKEN"
-LISTER="$KRAKEN"
-CLAIM="$KRAKEN"
-RELEASE="$KRAKEN"
-ESCALATE="$KRAKEN"
-DELIVER="$KRAKEN"
-HEARTBEAT="$KRAKEN"
+PKG="skills/unleash/kraken"
+WATCHER="$PKG/watch.py"
+LISTER="$PKG/queue.py"
+CLAIM="$PKG/claim.py"
+RELEASE="$PKG/claim.py"
+ESCALATE="$PKG/claim.py"
+DELIVER="$PKG/claim.py"
+HEARTBEAT="$PKG/claim.py"
 
 fail=0
 err() { printf '  \033[31mx\033[0m %s\n' "$1"; fail=$((fail+1)); }
@@ -206,7 +208,7 @@ done
 if command -v python3 >/dev/null 2>&1; then
   # tests/gh-stub/gh is the Python `gh` stub — extensionless so it stays on PATH
   # as `gh`, but Python, so it is syntax-checked here alongside the suite.
-  for py in skills/*/*.py tests/*.py tests/unit/*.py tests/conformance/*.py tests/gh-stub/gh; do
+  for py in skills/*/*.py skills/*/*/*.py tests/*.py tests/unit/*.py tests/conformance/*.py tests/gh-stub/gh; do
     [ -f "$py" ] || continue
     python3 -m py_compile "$py" 2>/dev/null || err "$py has a python syntax error"
   done
