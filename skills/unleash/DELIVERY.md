@@ -9,8 +9,15 @@ task's **notes** say otherwise, every task ends as a pushed branch and a draft P
 
 ## The branch
 
-Follow the **work repo's own naming convention** — check its recent branches, its open
-PRs, or its CONTRIBUTING. CI pipelines and branch linters routinely key on those
+**First, check whether this task already has one.** A task can come back to the queue
+after it was delivered — I bounce a review by commenting the feedback and removing
+`awaiting-merge`, and the task requeues with its whole thread. The `brief.body` and the
+issue thread will show the earlier delivery and its PR. When they do, **continue on that
+branch and update that PR**: opening a second branch and a second draft PR for one task
+splits the review and leaves an orphan PR behind.
+
+Otherwise, follow the **work repo's own naming convention** — check its recent branches,
+its open PRs, or its CONTRIBUTING. CI pipelines and branch linters routinely key on those
 patterns, so never impose a foreign prefix. No evident convention? Use a neutral
 descriptive name that includes the task number, e.g. `tasks-12-cursor-pagination`.
 

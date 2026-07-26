@@ -144,8 +144,10 @@ before you do anything else.
 
 ## Staying in ambush
 
-On `idle`: if I passed `--once`, you are done — report the drain summary by the labels
-I filter on (`awaiting-merge` / `needs-decision` / untouched) and end the turn.
+On `idle` the drain is over, so **report the drain summary** — by the labels I filter on
+(`awaiting-merge` / `needs-decision` / untouched). Do this on **every** drain end, not
+only the one-shot one; it is the summary I read. Then: if I passed `--once`, you are
+done — end the turn.
 
 Otherwise stay in ambush behind a **zero-token watcher** — a read-only queue poll that
 invokes no model until a task is actually startable:
@@ -155,7 +157,10 @@ python3 "<skill>/kraken.py" watch OWNER/tasks <project>
 ```
 
 Run it as a **persistent background process**, however your harness provides one: in
-Claude Code, the Monitor tool with `persistent: true`; elsewhere,
+Claude Code, the Monitor tool with `persistent: true` — and if Monitor is not in your
+tool list, **load it first rather than concluding you have none**; some harnesses defer
+tool schemas, and taking the `--once` fallback here silently throws away the ambush this
+skill exists for. Elsewhere,
 [`scripts/kraken-loop.sh`](../../scripts/kraken-loop.sh), which polls and re-invokes a
 one-shot drain from outside the model. One watcher per worker, never two — skip this if
 a previous drain already armed one.
