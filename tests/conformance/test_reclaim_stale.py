@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The reconcile pass run STAND-ALONE (kraken.py reap) — the operator-side escape
 hatch for what a drain does on its own read (that path is pinned in
-test_34_claim_next_reconcile.py). Every rule it has left is about a CLAIM REF.
+test_claim_next_reconcile.py). Every rule it has left is about a CLAIM REF.
 
 Two things it deliberately does not do. An expired LEASE is not its job
 (protocol/6): expiry is applied by whoever reads the queue and the next claim

@@ -1841,7 +1841,7 @@ class BundledAssetTests(unittest.TestCase):
 # The verdict is a pure function of what was observed, so every branch is
 # exercised here without a stub: what a recorded claim is worth, and what the
 # envelope promises for it. The wire-level behaviour lives in
-# tests/conformance/test_39_next_action.py.
+# tests/conformance/test_next_action.py.
 
 def rec(issue="7", repo="OWNER/tasks", worker="w1"):
     """A claim-<worker>.json record as open_claim_record returns it."""
