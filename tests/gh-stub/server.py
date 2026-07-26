@@ -235,22 +235,29 @@ class StubState:
                 out.append({"number": int(bn), "state": st.upper() if upper else st})
         return out
 
-    def issue_node(self, n, comment_window=25):
+    def comment_window(self, n, last):
+        """A trailing comment window in GraphQL's shape (it spells the timestamp
+        createdAt where REST spells it created_at)."""
+        return [{"body": c["body"], "createdAt": c["created_at"]}
+                for c in self.comments(n)[-last:]]
+
+    def issue_node(self, n, comment_window=0):
         d = self.issue_dir(n)
-        # The queue walk carries a trailing comment window (GraphQL spells the
-        # timestamp createdAt where REST spells it created_at) — the requeue
-        # derivation reads it off the same page as the labels.
-        window = self.comments(n)[-comment_window:] if comment_window else []
-        return {
+        node = {
             "number": int(n),
             "title": self._read(os.path.join(d, "title")).rstrip("\n"),
             "createdAt": self._read(os.path.join(d, "createdAt")).rstrip("\n"),
             "body": self.issue_body(n),
             "labels": {"nodes": [{"name": x} for x in self.issue_labels(n)]},
-            "comments": {"nodes": [{"body": c["body"], "createdAt": c["created_at"]}
-                                   for c in window]},
             "blockedBy": {"nodes": self.blocked_by_nodes(n, upper=True)},
         }
+        # A field the query did not select comes back ABSENT, not empty — the
+        # queue walk no longer asks for comments, and a stub that volunteered an
+        # empty window would hide a missing hydration behind the same [] the
+        # readers treat as "no comments".
+        if comment_window:
+            node["comments"] = {"nodes": self.comment_window(n, comment_window)}
+        return node
 
     # --- repo labels ---
     def repo_label_names(self):
@@ -405,10 +412,19 @@ def graphql_list_issues(state, q):
 
 
 def graphql_issue_states(state, q):
+    # The aliased-issue shape serves two asks: the depends-on resolve (state) and
+    # the comment hydration (a trailing window). One dispatch, selected by whether
+    # the query asked for comments at all.
+    cm = re.search(r"comments\(last: ([0-9]+)\)", q)
+    window = int(cm.group(1)) if cm else 0
     fields = {}
     for m in re.finditer(r"([a-zA-Z_][a-zA-Z0-9_]*): issue\(number: ([0-9]+)\)", q):
         alias, num = m.group(1), m.group(2)
         d = state.issue_dir(num)
+        if window:
+            nodes = state.comment_window(num, window) if os.path.isdir(d) else []
+            fields[alias] = {"comments": {"nodes": nodes}}
+            continue
         sf = os.path.join(d, "state")
         st = state._read(sf).rstrip("\n").upper() if os.path.isfile(sf) else "CLOSED"
         names = state.issue_labels(num) if os.path.isdir(d) else []
