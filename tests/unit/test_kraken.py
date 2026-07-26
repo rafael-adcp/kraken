@@ -1307,9 +1307,9 @@ class LeaseStateTests(unittest.TestCase):
 
     def test_a_fresh_lease_is_live(self):
         leases = _leases(i1=10)
-        self.assertTrue(leases[1]["live"])
-        self.assertEqual(leases[1]["worker"], "w")
-        self.assertLess(leases[1]["age"], 60)
+        self.assertTrue(leases[1].live)
+        self.assertEqual(leases[1].worker, "w")
+        self.assertLess(leases[1].age, 60)
 
     def test_the_holder_is_the_highest_generation(self):
         # Ownership is the top of the ladder: a superseded generation left
@@ -1321,28 +1321,28 @@ class LeaseStateTests(unittest.TestCase):
         leases = kraken.lease_state({1: [(1, old), (2, new)]}, meta,
                                     kraken.time.time(),
                                     kraken.LEASE_DEFAULT_TTL_SECONDS)
-        self.assertEqual(leases[1]["gen"], 2)
-        self.assertEqual(leases[1]["worker"], "w-live")
-        self.assertTrue(leases[1]["live"])
-        self.assertEqual(leases[1]["gens"], [1, 2],
+        self.assertEqual(leases[1].gen, 2)
+        self.assertEqual(leases[1].worker, "w-live")
+        self.assertTrue(leases[1].live)
+        self.assertEqual(leases[1].gens, (1, 2),
                          "the ladder must stay visible so a release drops it all")
 
     def test_a_lease_past_the_ttl_is_not_live(self):
-        self.assertFalse(_leases(i1=kraken.LEASE_DEFAULT_TTL_SECONDS + 5)[1]["live"])
+        self.assertFalse(_leases(i1=kraken.LEASE_DEFAULT_TTL_SECONDS + 5)[1].live)
 
     def test_the_ttl_boundary_expires(self):
         # Exactly at the TTL the lease is over — `age < ttl` is the live test, so
         # the boundary belongs to the thief, never to a holder that stopped
         # renewing precisely one TTL ago.
-        self.assertFalse(_leases(i1=kraken.LEASE_DEFAULT_TTL_SECONDS)[1]["live"])
-        self.assertTrue(_leases(i1=kraken.LEASE_DEFAULT_TTL_SECONDS - 5)[1]["live"])
+        self.assertFalse(_leases(i1=kraken.LEASE_DEFAULT_TTL_SECONDS)[1].live)
+        self.assertTrue(_leases(i1=kraken.LEASE_DEFAULT_TTL_SECONDS - 5)[1].live)
 
     def test_an_unreadable_commit_fails_open_to_the_steal(self):
         # Nothing proves the holder alive, so the lease must not hold the task
         # forever behind a clock nobody can read.
         lease = _leases(i1=None)[1]
-        self.assertIsNone(lease["age"])
-        self.assertFalse(lease["live"])
+        self.assertIsNone(lease.age)
+        self.assertFalse(lease.live)
 
     def test_live_leases_keeps_only_the_held_ones(self):
         leases = _leases(i1=10, i2=kraken.LEASE_DEFAULT_TTL_SECONDS + 60, i3=None)
@@ -1451,13 +1451,13 @@ class CommentHungryTests(unittest.TestCase):
     def test_a_live_lease_outranks_the_thread_so_it_is_not_hungry(self):
         nodes = [_task_node(1, ["kraken-task", "needs-decision"])]
         leases = _leases(i1=0)
-        self.assertTrue(leases[1]["live"], "fixture must model a LIVE lease")
+        self.assertTrue(leases[1].live, "fixture must model a LIVE lease")
         self.assertEqual(kraken.comment_hungry(nodes, leases), set())
 
     def test_an_expired_lease_is_hungry_for_the_expiry_count(self):
         nodes = [_task_node(1, ["kraken-task"])]
         leases = _leases(i1=kraken.LEASE_DEFAULT_TTL_SECONDS + 60)
-        self.assertFalse(leases[1]["live"], "fixture must model an EXPIRED lease")
+        self.assertFalse(leases[1].live, "fixture must model an EXPIRED lease")
         self.assertEqual(kraken.comment_hungry(nodes, leases), {1})
 
     def test_an_expired_lease_off_the_walk_is_an_orphan_and_costs_no_fetch(self):
@@ -1841,7 +1841,7 @@ class BundledAssetTests(unittest.TestCase):
 # The verdict is a pure function of what was observed, so every branch is
 # exercised here without a stub: what a recorded claim is worth, and what the
 # envelope promises for it. The wire-level behaviour lives in
-# tests/conformance/test_39_next_action.py.
+# tests/conformance/test_next_action.py.
 
 def rec(issue="7", repo="OWNER/tasks", worker="w1"):
     """A claim-<worker>.json record as open_claim_record returns it."""
@@ -1849,8 +1849,10 @@ def rec(issue="7", repo="OWNER/tasks", worker="w1"):
 
 
 def ref_head(worker="w1", epoch=1000.0, gen=1):
-    return {"gen": gen, "sha": "abc", "worker": worker, "epoch": epoch,
-            "gens": list(range(1, gen + 1))}
+    """What claim_ref_head hands resume_verdict: ownership and the clock, with
+    the expiry verdict left undecided (no TTL is known at that read)."""
+    return kraken.Lease(gen=gen, sha="abc", worker=worker, epoch=epoch,
+                        gens=tuple(range(1, gen + 1)))
 
 
 def issue_obj(state="open", labels=("kraken-task", "in-progress")):

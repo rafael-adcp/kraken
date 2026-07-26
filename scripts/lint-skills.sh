@@ -125,8 +125,10 @@ fi
 # kraken-protocol/<n> in the tree must name that same revision. Guards the drift
 # class where AGENTS.md and CONTRIBUTING.md kept pointing contributors — and
 # agents, which read AGENTS.md at runtime — at a contract the code no longer
-# implements. The one legitimate exception is PROTOCOL.md's own version history,
-# whose "What changed in ..." paragraphs name retired revisions on purpose.
+# implements. The one legitimate exception is the version history (HISTORY.md,
+# and the pre-split paragraphs still quoted anywhere), whose "What changed in
+# ..." entries name retired revisions on purpose — that phrase, not the file, is
+# what marks a line as history.
 echo "[1e] protocol version (repo-wide vs $PROTOCOL)"
 fail_before=$fail
 canon="$(grep -m1 -oE '^\*\*Version: `kraken-protocol/[0-9]+`' "$PROTOCOL" | grep -oE '[0-9]+')"
@@ -139,8 +141,7 @@ else
     v="${hit##*:}"
     [ "$v" = "kraken-protocol/$canon" ] && continue
     where="${hit%:*}"; f="${where%:*}"; n="${where##*:}"
-    [ "$f" = "./$PROTOCOL" ] \
-      && sed -n "${n}p" "$PROTOCOL" | grep -qF 'What changed in' && continue
+    sed -n "${n}p" "$f" | grep -qF 'What changed in' && continue
     err "${f#./}:$n says '$v' but $PROTOCOL declares kraken-protocol/$canon"
   done < <(grep -rInoE 'kraken-protocol/[0-9]+' . --exclude-dir=.git)
 fi

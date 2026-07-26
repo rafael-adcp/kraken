@@ -94,10 +94,12 @@ These are the conventions the history already follows — match them:
   on any disagreement between spec, skills, scripts, and tests, **the spec
   wins**, and the fix brings the others back into line (never the reverse). A
   backward-incompatible change bumps the integer (`kraken-protocol/7` and
-  onward); clarifications and strictly additive rules amend `PROTOCOL.md` in
-  place by PR. Keep every skill, script, and the README consistent with the
-  spec in the same change — the linter cross-checks labels, machine markers,
-  and the attribution disclaimer across all of them.
+  onward) **and adds an entry to [`HISTORY.md`](HISTORY.md)** — what changed,
+  what the previous design forced, whether it breaks compatibility, and what it
+  retired; clarifications and strictly additive rules amend `PROTOCOL.md` in
+  place by PR and need no entry. Keep every skill, script, and the README
+  consistent with the spec in the same change — the linter cross-checks labels,
+  machine markers, and the attribution disclaimer across all of them.
 - **Every normative clause is backed by a test.** `tests/COVERAGE.md` is the
   clause-by-clause audit mapping each `PROTOCOL.md` **MUST**/**SHOULD** to the
   test that pins it. When you amend the spec, add or update the pinning test and
