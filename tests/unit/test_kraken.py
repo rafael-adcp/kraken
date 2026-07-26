@@ -9,6 +9,8 @@ Stdlib only (unittest), no network, no gh. Run: python3 tests/unit/test_kraken.p
 
 import os
 import re
+import time
+import datetime
 import sys
 import json
 import tempfile
@@ -1226,14 +1228,14 @@ def _task_node(number, labels, comments=()):
 
 
 def _at(hours_ago):
-    dt = (kraken.datetime.datetime.now(kraken.datetime.timezone.utc)
-          - kraken.datetime.timedelta(hours=hours_ago))
+    dt = (datetime.datetime.now(datetime.timezone.utc)
+          - datetime.timedelta(hours=hours_ago))
     return {"committedDate": dt.strftime("%Y-%m-%dT%H:%M:%SZ"), "message": clm("w")}
 
 
 def _seconds_ago(seconds, worker="w"):
-    dt = (kraken.datetime.datetime.now(kraken.datetime.timezone.utc)
-          - kraken.datetime.timedelta(seconds=seconds))
+    dt = (datetime.datetime.now(datetime.timezone.utc)
+          - datetime.timedelta(seconds=seconds))
     return {"committedDate": dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "message": clm(worker)}
 
@@ -1249,7 +1251,7 @@ def _leases(**by_issue):
         refs[num] = [(1, sha)]
         if age is not None:
             meta[sha] = _seconds_ago(age)
-    return kraken.lease_state(refs, meta, kraken.time.time(),
+    return kraken.lease_state(refs, meta, time.time(),
                               kraken.LEASE_DEFAULT_TTL_SECONDS)
 
 
@@ -1272,7 +1274,7 @@ class LeaseStateTests(unittest.TestCase):
         meta = {old: _seconds_ago(kraken.LEASE_DEFAULT_TTL_SECONDS + 600, "w-dead"),
                 new: _seconds_ago(5, "w-live")}
         leases = kraken.lease_state({1: [(1, old), (2, new)]}, meta,
-                                    kraken.time.time(),
+                                    time.time(),
                                     kraken.LEASE_DEFAULT_TTL_SECONDS)
         self.assertEqual(leases[1].gen, 2)
         self.assertEqual(leases[1].worker, "w-live")
