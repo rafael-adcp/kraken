@@ -685,39 +685,39 @@ def resolve_commit_meta(repo: Repo, shas: Sequence[Sha]) -> CommitMeta | None:
     return meta
 
 
-def claim_ref_head(repo: Repo, issue: Issue) -> tuple[str, Lease | None]:
+def claim_ref_head(repo: Repo, issue: Issue) -> Lease:
     """The head of one issue's lease — the read every ownership question goes
     through: which generation holds it, whose it is, and since when.
 
-    Returns `(state, head)`, and the three states are kept apart on purpose
-    because they demand different answers:
-      - `("ok", Lease)` — the highest generation, plus `gens`, every generation
+    The three outcomes are kept apart on purpose, because they demand different
+    answers, and all three are a `Lease`:
+      - a present lease — the highest generation, plus `gens`, every generation
         present (so a caller that is releasing knows what to delete and one that
         is advancing knows what to collect). `age`/`live` are left undecided:
         this read knows no TTL, and ownership is what its callers ask about;
-      - `("absent", None)` — no claim ref at all, the task is unclaimed;
-      - `("error", None)` — the read did not land, so the answer is *unknown*
+      - `NO_LEASE` — no claim ref at all, the task is unclaimed;
+      - `UNREADABLE_LEASE` — the read did not land, so the answer is *unknown*
         and no caller may write on the strength of it.
     `epoch` is None when the commit carries no readable date — the same
     fail-open the queue-wide read applies: nothing proves the holder alive."""
     ok, refs = claim_refs_of(repo, issue)
     if not ok:
-        return ("error", None)
+        return UNREADABLE_LEASE
     if not refs:
-        return ("absent", None)
+        return NO_LEASE
     gen, sha = refs[-1]  # sorted: the highest generation is the holder
     meta = resolve_commit_meta(repo, [sha])
     if meta is None:
-        return ("error", None)
+        return UNREADABLE_LEASE
     entry = meta.get(sha) or {}
     payload = parse_marker(entry.get("message") or "") or {}
-    return ("ok", Lease(
+    return Lease(
         gen=gen,
         sha=sha,
         worker=payload.get("worker") or None,
         epoch=parse_iso(entry.get("committedDate") or ""),
         gens=tuple(g for g, _s in refs),
-    ))
+    )
 
 
 def advance_lease(
@@ -751,8 +751,7 @@ def claim_ref_owner(repo: Repo, issue: Issue) -> Worker | None:
     network failure already owns the task (PROTOCOL.md §5's re-check caveat).
     None (transport/absent) is treated by the caller as 'not mine', so an
     ambiguous read never turns a real loss into a false win."""
-    state, head = claim_ref_head(repo, issue)
-    return head.worker if state == "ok" and head is not None else None
+    return claim_ref_head(repo, issue).worker
 
 
 # --- the lease: how long a claim ref holds -----------------------------------
@@ -801,14 +800,21 @@ class Lease:
     read, and such a lease is **not live** — nothing proves the holder alive, so
     it fails OPEN toward the steal rather than holding the task forever behind
     an unreadable clock.
+
+    A lease read has THREE outcomes, and all three are this one type: a ladder
+    was there (`present`), no ref was there at all (`NO_LEASE`), or the read did
+    not land (`UNREADABLE_LEASE`, `unknown`). They are objects rather than
+    None-and-a-sentinel so that every reader can ask its question straight —
+    `stealable_by`, `held_by_other` — and get the fail-open answer for free
+    instead of re-deriving it from a tri-state it might get backwards.
     """
 
-    gen: Gen                 # the highest generation seen — the holder's rung
-    sha: Sha                 # the commit that rung points at
-    worker: Worker | None    # who the rung's marker names, None if unreadable
-    epoch: Epoch | None      # the commit's server-stamped date; None = unreadable
-    gens: tuple[Gen, ...]    # every rung present, ascending — the lower ones are
-                             # superseded and a reader may collect them
+    gen: Gen = LEGACY_CLAIM_GEN   # the highest generation seen — the holder's rung
+    sha: Sha | None = None        # the commit that rung points at
+    worker: Worker | None = None  # who the rung's marker names, None if unreadable
+    epoch: Epoch | None = None    # the commit's server-stamped date; None = unreadable
+    gens: tuple[Gen, ...] = ()    # every rung present, ascending — the lower ones
+                                  # are superseded and a reader may collect them
     # The expiry verdict, and it is only meaningful once a reader has applied a
     # TTL. `claim_ref_head` reports ownership and the clock but knows no TTL, so
     # it leaves these at the defaults; `lease_state` and `probe_lease_state`
@@ -817,6 +823,61 @@ class Lease:
     # expired lease that is still OURS may finish its transition.
     age: int | None = None   # seconds since `epoch` at read time
     live: bool = False       # age is known AND below the TTL
+    # False only on UNREADABLE_LEASE: the read did not land, so "nobody holds
+    # this" is NOT what was observed and no caller may write on the strength of
+    # it. Kept apart from `present` because the two demand opposite answers —
+    # an absent ref means claim it, an unknown one means re-check.
+    known: bool = True
+
+    @property
+    def present(self) -> bool:
+        """Whether a claim ref was actually observed. Derived from `gens` rather
+        than stored: a real read always names at least the holder's rung, and
+        the two no-ladder objects below carry none."""
+        return bool(self.gens)
+
+    @property
+    def unknown(self) -> bool:
+        """The read did not land — the caller owes an exit 20, never a write."""
+        return not self.known
+
+    @property
+    def expired(self) -> bool:
+        """A ladder is there and its clock has run out. Nobody is proven alive,
+        so the next reader steals it; this is not the same as unheld."""
+        return self.present and not self.live
+
+    def held_by(self, worker: Worker) -> bool:
+        """Whether `worker` is the one on the holder's rung. Ownership is the
+        HIGHEST generation (see `hold_lease`), which is what `worker` names."""
+        return self.present and self.worker == worker
+
+    def held_by_other(self, worker: Worker) -> bool:
+        """Somebody else is working on this, right now. A LIVE lease that is not
+        ours holds the task whatever the labels say (§5) — including in the crash
+        window where no label has landed yet."""
+        return self.live and self.worker != worker
+
+    def stealable_by(self, worker: Worker) -> bool:
+        """Somebody else's lease whose clock ran out: not held, so the claim
+        below takes it by creating the generation above (§5.2)."""
+        return self.expired and self.worker != worker
+
+    def superseded_below(self, gen: Gen) -> list[Gen]:
+        """The rungs this reader has climbed past, which are garbage now — the
+        holder is the highest one, so a delete that fails leaves a stray ref,
+        never a second lease."""
+        return [g for g in self.gens if g < gen]
+
+
+# No claim ref at all: the task is unclaimed, and a claim starts from the legacy
+# generation. The null object every "is it free?" reader gets, so none of them
+# has to spell `lease is None` and get the fail-open direction wrong.
+NO_LEASE = Lease()
+
+# The read did not land. NOT live, NOT present, and NOT known: no caller may
+# conclude the task is free from a read that never happened (§5.3).
+UNREADABLE_LEASE = Lease(known=False)
 
 
 def lease_ttl_seconds(explicit: int | None = None) -> int:
@@ -886,7 +947,7 @@ def live_leases(leases: dict[Issue, Lease]) -> dict[Issue, Sha]:
 
 def hold_lease(
     command: str, repo: Repo, issue: Issue, worker: Worker,
-) -> tuple[int | None, Lease | None]:
+) -> tuple[int | None, Lease]:
     """The write-after-expiry check (PROTOCOL.md §5.3): prove this worker still
     holds the lease BEFORE any write of a transition. Returns `(code, head)` —
     `code` None when the lease is ours and the caller may proceed (with `head`
@@ -906,18 +967,18 @@ def hold_lease(
     A lease that is ours but past its TTL still passes: it expired, but nobody
     took it, and finishing the transition frees it honestly — the check is about
     who holds the lease, not how old it is."""
-    state, head = claim_ref_head(repo, issue)
-    if state == "error":
+    head = claim_ref_head(repo, issue)
+    if head.unknown:
         print(f"{command}: gh-failure issue={issue} stage=lease")
-        return (EXIT_TRANSPORT, None)
-    if state == "absent":
+        return (EXIT_TRANSPORT, head)
+    if not head.present:
         print(f"{command}: lost-lease issue={issue} — the lease is gone, "
               "re-claim the task before writing to it")
-        return (EXIT_LOST, None)
-    if head.worker != worker:
+        return (EXIT_LOST, head)
+    if not head.held_by(worker):
         holder = head.worker or "another worker"
         print(f"{command}: lost-lease issue={issue} — the lease is held by {holder}")
-        return (EXIT_LOST, None)
+        return (EXIT_LOST, head)
     return (None, head)
 
 
@@ -1309,7 +1370,7 @@ def comment_hungry(
             hungry.add(number)
     walked = {node["number"] for node in nodes}
     for number, lease in leases.items():
-        if not lease.live and number in walked:
+        if lease.expired and number in walked:
             hungry.add(number)
     return hungry
 
@@ -1549,12 +1610,10 @@ def lease_expired_body(worker: Worker, stale: Lease) -> str:
     return compose_comment(worker, prose, payload)
 
 
-def probe_lease_state(
-    repo: Repo, issue: Issue, ttl: int,
-) -> Lease | None | bool:
-    """Read one issue's lease into the same `Lease` a queue read produces, or
-    None when the task carries no claim ref at all. `False` (the sentinel) on a
-    transport failure, so 'unclaimed' is never confused with 'unknown'.
+def probe_lease_state(repo: Repo, issue: Issue, ttl: int) -> Lease:
+    """Read one issue's lease into the same `Lease` a queue read produces —
+    `NO_LEASE` when the task carries no claim ref at all, `UNREADABLE_LEASE` on
+    a transport failure, so 'unclaimed' is never confused with 'unknown'.
 
     A drain never needs this: the queue read already carries every lease. It is
     the named-claim path's equivalent, and a slightly stale answer is safe by
@@ -1562,11 +1621,9 @@ def probe_lease_state(
     the one this saw, so a holder that renewed in the meantime already took that
     generation and the challenger simply loses. This read decides whether to
     *try*, never who wins."""
-    state, head = claim_ref_head(repo, issue)
-    if state == "error":
-        return False
-    if state == "absent":
-        return None
+    head = claim_ref_head(repo, issue)
+    if not head.present:
+        return head  # NO_LEASE or UNREADABLE_LEASE — the caller tells them apart
     # `claim_ref_head` cannot know the TTL, so it reports the clock and leaves
     # the verdict open; re-deciding `age`/`live` here against `now` is the whole
     # difference between the two.
@@ -1576,7 +1633,7 @@ def probe_lease_state(
 
 
 def _claim_once(repo: Repo, issue: Issue, worker: Worker,
-                allow_held: Sequence[str] = (), lease: Lease | None = None,
+                allow_held: Sequence[str] = (), lease: Lease = NO_LEASE,
                 ttl: int | None = None, probe_lease: bool = False) -> int:
     """The one contended claim sequence — guard, CAS, projection — executed
     identically every time (PROTOCOL.md §5). Returns an exit code and prints a
@@ -1589,11 +1646,11 @@ def _claim_once(repo: Repo, issue: Issue, worker: Worker,
     them off. The guard is an optimisation either way — the claim-ref CAS is the
     only thing that decides ownership.
 
-    `lease` is the lease record the caller observed on this issue, or None when
-    it observed no claim ref. It decides the generation the CAS starts from — a
-    free task takes generation 1, and a task whose lease expired takes the one
-    ABOVE its holder. That is the whole of what a "steal" is: not a different
-    algorithm, a different starting rung.
+    `lease` is the lease record the caller observed on this issue, or `NO_LEASE`
+    when it observed no claim ref. It decides the generation the CAS starts
+    from — a free task takes generation 1, and a task whose lease expired takes
+    the one ABOVE its holder. That is the whole of what a "steal" is: not a
+    different algorithm, a different starting rung.
 
     `probe_lease` is the named-claim path's substitute for that observation: a
     drain reads every lease with the queue, a `claim <issue>` has read nothing,
@@ -1607,9 +1664,6 @@ def _claim_once(repo: Repo, issue: Issue, worker: Worker,
     mid-guard — into the plain rule the lock already stated."""
     ttl = lease_ttl_seconds(ttl)
 
-    def _stealing(l):
-        return l is not None and not l.live and l.worker != worker
-
     # 1. Guard — re-fetch labels; a held task is skipped with zero writes.
     label_names = issue_label_names(repo, issue)
     if label_names is None:
@@ -1619,7 +1673,7 @@ def _claim_once(repo: Repo, issue: Issue, worker: Worker,
         if held in label_names and held not in allow_held:
             diag(f"claim: held issue={issue} label={held}")
             return EXIT_NOT_CLEAR
-    if probe_lease and lease is None:
+    if probe_lease and not lease.present:
         # Labels say nothing about who is working — that is the lease's job, and
         # this path has not read one yet. It answers both questions at once: who
         # holds the task (the check below), and which generation the CAS must
@@ -1627,7 +1681,7 @@ def _claim_once(repo: Repo, issue: Issue, worker: Worker,
         # LOWER one would "win" a ref nobody is holding by while the real holder
         # works on.
         lease = probe_lease_state(repo, issue, ttl)
-        if lease is False:
+        if lease.unknown:
             diag(f"claim: gh-failure issue={issue} stage=lease")
             return EXIT_TRANSPORT
 
@@ -1639,11 +1693,11 @@ def _claim_once(repo: Repo, issue: Issue, worker: Worker,
     # CAS and reading its 422; the generation ladder makes that attempt worse
     # than useless — creating the next generation would SUCCEED and take a live
     # lease — so the read answers it instead, with the same verdict.
-    if lease is not None and lease.live and lease.worker != worker:
+    if lease.held_by_other(worker):
         diag(f"claim: lost-cas issue={issue} — another worker holds the claim ref")
         return EXIT_LOST
 
-    steal = lease if _stealing(lease) else None
+    steal = lease if lease.stealable_by(worker) else NO_LEASE
     # The requeued labels still on the issue: dropped as part of the projection.
     stale_held = [h for h in HELD_LABELS if h in label_names and h in allow_held]
 
@@ -1654,9 +1708,8 @@ def _claim_once(repo: Repo, issue: Issue, worker: Worker,
     #    renewal — produce exactly one winner and nothing to undo. Nothing is
     #    deleted to make room, so the task is never observably free mid-steal and
     #    no interleaving can hand two workers the same lease.
-    from_gen = lease.gen if lease is not None else LEGACY_CLAIM_GEN
     outcome, gen, _sha = advance_lease(
-        repo, issue, from_gen, {"type": "claim", "worker": worker})
+        repo, issue, lease.gen, {"type": "claim", "worker": worker})
     if outcome.startswith("fail"):
         diag(f"claim: gh-failure issue={issue} stage={outcome[len('fail-'):]}")
         return EXIT_TRANSPORT
@@ -1671,8 +1724,8 @@ def _claim_once(repo: Repo, issue: Issue, worker: Worker,
 
     # The generations we climbed past are garbage now — the holder is the highest
     # one, so a delete that fails leaves a stray ref, never a second lease.
-    if lease is not None and gen is not None:
-        drop_generations(repo, issue, [g for g in lease.gens if g < gen])
+    if gen is not None:
+        drop_generations(repo, issue, lease.superseded_below(gen))
 
     # 3. Projection. State file FIRST so lifecycle hooks can release the claim even
     #    if the writes below fail; then the in-progress label and claim comment. A
@@ -1681,7 +1734,7 @@ def _claim_once(repo: Repo, issue: Issue, worker: Worker,
     #    (§3): the task stays correctly held, just without its badge, until the
     #    terminal transition writes the next one.
     write_claim_state(repo, issue, worker)
-    if steal is not None and not post_comment(
+    if steal.present and not post_comment(
             repo, issue, lease_expired_body(worker, steal)):
         diag(f"claim: gh-failure issue={issue} stage=comment (claim held)")
         return EXIT_TRANSPORT
@@ -1700,7 +1753,7 @@ def _claim_once(repo: Repo, issue: Issue, worker: Worker,
         diag(f"claim: gh-failure issue={issue} stage=comment (claim held)")
         return EXIT_TRANSPORT
 
-    verb = "stole" if steal is not None else "claimed"
+    verb = "stole" if steal.present else "claimed"
     diag(f"claim: {verb} issue={issue} worker={worker}")
     return EXIT_OK
 
@@ -1829,7 +1882,7 @@ def acquire_next(repo: Repo, project: str, worker: Worker,
         # Hand the claim the lease this read already saw: it decides which
         # generation the CAS starts from, and whether this is a steal at all.
         rc = _claim_once(repo, number, worker, allow_held=allow_held,
-                         lease=leases.get(number), ttl=ttl)
+                         lease=leases.get(number, NO_LEASE), ttl=ttl)
         if rc == EXIT_OK:
             return (EXIT_OK, {"issue": number, "title": title, "body": body})
         if rc == EXIT_TRANSPORT:
@@ -2006,15 +2059,15 @@ def issue_is_finished(issue_obj: Json | None) -> bool:
 
 
 def resume_verdict(
-    record: ClaimRecord, repo: Repo, worker: Worker, ref_state: str | None,
-    head: Lease | None, issue_obj: Json | None, now: Epoch, ttl: int,
+    record: ClaimRecord, repo: Repo, worker: Worker, head: Lease,
+    issue_obj: Json | None,
 ) -> tuple[str, Json]:
     """Decide what a recorded open claim is worth, as a pure function of what was
     observed. Returns `(verdict, detail)` where verdict is one of:
 
       - `"blocked"`  — the record names a claim in a DIFFERENT repo. Decided
-        before any read, so the caller passes None for `ref_state`/`head`/
-        `issue_obj`; one task at a time is repo-independent (§5).
+        before any read, so the caller passes `UNREADABLE_LEASE` and no issue —
+        nothing was observed; one task at a time is repo-independent (§5).
       - `"retry"`    — a read did not land. Ambiguous is never a decision:
         write nothing, change nothing, re-check.
       - `"resolved"` — this worker no longer holds the task AND the task has
@@ -2029,13 +2082,15 @@ def resume_verdict(
     Ownership is checked before the issue's own state, because the lease is the
     lock and the labels are projection. A lease that is ours but PAST its TTL
     still resumes: §5.3 is explicit that an expired-but-unstolen lease may
-    complete its transition — the caller is told to renew first."""
+    complete its transition — the caller is told to renew first. That is why no
+    clock reaches this function: the verdict is about WHO holds the lease, never
+    how old it is, so there is no `now`/`ttl` here to get backwards."""
     if record["repo"] and record["repo"] != repo:
         return ("blocked", {"reason": "claim-elsewhere",
                             "detail": f"this worker holds {record['repo']}"
                                       f"#{record['issue']}; resolve it (deliver / "
                                       f"escalate / release) before draining {repo}"})
-    if ref_state == "error":
+    if head.unknown:
         return ("retry", {"reason": "lease-unreadable",
                           "detail": "the claim ref did not read — re-check "
                                     "before writing anything"})
@@ -2044,22 +2099,20 @@ def resume_verdict(
                           "detail": "the task issue did not read — re-check "
                                     "before writing anything"})
 
-    ours = ref_state == "ok" and head is not None and head.worker == worker
-    if not ours:
+    if not head.held_by(worker):
         if issue_is_finished(issue_obj):
             # Whether this worker's own terminal transition deleted the ref or
             # the reconciler reclaimed it is not answerable from here — and the
             # right move is the same either way: the task is not ours and not in
             # the queue, so keep draining rather than report a loss.
             return ("resolved", {"reason": "already-resolved"})
-        holder = head.worker if head is not None else None
-        if ref_state == "absent":
+        if not head.present:
             return ("abandon", {"reason": "lease-gone",
                                 "detail": "the claim ref is gone — re-claim the "
                                           "task before writing to it"})
+        holder = head.worker or "another worker"
         return ("abandon", {"reason": "lease-stolen",
-                            "detail": f"the lease is held by "
-                                      f"{holder or 'another worker'} now — the "
+                            "detail": f"the lease is held by {holder} now — the "
                                       f"branch and PR you pushed stay, and "
                                       f"whoever holds the task inherits them"})
     if issue_is_finished(issue_obj):
@@ -2067,8 +2120,8 @@ def resume_verdict(
         # it). Nothing to resume; the lease frees itself within one TTL.
         return ("resolved", {"reason": "task-finished"})
 
-    return ("execute", {"generation": head.gen if head is not None else None,
-                        "epoch": head.epoch if head is not None else None})
+    # `held_by` above proves the ladder is there, so these need no guard.
+    return ("execute", {"generation": head.gen, "epoch": head.epoch})
 
 
 def _resume(
@@ -2082,14 +2135,14 @@ def _resume(
     issue_obj = None
 
     if record["repo"] and record["repo"] != repo:
-        verdict, detail = resume_verdict(record, repo, worker, None, None,
-                                         None, now, ttl)
+        # Nothing was read, and nothing needs to be: the repo mismatch decides it.
+        verdict, detail = resume_verdict(record, repo, worker,
+                                         UNREADABLE_LEASE, None)
     else:
-        ref_state, head = claim_ref_head(repo, issue)
+        head = claim_ref_head(repo, issue)
         # One GET serves both the finished-task check and the brief.
-        issue_obj = None if ref_state == "error" else issue_detail(repo, issue)
-        verdict, detail = resume_verdict(record, repo, worker, ref_state, head,
-                                         issue_obj, now, ttl)
+        issue_obj = None if head.unknown else issue_detail(repo, issue)
+        verdict, detail = resume_verdict(record, repo, worker, head, issue_obj)
 
     if verdict == "resolved":
         # The claim is over. Drop the stale scratch file so the one-task-at-a-time
@@ -2817,7 +2870,7 @@ def compute_status(repo: Repo, project: str, nodes: Sequence[Node],
                               "heartbeat_anchor": anchor,
                               "heartbeat_age_seconds": age,
                               "heartbeat_msg": msg,
-                              "stale": not lease.live})
+                              "stale": lease.expired})
 
     if project:
         projects = [project]
@@ -3305,7 +3358,7 @@ def reconcile_plan(
                          "gens": list(leases[num].gens)})
             continue
 
-        if not leases[num].live:
+        if leases[num].expired:
             expiries = expiry_count(by_number[num])
             if expiries >= max_expiries:
                 plan.append({"rule": "reclaim", "issue": num,

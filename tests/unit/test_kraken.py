@@ -1864,26 +1864,28 @@ class ResumeVerdictTests(unittest.TestCase):
     """PROTOCOL.md §5.3 as a decision table: who owns the lease decides whether a
     write is legal, and an ambiguous read is never a decision."""
 
-    # None is a meaningful VALUE for head/obj ("no ref" / "the read failed"), so
-    # the defaults need a sentinel of their own.
+    # None is a meaningful VALUE for obj ("the read failed"), so its default
+    # needs a sentinel of its own. `head` no longer needs one: the two
+    # no-ladder outcomes are objects (NO_LEASE / UNREADABLE_LEASE).
     DEFAULT = object()
 
     def verdict(self, *, record=None, repo="OWNER/tasks", worker="w1",
-                ref_state="ok", head=DEFAULT, obj=DEFAULT, now=2000.0, ttl=1800):
+                head=DEFAULT, obj=DEFAULT):
         return kraken.resume_verdict(
-            record or rec(), repo, worker, ref_state,
+            record or rec(), repo, worker,
             ref_head() if head is self.DEFAULT else head,
-            issue_obj() if obj is self.DEFAULT else obj, now, ttl)
+            issue_obj() if obj is self.DEFAULT else obj)
 
     def test_live_lease_of_ours_resumes(self):
-        v, detail = self.verdict(head=ref_head(epoch=1900.0), now=2000.0)
+        v, detail = self.verdict(head=ref_head(epoch=1900.0))
         self.assertEqual(v, "execute", "our own live lease must resume")
         self.assertEqual(detail["generation"], 1, "generation not reported")
 
     def test_expired_but_ours_still_resumes(self):
         # §5.3: expired-but-unstolen is still ours — completing the transition
-        # frees it honestly. The caller is told to renew, not to stop.
-        v, _ = self.verdict(head=ref_head(epoch=1.0), now=99999.0)
+        # frees it honestly. The caller is told to renew, not to stop. No clock
+        # is passed because the verdict does not consult one: ownership decides.
+        v, _ = self.verdict(head=ref_head(epoch=1.0))
         self.assertEqual(v, "execute",
                          "an expired lease nobody took is still ours to finish")
 
@@ -1894,12 +1896,12 @@ class ResumeVerdictTests(unittest.TestCase):
         self.assertIn("w-thief", detail["detail"], "the new holder is not named")
 
     def test_missing_ref_on_an_open_task_abandons(self):
-        v, detail = self.verdict(ref_state="absent", head=None)
+        v, detail = self.verdict(head=kraken.NO_LEASE)
         self.assertEqual(v, "abandon", "a vanished lease holds nothing")
         self.assertEqual(detail["reason"], "lease-gone")
 
     def test_unreadable_lease_is_a_retry_not_a_loss(self):
-        v, detail = self.verdict(ref_state="error", head=None)
+        v, detail = self.verdict(head=kraken.UNREADABLE_LEASE)
         self.assertEqual(v, "retry",
                          "an ambiguous read must never be turned into a verdict")
         self.assertEqual(detail["reason"], "lease-unreadable")
@@ -1913,7 +1915,7 @@ class ResumeVerdictTests(unittest.TestCase):
         # The transition landed; only the local scratch file lagged. Keep
         # draining rather than report a loss.
         v, detail = self.verdict(
-            ref_state="absent", head=None,
+            head=kraken.NO_LEASE,
             obj=issue_obj(labels=("kraken-task", "awaiting-merge")))
         self.assertEqual(v, "resolved", "a delivered task is not an abandonment")
         self.assertEqual(detail["reason"], "already-resolved")
@@ -1925,10 +1927,10 @@ class ResumeVerdictTests(unittest.TestCase):
 
     def test_claim_in_another_repo_blocks(self):
         # One task at a time is repo-independent, and it is decided before any
-        # read — hence the None observations.
+        # read — hence the "nothing was observed" lease and no issue.
         v, detail = kraken.resume_verdict(
             rec(repo="OWNER/other"), "OWNER/tasks", "w1",
-            None, None, None, 2000.0, 1800)
+            kraken.UNREADABLE_LEASE, None)
         self.assertEqual(v, "blocked", "a claim elsewhere must block this drain")
         self.assertEqual(detail["reason"], "claim-elsewhere")
         self.assertIn("OWNER/other#7", detail["detail"],
