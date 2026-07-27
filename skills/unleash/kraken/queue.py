@@ -557,6 +557,50 @@ class Queue:
                 out[n] = ((obj.get("comments") or {}).get("nodes")) or []
         return out
 
+    # --- routing: which projects this repo actually carries -------------------
+
+    def projects(self) -> list[str] | None:
+        """Every project:<name> label configured in the repo, sorted, prefix
+        stripped — the launch recon points a worker at each. Read from the repo's
+        label set (not the open-task walk) so a project with no open task still
+        gets a launch line. Returns a sorted name list, or None on transport
+        failure."""
+        items = self.api.paginated(f"/repos/{self.api.repo}/labels")
+        if items is None:
+            return None
+        return sorted(
+            n["name"][len("project:"):]
+            for n in items
+            if isinstance(n, dict) and str(n.get("name", "")).startswith("project:")
+        )
+
+    def verify_project(self, project: str) -> tuple[bool | None, str]:
+        """Check that the coordination repo actually carries the `project:<name>`
+        label a worker was pointed at. Returns (ok, message): True when the label
+        exists, False (with a message naming the configured projects and the fix)
+        when it does not, and None when the label read itself failed — a project
+        is never declared missing from a read that never landed.
+
+        Routing is entirely client-side (§3): a worker scoped to a label nobody
+        uses filters every task out and reads as an empty queue forever, so a
+        typo'd or never-created project silently produces a worker that hears
+        nothing. Cheap to check once, so check it before the drain rather than
+        never."""
+        names = self.projects()
+        if names is None:
+            return (None, "project check: gh-failure stage=labels")
+        if project in names:
+            return (True, "")
+        configured = ", ".join(names) if names else "(none configured)"
+        return (False,
+                "unknown project: %s has no `project:%s` label, so this worker "
+                "would never see a task. Configured projects: %s. Fix the "
+                "--project spelling, or create the label with `kraken.py init %s "
+                "--project %s`."
+                % (self.api.repo, project, configured, self.api.repo, project))
+
+    # --- internals ------------------------------------------------------------
+
     def _depends_on(self,
                     targets: Iterable[Issue]) -> dict[Issue, str] | None:
         """Resolve every `depends-on: #N` fallback target's open/closed state in

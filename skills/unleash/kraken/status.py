@@ -24,7 +24,6 @@ from .queue import (
     section_body
 )
 from .render import render_status
-from .claim import list_projects
 
 # --- subcommand: status ------------------------------------------------------
 #
@@ -276,7 +275,7 @@ class StatusReport:
     def _projects(self) -> list[str] | None:
         """The launch recon: a scoped report names its own project, an unscoped
         one reads the repo's whole `project:` label set. None on a failed read."""
-        return [self.project] if self.project else list_projects(self.api)
+        return [self.project] if self.project else Queue(self.api).projects()
 
 
 def cmd_status(args: argparse.Namespace) -> int:

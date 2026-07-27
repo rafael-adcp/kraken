@@ -743,13 +743,13 @@ class VerifyProjectTests(unittest.TestCase):
     project missing from a label read that merely failed."""
 
     def _verify(self, projects, project="app"):
-        # Faked at the Api, not at `list_projects`: the real label read and the
-        # real `project:` stripping stay under test, and a failed read is a
+        # Faked at the Api, not at `Queue.projects`: the real label read and
+        # the real `project:` stripping stay under test, and a failed read is a
         # `paginated` answering None — what the transport actually does.
         labels = (None if projects is None
                   else [{"name": f"project:{p}"} for p in projects])
         api = FakeApi(paginated=lambda path: labels)
-        return kraken.verify_project(api, project)
+        return kraken.Queue(api).verify_project(project)
 
     def test_configured_project_passes(self):
         ok, message = self._verify(["app", "docs"])
@@ -1003,7 +1003,7 @@ class StatusComputeTests(unittest.TestCase):
         # Tests seed {issue: sha}; the lease view wants the generation ladder.
         refs = {n: [(1, sha)] for n, sha in (claim_refs or {}).items()}
         # The comment thread and the label set both come off the injected Api
-        # now. `paginated` is faked rather than `list_projects`, so the real
+        # now. `paginated` is faked rather than `Queue.projects`, so the real
         # project:<name> stripping is under test too.
         api = FakeApi(
             "o/tasks",

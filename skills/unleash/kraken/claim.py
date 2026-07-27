@@ -250,30 +250,6 @@ def cmd_claim(args: argparse.Namespace) -> int:
 
 # --- subcommand: claim-next --------------------------------------------------
 
-def verify_project(api: Api, project: str) -> tuple[bool | None, str]:
-    """Check that the coordination repo actually carries the `project:<name>`
-    label this worker was pointed at. Returns (ok, message): True when the label
-    exists, False (with a message naming the configured projects and the fix)
-    when it does not, and None when the label read itself failed — a project is
-    never declared missing from a read that never landed.
-
-    Routing is entirely client-side (§3): a worker scoped to a label nobody uses
-    filters every task out and reads as an empty queue forever, so a typo'd or
-    never-created project silently produces a worker that hears nothing. Cheap to
-    check once, so check it before the drain rather than never."""
-    names = list_projects(api)
-    if names is None:
-        return (None, "project check: gh-failure stage=labels")
-    if project in names:
-        return (True, "")
-    configured = ", ".join(names) if names else "(none configured)"
-    return (False,
-            "unknown project: %s has no `project:%s` label, so this worker would "
-            "never see a task. Configured projects: %s. Fix the --project "
-            "spelling, or create the label with `kraken.py init %s --project %s`."
-            % (api.repo, project, configured, api.repo, project))
-
-
 def cmd_claim_next(args: argparse.Namespace) -> int:
     """Collapse the deterministic claim loop into one invocation: read the queue,
     reconcile it (§6), then list startable candidates oldest-first and guard + CAS
@@ -327,7 +303,7 @@ def acquire_next(api: Api, project: str, worker: Worker,
     # Project preflight: before the queue is read and before any write,
     # because a worker scoped to a project label the repo does not carry is deaf,
     # not idle — it would report an honest-looking empty queue forever.
-    ok, message = verify_project(api, project)
+    ok, message = queue.verify_project(project)
     if ok is None:
         diag(message)
         return (EXIT_TRANSPORT, None)
@@ -600,18 +576,3 @@ def cmd_note(args: argparse.Namespace) -> int:
 
     print(f"note: posted issue={issue} worker={worker}")
     return EXIT_OK
-
-
-def list_projects(api: Api) -> list[str] | None:
-    """Every project:<name> label configured in the repo, sorted, prefix
-    stripped — the launch recon points a worker at each. Read from the repo's
-    label set (not the open-task walk) so a project with no open task still gets
-    a launch line. Returns a sorted name list, or None on transport failure."""
-    items = api.paginated(f"/repos/{api.repo}/labels")
-    if items is None:
-        return None
-    return sorted(
-        n["name"][len("project:"):]
-        for n in items
-        if isinstance(n, dict) and str(n.get("name", "")).startswith("project:")
-    )
