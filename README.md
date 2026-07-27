@@ -320,30 +320,20 @@ Want a bounded run instead — a scheduled container, a one-off drain? Pass
 --once`) still works — it just costs one full LLM turn per fire even when the
 queue is empty.
 
-Want the ambush **outside** the model instead — no session to keep open, no
-harness background tooling? `kraken.py loop` is the supervising driver: it polls
-the queue itself and invokes an agent CLI only when a task is actually startable,
-so an idle queue still costs nothing. The agent command goes after `--`, so it
-drives whichever CLI you run:
+**Harness with no background process at all?** GitHub Copilot CLI is the case:
+it runs `/kraken:unleash` like any other worker, but it has no Monitor tool, so
+nothing inside the session can hold the watcher. There the ambush moves
+**outside** the model — same zero-token idle behavior, hosted by a small
+supervising process instead of by the session. You do not have to look the
+command up — the worker hands it to you when it gets there, for your repo,
+project and worker name. It polls, invokes your agent CLI only when a task is
+actually startable, and releases the lease on the spot if that agent dies still
+holding one.
 
-```
-kraken.py loop OWNER/tasks my_app env-1 -- copilot -p "{prompt}" --allow-all-tools --no-ask-user
-kraken.py loop OWNER/tasks my_app env-1 -- claude -p "{prompt}"
-```
-
-`{prompt}` is where the drain instruction lands (override it with
-`--prompt-file`). Because the loop outlives each agent process, it also cleans up
-after one: if the agent dies still holding a lease, the loop releases it on the
-spot instead of leaving the task until the TTL — and its teardown does the same
-when you Ctrl-C the loop itself.
-
-Add `--once` for a bounded run (a cron job, a CI step): one pass, then exit. In
-that mode the loop **passes the agent's own exit status through** rather than
-reporting its own `0`, so the caller can tell a clean drain from an agent that
-crashed mid-task. Worth knowing that this shares a namespace with kraken's exit
-codes — an agent that exits `20` is indistinguishable from the loop failing to
-read the queue — so treat any non-zero from `--once` as "this drain did not
-complete cleanly", and read the `kraken-loop:` lines on stderr for which it was.
+That process is also the bounded-run entry point — a cron job, a CI step: one
+pass, then exit, with the agent's own exit status passed through so the caller
+can tell a clean drain from one that crashed. `kraken.py loop --help` has the
+details.
 
 ## The operator's cheat sheet
 
