@@ -411,8 +411,9 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
     is no interleaving in which a live worker is stolen from *and* believes it
     still holds the lease — the loser is told, immediately, with exit 10."""
     api, issue, worker, message = args.api, args.issue, args.worker, args.message
-    lost, head = Refs(api).hold("heartbeat", issue, worker)
+    lost, head, refusal = Refs(api).hold(issue, worker)
     if lost is not None:
+        diag(f"heartbeat: {refusal}")
         return lost
     outcome, gen, _sha = Refs(api).advance(
         issue, head.gen,
@@ -447,8 +448,9 @@ def cmd_escalate(args: argparse.Namespace) -> int:
 
     # The lease first (§5): a question posted onto a task another worker is now
     # executing puts a decision in front of the operator that nobody is waiting on.
-    lost, head = Refs(api).hold("escalate", issue, worker)
+    lost, head, refusal = Refs(api).hold(issue, worker)
     if lost is not None:
+        diag(f"escalate: {refusal}")
         return lost
 
     body = compose_comment(
@@ -488,8 +490,9 @@ def cmd_deliver(args: argparse.Namespace) -> int:
     # land on a task another worker is now executing — two deliveries, one task,
     # and a review queue that lies. The work is not lost: the branch and PR
     # exist, and re-claiming the task delivers them honestly.
-    lost, head = Refs(api).hold("deliver", issue, worker)
+    lost, head, refusal = Refs(api).hold(issue, worker)
     if lost is not None:
+        diag(f"deliver: {refusal}")
         return lost
 
     payload = {"type": "delivered", "worker": worker}
@@ -526,8 +529,9 @@ def cmd_release(args: argparse.Namespace) -> int:
     # optional here, and the local state file is cleared either way: the caller
     # (a lifecycle hook, the ambush loop) must not be left retrying forever a
     # release that is no longer its business.
-    lost, head = Refs(api).hold("release", issue, worker)
+    lost, head, refusal = Refs(api).hold(issue, worker)
     if lost is not None:
+        diag(f"release: {refusal}")
         if lost == EXIT_LOST:
             clear_claim_state(worker)
         return lost
