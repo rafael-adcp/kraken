@@ -12,8 +12,8 @@ import time
 from typing import Any, Callable, Sequence
 
 from .contract import (
-    EXIT_OK, EXIT_TRANSPORT, EXIT_UNKNOWN_PROJECT, EXIT_USAGE, Epoch, Repo,
-    Worker
+    ENTRYPOINT, EXIT_OK, EXIT_TRANSPORT, EXIT_UNKNOWN_PROJECT, EXIT_USAGE,
+    Epoch, Repo, SKILL_DIR, Worker
 )
 from .transport import Api
 from .claim import release_open_claims, verify_project
@@ -48,17 +48,32 @@ DEFAULT_POLL_SECONDS = 60
 PROMPT_PLACEHOLDER = "{prompt}"
 
 
-def default_prompt(repo: Repo, project: str, worker: Worker) -> str:
+def default_prompt(repo: Repo, project: str, worker: Worker,
+                   skill_dir: str = SKILL_DIR) -> str:
     """The drain instruction handed to the agent when the operator supplies no
-    `--prompt-file`. Deliberately agent-neutral — it names the protocol and the
-    skill, never a specific CLI — and deliberately ONE pass: the loop owns the
-    cadence, so an agent that kept draining would be a second scheduler."""
+    `--prompt-file`.
+
+    It names its rule files by ABSOLUTE PATH, which the bash prompt this
+    replaced did not have to: that one said "follow AGENTS.md" and relied on
+    Copilot CLI auto-loading an AGENTS.md from the working directory. This loop
+    drives any CLI from any directory, and a spawned agent that cannot find
+    DELIVERY.md is one that pushes commits without the attribution trailers and
+    opens a PR that does not close its task. So the paths are interpolated
+    rather than assumed, and a work repo's own AGENTS.md still applies on top.
+
+    Deliberately ONE pass: the loop owns the cadence, so an agent that kept
+    draining would be a second scheduler racing the first."""
     return (
-        f"Act as kraken worker {worker}, draining project:{project} from {repo}. "
-        "Follow the kraken worker skill (SKILL.md) and PROTOCOL.md. Do ONE drain "
-        "pass: run `kraken.py next-action` and do what the envelope says — "
-        "execute the task it hands you end to end, deliver it as a draft PR, "
-        "then stop."
+        f"Act as kraken worker {worker}, draining project:{project} from {repo}.\n\n"
+        f"Read {os.path.join(skill_dir, 'SKILL.md')} (from 'The loop' onward) "
+        f"and {os.path.join(skill_dir, 'DELIVERY.md')} before you write "
+        "anything: they carry the protocol, the authorization boundaries, and "
+        "the delivery conventions (branch naming, the attribution trailers, the "
+        "draft PR and its `Closes` reference). An AGENTS.md in the work repo "
+        "applies on top of them.\n\n"
+        f"Do ONE drain pass: run `python3 {ENTRYPOINT} next-action "
+        f"{repo} {project} {worker}` and do what the envelope says — execute the "
+        "task it hands you end to end, deliver it as a draft PR, then stop."
     )
 
 
@@ -196,12 +211,26 @@ def loop(api: Api, project: str, worker: Worker, agent: Sequence[str], *,
                           f"project:{project} ({numbers}) — running a drain pass",
                           flush=True)
                     last_fire = time.time()
-                    if spawn(build_agent_argv(agent, prompt)) is None:
+                    status = spawn(build_agent_argv(agent, prompt))
+                    if status is None:
                         return EXIT_USAGE
                     # A lease that survived the agent process is abandoned:
                     # nobody is left to finish or renew it. Free it now rather
                     # than at the TTL.
                     release_open_claims("agent exited mid-drain", worker)
+                    if status:
+                        print(f"kraken-loop: the agent exited {status}",
+                              file=sys.stderr, flush=True)
+                    if once:
+                        # `--once` is the mode a cron job or a CI step runs, and
+                        # its caller has no other way to learn the drain failed:
+                        # a polling loop rides a bad pass out and tries again,
+                        # a bounded one has to report it. The agent's own status
+                        # is passed through rather than mapped onto this
+                        # program's exit codes — it is not this program's
+                        # verdict, and flattening it to 0 is what hid the
+                        # failure.
+                        return status
                 elif once:
                     print(f"kraken-loop: nothing startable in project:{project} "
                           f"— skipping the model", flush=True)

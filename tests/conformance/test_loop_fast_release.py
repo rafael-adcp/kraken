@@ -53,8 +53,9 @@ class LoopFastReleaseTests(KrakenConformanceTest):
         self.mk_issue(7, "abandoned mid-drain", "kraken-task", "project:app")
 
         proc = self.run_loop(self.claims_then("exit 1"))
-        self.assertEqual(proc.returncode, 0,
-                         "loop --once must exit 0 (stderr: %s)" % proc.stderr)
+        self.assertEqual(proc.returncode, 1,
+                         "--once must pass the agent's status through "
+                         "(stderr: %s)" % proc.stderr)
 
         self.assertFalse(self.has_label(7, "in-progress"),
                          "loop did not drop in-progress after the agent died")
@@ -95,13 +96,22 @@ class LoopFastReleaseTests(KrakenConformanceTest):
         before8 = self.comment_count(8)
 
         proc = self.run_loop(self.agent("exit 1"), worker="w1")
-        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.returncode, 1)
         self.assertTrue(os.path.isfile(self.claim_state_file("other")),
                         "loop released a claim belonging to another worker")
         self.assertTrue(self.has_label(8, "in-progress"),
                         "loop dropped another worker's in-progress label")
         self.assertEqual(self.comment_count(8), before8,
                          "loop posted on another worker's issue")
+
+    def test_once_reports_a_clean_drain_and_a_failed_one_differently(self):
+        # `--once` is what a cron job or a CI step runs, and flattening every
+        # outcome to 0 left its caller unable to tell a drain that worked from
+        # an agent that crashed mid-task.
+        self.mk_issue(7, "startable", "kraken-task", "project:app")
+        self.assertEqual(self.run_loop(self.agent("exit 0")).returncode, 0)
+        self.assertEqual(self.run_loop(self.agent("exit 3")).returncode, 3,
+                         "the agent's exit status was swallowed")
 
     def test_idle_queue_never_invokes_the_agent(self):
         # The whole point of polling outside the model: nothing startable, no

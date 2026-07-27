@@ -176,7 +176,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("project")
     p.add_argument("worker")
     p.add_argument("--once", action="store_true",
-                   help="run one drain pass and exit instead of polling")
+                   help="run one drain pass and exit instead of polling; the "
+                        "agent's own exit status is passed through, so a cron "
+                        "or CI caller can tell a failed drain from a clean one")
     p.add_argument("--poll", type=int, default=None,
                    help="poll cadence in seconds (default: "
                         "KRAKEN_LOOP_POLL_SECONDS env, else "

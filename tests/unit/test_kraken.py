@@ -1856,6 +1856,21 @@ class AgentArgvTests(unittest.TestCase):
         self.assertIn("ONE drain pass", prompt,
                       "the loop owns the cadence; the agent must do one pass")
 
+    def test_the_default_prompt_routes_the_agent_to_its_rule_files(self):
+        # The bash prompt this replaced said "follow AGENTS.md" and relied on
+        # Copilot auto-loading it from cwd. This loop drives any CLI from any
+        # directory, so the paths have to be in the prompt — an agent that
+        # cannot reach DELIVERY.md commits without the attribution trailers.
+        prompt = kraken.default_prompt("OWNER/tasks", "my_app", "env-1",
+                                       skill_dir="/plugins/kraken/skills/unleash")
+        self.assertIn("/plugins/kraken/skills/unleash/SKILL.md", prompt)
+        self.assertIn("/plugins/kraken/skills/unleash/DELIVERY.md", prompt)
+
+    def test_the_default_prompt_carries_a_runnable_next_action(self):
+        prompt = kraken.default_prompt("OWNER/tasks", "my_app", "env-1")
+        self.assertIn("next-action OWNER/tasks my_app env-1", prompt,
+                      "the agent has to be told the exact command, not the shape")
+
 
 class OpenClaimRecordsTests(unittest.TestCase):
     """The claim-state sweep (open_claim_records): every open claim recorded on

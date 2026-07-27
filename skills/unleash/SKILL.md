@@ -163,21 +163,22 @@ tool schemas, and taking the `--once` fallback here silently throws away the amb
 skill exists for. One watcher per worker, never two — skip this if a previous drain
 already armed one.
 
-No background process at all? Then the ambush belongs **outside** the model: the operator
-runs `kraken.py loop`, which polls the queue and re-invokes a one-shot drain itself. Say
-so and end the turn as if `--once` — that loop is theirs to start, not yours.
-
-It polls every 60s and prints a `kraken-queue:` line only when the queue changes **and**
-something is startable, so an idle queue costs nothing. A failed queue read is never
-silent: it warns on stderr and eventually exits `20` rather than pose as an idle queue
-while nothing can reach the repo.
+**The watcher** polls every 60s and prints a `kraken-queue:` line only when the queue
+changes **and** something is startable, so an idle queue costs nothing. A failed queue
+read is never silent: it warns on stderr and eventually exits `20` rather than pose as an
+idle queue while nothing can reach the repo.
 
 Armed? Confirm what is watching (repo, project, worker name, cadence) and **end your
 turn** — do not keep polling yourself. On each `kraken-queue:` event, run **The loop**
-again until `idle`, then go quiet; the watcher stays armed. Cannot arm one? Say so,
-offer `/loop /kraken:unleash ... --once` as the fallback, and end the turn as if
-`--once` — do not improvise a watcher. When I say stop, stop it and confirm; either way
-it dies with the session.
+again until `idle`, then go quiet; the watcher stays armed. When I say stop, stop it and
+confirm; either way it dies with the session.
+
+**Cannot arm one?** Then the ambush belongs **outside** the model, and starting it is
+mine, not yours. Say so, end the turn as if `--once`, and offer me the two ways to get
+it — `kraken.py loop OWNER/tasks <project> <worker> -- <my agent CLI>`, which polls
+outside the model and spends no tokens while the queue is idle, or
+`/loop /kraken:unleash ... --once`, a dumb timer that costs a turn per fire. **Never
+improvise a watcher of your own.**
 
 ## Attribution
 
