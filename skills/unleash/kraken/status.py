@@ -17,10 +17,7 @@ from .contract import (
 )
 from .comments import parse_marker
 from .transport import Api
-from .lease import (
-    Lease, holder_shas, lease_state, lease_ttl_seconds, live_leases
-)
-from .refs import Refs
+from .lease import Lease, live_leases
 from .queue import (
     Queue, claim_meta_of,
     is_empty_section, label_names_of, project_names_of, requeued_labels,
@@ -258,33 +255,20 @@ def compute_status(api: Api, project: str, nodes: Sequence[Node],
 
 def cmd_status(args: argparse.Namespace) -> int:
     api, project = args.api, args.project
-    nodes = Queue(api).open_tasks()
-    if nodes is None:
-        print("status: gh-failure stage=list", file=sys.stderr)
-        return EXIT_TRANSPORT
-    claim_refs = Refs(api).all()
-    if claim_refs is None:
-        print("status: gh-failure stage=refs", file=sys.stderr)
-        return EXIT_TRANSPORT
-    commit_meta = Refs(api).commit_meta(holder_shas(claim_refs))
-    if commit_meta is None:
-        print("status: gh-failure stage=commits", file=sys.stderr)
-        return EXIT_TRANSPORT
-
     now = time.time()
-    leases = lease_state(claim_refs, commit_meta, now, lease_ttl_seconds())
-    # The console reads the queue the way a worker does, so it needs the same
-    # windows the requeue derivation needs — and only those. Hygiene reads bodies
-    # and the review queue reads its own paginated thread, neither of which this
-    # touches.
-    if Queue(api).hydrate(nodes, leases) is None:
-        print("status: gh-failure stage=comments", file=sys.stderr)
+    # One queue read, the same one a drain performs: nodes, the lease state of
+    # every claim ref, and the commit meta the holders are decoded from. The
+    # console used to run those four steps itself, with four None checks of its
+    # own, only because `read` threw the commit meta away.
+    read = Queue(api).read(now=now)
+    if read is None:
+        print("status: gh-failure stage=list", file=sys.stderr)
         return EXIT_TRANSPORT
 
     report = compute_status(
-        api, project, nodes, now,
-        leases=leases,
-        commit_meta=commit_meta,
+        api, project, read.nodes, now,
+        leases=read.leases,
+        commit_meta=read.commit_meta,
         pr_merged=lambda url: pr_is_merged(api, url),
     )
     if report is None:

@@ -263,8 +263,11 @@ class ReapCommandTests(unittest.TestCase):
         ladders = {n: [(1, sha)] for n, sha in refs.items()}
 
         def read(now=None, ttl=None):
-            return (nodes, kraken.lease_state(ladders, commit_meta, self.NOW,
-                                              kraken.lease_ttl_seconds(ttl)))
+            return kraken.QueueRead(
+                nodes,
+                kraken.lease_state(ladders, commit_meta, self.NOW,
+                                   kraken.lease_ttl_seconds(ttl)),
+                commit_meta)
 
         buf = StringIO()
         with redirect_stdout(buf):

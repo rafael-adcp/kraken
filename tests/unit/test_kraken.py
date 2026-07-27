@@ -656,7 +656,7 @@ class ClaimNextIterationTests(unittest.TestCase):
                 queue=FakeQueue(
                     api,
                     read=lambda now=None, ttl=None: (
-                        None if rows is None else (nodes, {})),
+                        None if rows is None else kraken.QueueRead(nodes, {}, {})),
                     candidates=lambda p, read=None: rows),
                 claim_step=fake_claim_step)
         return rc, won, buf.getvalue()
@@ -794,7 +794,8 @@ class ClaimNextProjectGateTests(unittest.TestCase):
         with redirect_stdout(buf):
             rc, _won = kraken.acquire_next(
                 api, "app", "w-gate",
-                queue=FakeQueue(api, read=lambda now=None, ttl=None: ([], {}),
+                queue=FakeQueue(api,
+                                read=lambda now=None, ttl=None: kraken.QueueRead([], {}, {}),
                                 candidates=self._candidates))
         return rc, buf.getvalue()
 

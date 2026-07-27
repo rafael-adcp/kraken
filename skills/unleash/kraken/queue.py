@@ -355,6 +355,24 @@ def is_empty_section(content: str) -> bool:
     joined = "\n".join(nonblank)
     return joined == "" or joined == NO_RESPONSE_PLACEHOLDER
 
+@dataclasses.dataclass(frozen=True)
+class QueueRead:
+    """One queue read, whole: every open task node, the lease state of every
+    claim ref, and the commit meta those leases were decoded from.
+
+    The commit meta used to be dropped on the floor — `read` answered
+    `(nodes, leases)` — and that cost far more than it saved. `status` needs it
+    to decode each holder's worker, message and heartbeat anchor, so it could
+    not use `read` at all: it re-ran the same five-step sequence by hand, with
+    five None checks and five diagnostics of its own, in another module. That is
+    the two-element tuple's classic bill — it has nowhere to grow, so the third
+    value comes back as duplicated orchestration somewhere else."""
+
+    nodes: list[Node]
+    leases: dict[Issue, Lease]
+    commit_meta: CommitMeta
+
+
 class Queue:
     """The coordination repo's task queue as this program reads it: the batched
     walk, the lease state that comes with it, comment hydration, and the
@@ -406,12 +424,12 @@ class Queue:
             cursor = page["pageInfo"]["endCursor"]
 
     def read(self, now: Epoch | None = None, ttl: int | None = None,
-             ) -> tuple[list[Node], dict[Issue, Lease]] | None:
+             ) -> QueueRead | None:
         """One queue read: every open kraken-task node (repo-wide, BEFORE any project
         filter) plus the LEASE state of every claim ref. The single fetch the
-        reconciler (§6), the startable classification and the claim path all consume,
-        so a drain that does all three pays for it once. Returns (nodes, leases), or
-        None on transport failure.
+        reconciler (§6), the startable classification, the claim path and the console
+        all consume, so a reader that does several pays for it once. Returns a
+        `QueueRead`, or None on transport failure.
 
         Resolving the lease costs one extra batched call — and only when a ref
         actually exists: `resolve_commit_meta` answers `{}` for an empty ref list
@@ -435,10 +453,9 @@ class Queue:
                              lease_ttl_seconds(ttl))
         if self.hydrate(nodes, leases) is None:
             return None
-        return (nodes, leases)
+        return QueueRead(nodes, leases, commit_meta)
 
-    def candidates(self, project: str,
-                   read: tuple[list[Node], dict[Issue, Lease]] | None = None,
+    def candidates(self, project: str, read: QueueRead | None = None,
                    ) -> list[Candidate] | None:
         """The shared startable/held classification list-startable, watch's snapshot
         and claim-next all read — one code path so the filter cannot drift between
@@ -460,10 +477,9 @@ class Queue:
             read = self.read()
             if read is None:
                 return None
-        nodes, leases = read
-        live = live_leases(leases)
+        live = live_leases(read.leases)
         project_label = f"project:{project}"
-        nodes = [n for n in nodes if project_label in label_names_of(n)]
+        nodes = [n for n in read.nodes if project_label in label_names_of(n)]
         # priority:high tasks lead; createdAt breaks ties FIFO within each tier. The
         # key sorts on (not-high, createdAt) so the boolean puts the high tier first
         # and the timestamp keeps the older task ahead inside a tier — a scheduling

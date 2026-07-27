@@ -340,7 +340,7 @@ def acquire_next(api: Api, project: str, worker: Worker,
     if read is None:
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)
-    nodes, leases = read
+    nodes, leases = read.nodes, read.leases
 
     # Reconcile before classifying (PROTOCOL.md §6). A dead worker's lease
     # obstructs exactly one party — the next worker who wants to claim — and that
