@@ -5,6 +5,7 @@ Part of the kraken protocol package; see __init__.py."""
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import re
 import time
 from typing import Iterable, Sequence
@@ -216,18 +217,82 @@ def requeued_labels(node: Node, live: dict[Issue, Sha]) -> tuple[str, ...]:
 
 
 
+# --- one task, as the startable filter sees it -------------------------------
+
+DEPENDS_ON_RE = re.compile(r"^depends-on: *#([0-9]+)", re.MULTILINE)
+
+
+@dataclasses.dataclass(frozen=True)
+class Candidate:
+    """One task the startable filter classified.
+
+    It used to be a positional tuple whose LENGTH depended on a boolean flag —
+    five elements with `include_body=True`, four without — so callers read it as
+    `for number, title, _created, state, body in rows` and the filter itself
+    wrote a verdict back by magic index (`rows[idx][3] = "held"`). The `Lease` in
+    this same package got an object; the candidate had not.
+
+    `state` is None only while the classification is still waiting on the batched
+    `depends-on` resolution; every candidate `Queue.candidates` returns has one."""
+
+    number: Issue
+    title: str
+    created: str
+    state: str | None
+    body: str
+
+    @property
+    def startable(self) -> bool:
+        """Whether a worker may attempt to claim this. The guard and the CAS
+        decide ownership either way — this is the offer, not the verdict."""
+        return self.state == "startable"
+
+
+def depends_on_ref(node: Node) -> Issue | None:
+    """The `depends-on: #N` target declared in a task body, or None. This is the
+    TEXT fallback: GitHub's native blocked-by link supersedes it and is read off
+    the queue walk, so this is only consulted for tasks that carry no link."""
+    m = DEPENDS_ON_RE.search(node.get("body") or "")
+    return int(m.group(1)) if m else None
+
+
+def node_state(node: Node, live: dict[Issue, Sha]) -> str | None:
+    """One node's startable/held verdict, as a pure function of the node and the
+    live-lease view — or None when the answer depends on the `depends-on` target's
+    state, which the caller resolves for the whole page in one batched call.
+
+    Held means: a held label (needs-decision / awaiting-merge — an operator-facing
+    state) OR a **live lease** (the lock). Those are the only two kinds of hold
+    there are, and they do not overlap: `in-progress` is write-only (§3), so the
+    lease answers for it and a task wearing a stale badge with no live lease is
+    offered like any other. An EXPIRED lease holds nothing either (§5): the task
+    is offered, and the claim that follows steals the lease.
+
+    A held LABEL is not the last word: a task whose operator has already replied
+    is requeued by derivation (§6, `requeued_labels`) and rejoins the candidates
+    — it still has to clear its dependencies like any other."""
+    still_held = set(HELD_LABELS) - set(requeued_labels(node, live))
+    if label_names_of(node) & still_held or node["number"] in live:
+        return "held"
+    blockers = node.get("blockedBy", {}).get("nodes", [])
+    if blockers:
+        blocked = any(str(b.get("state", "")).upper() == "OPEN" for b in blockers)
+        return "held" if blocked else "startable"
+    return None if depends_on_ref(node) is not None else "startable"
+
+
 def cmd_list_startable(args: argparse.Namespace) -> int:
     rows = Queue(args.api).candidates(args.project)
     if rows is None:
         return EXIT_TRANSPORT
 
     if args.snapshot:
-        for number, _, _, state in sorted(rows, key=lambda r: r[0]):
-            print(f"{number}:{state}")
+        for c in sorted(rows, key=lambda c: c.number):
+            print(f"{c.number}:{c.state}")
     else:
-        for number, title, _, state in rows:  # priority-first, then createdAt FIFO
-            if state == "startable":
-                print(f"{number}\t{title}")
+        for c in rows:  # priority-first, then createdAt FIFO
+            if c.startable:
+                print(f"{c.number}\t{c.title}")
     return EXIT_OK
 
 
@@ -372,32 +437,25 @@ class Queue:
             return None
         return (nodes, leases)
 
-    def candidates(self, project: str, include_body: bool = False,
+    def candidates(self, project: str,
                    read: tuple[list[Node], dict[Issue, Lease]] | None = None,
-                   ) -> list[tuple] | None:
-        """The shared startable/held classification list-startable and watch's
-        snapshot both read — one code path so the filter can't drift between them.
-        Returns a list of (number, title, createdAt, "startable"|"held") ordered
-        priority:high-first then oldest-first by createdAt within each tier (a stable
-        sort — see PRIORITY_LABEL), or None on transport failure. With
-        include_body=True each row
-        gains a fifth element, the issue body, so claim-next can brief a subagent
-        from the win without a second fetch (the GraphQL walk already has it).
+                   ) -> list[Candidate] | None:
+        """The shared startable/held classification list-startable, watch's snapshot
+        and claim-next all read — one code path so the filter cannot drift between
+        them. Returns `Candidate`s ordered priority:high-first then oldest-first by
+        createdAt within each tier (a stable sort — see PRIORITY_LABEL), or None on
+        transport failure.
 
-        `read` accepts an already-fetched (nodes, leases) pair from `read`,
-        which is how claim-next classifies the state its reconcile pass just
-        produced without re-fetching it.
+        The classification of one node is `node_state`; this is the page around it:
+        the project filter, the ordering, and the one batched call that answers
+        every `depends-on` target at once. Every candidate carries its body, so
+        claim-next can brief a subagent from the win without a second fetch — the
+        GraphQL walk already paid for it, and trimming it off the return value
+        saved nothing but cost a boolean flag that changed the return TYPE.
 
-        Held means: a held label (needs-decision / awaiting-merge — an operator-facing
-        state) OR a **live lease** (the lock). Those are the only two kinds of hold
-        there are, and they do not overlap: `in-progress` is write-only (§3), so the
-        lease answers for it and a task wearing a stale badge with no live lease is
-        offered like any other. An EXPIRED lease holds nothing either (§5): the task
-        is offered, and the claim that follows steals the lease.
-
-        A held LABEL is not the last word, though: a task whose operator has already
-        replied is requeued by derivation (§6, requeued_labels) and rejoins the
-        candidates — it still has to clear its dependencies like any other."""
+        `read` accepts an already-fetched (nodes, leases) pair, which is how
+        claim-next classifies the state its reconcile pass just produced without
+        re-fetching it."""
         if read is None:
             read = self.read()
             if read is None:
@@ -405,64 +463,32 @@ class Queue:
         nodes, leases = read
         live = live_leases(leases)
         project_label = f"project:{project}"
-        nodes = [
-            n for n in nodes
-            if project_label in {l.get("name", "") for l in n.get("labels", {}).get("nodes", [])}
-        ]
+        nodes = [n for n in nodes if project_label in label_names_of(n)]
         # priority:high tasks lead; createdAt breaks ties FIFO within each tier. The
         # key sorts on (not-high, createdAt) so the boolean puts the high tier first
         # and the timestamp keeps the older task ahead inside a tier — a scheduling
         # preference layered on top of pure FIFO (see PRIORITY_LABEL).
-        def _is_high(node):
-            return PRIORITY_LABEL in {
-                l.get("name", "") for l in node.get("labels", {}).get("nodes", [])
-            }
-        nodes.sort(key=lambda n: (not _is_high(n), n.get("createdAt", "")))
+        nodes.sort(key=lambda n: (PRIORITY_LABEL not in label_names_of(n),
+                                  n.get("createdAt", "")))
 
-        rows = []            # [number, title, createdAt, state-or-None, body]
-        fallback_targets = []  # (row_index, dep_number) needing the depends-on batch
-
-        for node in nodes:
-            number = node["number"]
-            title = node.get("title", "")
-            created = node.get("createdAt", "")
-            body = node.get("body") or ""
-            label_names = [l.get("name", "") for l in node.get("labels", {}).get("nodes", [])]
-            # A held label only holds while the operator has not answered: the
-            # requeue derivation lifts the ones an operator reply already cleared.
-            still_held = set(HELD_LABELS) - set(requeued_labels(node, live))
-            if any(h in label_names for h in still_held) or number in live:
-                rows.append([number, title, created, "held", body])
-                continue
-
-            blockers = node.get("blockedBy", {}).get("nodes", [])
-            if blockers:
-                blocked = any(str(b.get("state", "")).upper() == "OPEN" for b in blockers)
-                rows.append([number, title, created, "held" if blocked else "startable", body])
-                continue
-
-            dep = None
-            for line in body.split("\n"):
-                m = re.match(r"^depends-on: *#([0-9]+)", line)
-                if m:
-                    dep = int(m.group(1))
-                    break
-            if dep is None:
-                rows.append([number, title, created, "startable", body])
-                continue
-            rows.append([number, title, created, None, body])
-            fallback_targets.append((len(rows) - 1, dep))
-
-        if fallback_targets:
-            dep_open = self._depends_on(sorted({dep for _, dep in fallback_targets}))
+        rows = [Candidate(node["number"], node.get("title", ""),
+                          node.get("createdAt", ""), node_state(node, live),
+                          node.get("body") or "")
+                for node in nodes]
+        # The undecided ones, resolved in ONE batched call rather than a request
+        # per candidate: a `depends-on: #N` target's open/closed state is the only
+        # thing `node_state` cannot answer from the node in front of it.
+        pending = [(i, depends_on_ref(node)) for i, node in enumerate(nodes)
+                   if rows[i].state is None]
+        if pending:
+            dep_open = self._depends_on(sorted({dep for _, dep in pending}))
             if dep_open is None:
                 return None
-            for idx, dep in fallback_targets:
-                rows[idx][3] = "held" if dep_open.get(dep, False) else "startable"
-
-        if include_body:
-            return [tuple(r) for r in rows]
-        return [(n, t, c, s) for n, t, c, s, _ in rows]
+            for i, dep in pending:
+                rows[i] = dataclasses.replace(
+                    rows[i],
+                    state="held" if dep_open.get(dep, False) else "startable")
+        return rows
 
     def hydrate(self, nodes: list[Node],
                 leases: dict[Issue, Lease]) -> list[Node] | None:

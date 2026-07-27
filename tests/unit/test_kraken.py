@@ -636,10 +636,11 @@ class ClaimNextIterationTests(unittest.TestCase):
         # claim-next re-derives each candidate's requeue verdict off the node the
         # filter used, so the read has to carry a node per row.
         # rows=None models a failed queue read, which surfaces at read_queue.
-        nodes = [{"number": r[0], "title": r[1], "createdAt": r[2], "body": "",
+        nodes = [{"number": c.number, "title": c.title, "createdAt": c.created,
+                  "body": "",
                   "labels": {"nodes": [{"name": "kraken-task"}]},
                   "comments": {"nodes": []},
-                  "blockedBy": {"nodes": []}} for r in (rows or [])]
+                  "blockedBy": {"nodes": []}} for c in (rows or [])]
 
         def fake_claim_step(api, issue, worker, allow_held=(), lease=None,
                             ttl=None, probe_lease=False):
@@ -656,12 +657,12 @@ class ClaimNextIterationTests(unittest.TestCase):
                     api,
                     read=lambda now=None, ttl=None: (
                         None if rows is None else (nodes, {})),
-                    candidates=lambda p, include_body=False, read=None: rows),
+                    candidates=lambda p, read=None: rows),
                 claim_step=fake_claim_step)
         return rc, won, buf.getvalue()
 
     def test_claims_first_startable(self):
-        rows = [(7, "oldest", "t1", "startable", "body-7")]
+        rows = [kraken.Candidate(7, "oldest", "t1", "startable", "body-7")]
         rc, won, _ = self._run(rows, {7: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.attempted, [7])
@@ -669,8 +670,8 @@ class ClaimNextIterationTests(unittest.TestCase):
 
     def test_skips_held_rows_without_attempting_them(self):
         rows = [
-            (5, "held one", "t1", "held", "b5"),
-            (7, "startable", "t2", "startable", "b7"),
+            kraken.Candidate(5, "held one", "t1", "held", "b5"),
+            kraken.Candidate(7, "startable", "t2", "startable", "b7"),
         ]
         rc, _, _ = self._run(rows, {7: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
@@ -680,8 +681,8 @@ class ClaimNextIterationTests(unittest.TestCase):
         # THE §5 invariant: a lost CAS on the oldest candidate moves on to the
         # next — it must never retry the issue it just lost.
         rows = [
-            (7, "lost this", "t1", "startable", "b7"),
-            (9, "win this", "t2", "startable", "b9"),
+            kraken.Candidate(7, "lost this", "t1", "startable", "b7"),
+            kraken.Candidate(9, "win this", "t2", "startable", "b9"),
         ]
         rc, won, _ = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
@@ -691,8 +692,8 @@ class ClaimNextIterationTests(unittest.TestCase):
 
     def test_skip_on_held_since_listing_moves_to_next(self):
         rows = [
-            (7, "now held", "t1", "startable", "b7"),
-            (9, "clear", "t2", "startable", "b9"),
+            kraken.Candidate(7, "now held", "t1", "startable", "b7"),
+            kraken.Candidate(9, "clear", "t2", "startable", "b9"),
         ]
         rc, _, _ = self._run(rows, {7: kraken.EXIT_NOT_CLEAR, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
@@ -707,8 +708,8 @@ class ClaimNextIterationTests(unittest.TestCase):
 
     def test_all_candidates_lost_or_held_is_none(self):
         rows = [
-            (7, "a", "t1", "startable", "b7"),
-            (9, "b", "t2", "startable", "b9"),
+            kraken.Candidate(7, "a", "t1", "startable", "b7"),
+            kraken.Candidate(9, "b", "t2", "startable", "b9"),
         ]
         rc, won, _ = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_NOT_CLEAR})
         self.assertEqual(rc, kraken.EXIT_NONE)
@@ -717,8 +718,8 @@ class ClaimNextIterationTests(unittest.TestCase):
 
     def test_transport_during_claim_stops_immediately(self):
         rows = [
-            (7, "ambiguous", "t1", "startable", "b7"),
-            (9, "untouched", "t2", "startable", "b9"),
+            kraken.Candidate(7, "ambiguous", "t1", "startable", "b7"),
+            kraken.Candidate(9, "untouched", "t2", "startable", "b9"),
         ]
         rc, won, out = self._run(rows, {7: kraken.EXIT_TRANSPORT, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
@@ -781,7 +782,7 @@ class ClaimNextProjectGateTests(unittest.TestCase):
     def setUp(self):
         self.classified = []
 
-    def _candidates(self, project, include_body=False, read=None):
+    def _candidates(self, project, read=None):
         self.classified.append(project)
         return []
 

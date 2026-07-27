@@ -366,30 +366,31 @@ def acquire_next(api: Api, project: str, worker: Worker,
             return (EXIT_TRANSPORT, None)
         project_reconcile(plan, nodes, leases)
 
-    rows = queue.candidates(project, include_body=True, read=read)
+    rows = queue.candidates(project, read=read)
     if rows is None:
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)
 
     by_number = {n["number"]: n for n in nodes}
     live = live_leases(leases)
-    for number, title, _created, state, body in rows:  # priority-first, then FIFO
-        if state != "startable":
+    for cand in rows:  # priority-first, then FIFO
+        if not cand.startable:
             continue
         # Re-derive the requeue verdict from the same node the filter used — a
         # pure call, no request — so the guard accepts a task an operator reply
         # has already requeued instead of refusing what was just offered.
-        allow_held = requeued_labels(by_number[number], live)
+        allow_held = requeued_labels(by_number[cand.number], live)
         # Hand the claim the lease this read already saw: it decides which
         # generation the CAS starts from, and whether this is a steal at all.
-        rc = claim_step(api, number, worker, allow_held=allow_held,
-                       lease=leases.get(number, NO_LEASE), ttl=ttl)
+        rc = claim_step(api, cand.number, worker, allow_held=allow_held,
+                       lease=leases.get(cand.number, NO_LEASE), ttl=ttl)
         if rc == EXIT_OK:
-            return (EXIT_OK, {"issue": number, "title": title, "body": body})
+            return (EXIT_OK, {"issue": cand.number, "title": cand.title,
+                              "body": cand.body})
         if rc == EXIT_TRANSPORT:
             # State is now ambiguous — do NOT move on to another candidate while
             # a write of ours may have half-landed. Re-check before any retry.
-            diag(f"claim-next: gh-failure issue={number} — state unknown, re-check")
+            diag(f"claim-next: gh-failure issue={cand.number} — state unknown, re-check")
             return (EXIT_TRANSPORT, None)
         # EXIT_LOST (10) / EXIT_NOT_CLEAR (11): back off, try the next candidate.
 

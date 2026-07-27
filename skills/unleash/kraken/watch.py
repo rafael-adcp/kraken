@@ -24,7 +24,7 @@ def snapshot_state(api: Api, project: str) -> str | None:
     if rows is None:
         return None
     return "\n".join(
-        f"{n}:{state}" for n, _, _, state in sorted(rows, key=lambda r: r[0])
+        f"{c.number}:{c.state}" for c in sorted(rows, key=lambda c: c.number)
     )
 
 
