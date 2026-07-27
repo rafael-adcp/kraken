@@ -124,6 +124,23 @@ class Lease:
         below takes it by creating the generation above (§5.2)."""
         return self.expired and self.worker != worker
 
+    def aged_at(self, now: Epoch, ttl: int) -> Lease:
+        """This lease with its clock decided against `now`: the same record, with
+        `age` and `live` filled in. A read carrying no ladder (NO_LEASE,
+        UNREADABLE_LEASE) answers itself — there is nothing to age, and both must
+        keep their fail-open defaults.
+
+        `Refs.head` reports ownership and the raw clock but knows no TTL, so it
+        leaves the verdict open; this is where the verdict is made. `lease_state`
+        makes the same one for a whole queue read, through here, so a single
+        probe's expiry rule and the queue's cannot drift — they used to be two
+        copies of the arithmetic that a docstring had to reconcile."""
+        if not self.present:
+            return self
+        age = None if self.epoch is None else max(0, int(now - self.epoch))
+        return dataclasses.replace(self, age=age,
+                                   live=age is not None and age < ttl)
+
     def superseded_below(self, gen: Gen) -> list[Gen]:
         """The rungs this reader has climbed past, which are garbage now — the
         holder is the highest one, so a delete that fails leaves a stray ref,
@@ -173,23 +190,20 @@ def lease_state(
     `claim_refs` is {issue: [(generation, sha), …]} — the holder is the HIGHEST
     generation, and the lower ones are superseded refs a reader may collect. See
     `Lease` for what each field means, including why an unreadable clock is not
-    live."""
+    live. The expiry verdict itself is `Lease.aged_at`, so this decides nothing a
+    single-issue probe would decide differently."""
     leases = {}
     for issue, refs in claim_refs.items():
         gen, sha = max(refs)
         entry = commit_meta.get(sha) or {}
-        epoch = parse_iso(entry.get("committedDate") or "")
         payload = parse_marker(entry.get("message") or "") or {}
-        age = None if epoch is None else max(0, int(now - epoch))
         leases[issue] = Lease(
             gen=gen,
             sha=sha,
             worker=payload.get("worker") or None,
-            epoch=epoch,
-            age=age,
-            live=age is not None and age < ttl,
+            epoch=parse_iso(entry.get("committedDate") or ""),
             gens=tuple(sorted(g for g, _s in refs)),
-        )
+        ).aged_at(now, ttl)
     return leases
 
 

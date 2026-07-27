@@ -60,15 +60,7 @@ def probe_lease_state(api: Api, issue: Issue, ttl: int) -> Lease:
     the one this saw, so a holder that renewed in the meantime already took that
     generation and the challenger simply loses. This read decides whether to
     *try*, never who wins."""
-    head = Refs(api).head(issue)
-    if not head.present:
-        return head  # NO_LEASE or UNREADABLE_LEASE — the caller tells them apart
-    # `claim_ref_head` cannot know the TTL, so it reports the clock and leaves
-    # the verdict open; re-deciding `age`/`live` here against `now` is the whole
-    # difference between the two.
-    age = None if head.epoch is None else max(0, int(time.time() - head.epoch))
-    return dataclasses.replace(head, age=age,
-                               live=age is not None and age < ttl)
+    return Refs(api).head(issue).aged_at(time.time(), ttl)
 
 
 class ClaimAttempt:
