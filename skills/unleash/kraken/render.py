@@ -40,7 +40,7 @@ def render_next_action(env: Envelope) -> None:
 
 def render_status(report: Json) -> str:
     """The human console — the shape skills/status/SKILL.md documents. A thin
-    renderer over compute_status's report; empty groups say so plainly."""
+    renderer over StatusReport's report; empty groups say so plainly."""
     repo = report["repo"]
     project = report["project"]
     scope = f"project:{project} @ {repo}" if project else f"@ {repo}"

@@ -982,7 +982,7 @@ class PrIsMergedTests(unittest.TestCase):
 
 
 class StatusComputeTests(unittest.TestCase):
-    """compute_status: the whole report assembled from queue nodes, the claim
+    """StatusReport: the whole report assembled from queue nodes, the claim
     refs (in-flight worker/age/msg) and an injected Api (comment threads, the
     label set) — grouping, project filter, orphan flagging, and transport-failure
     propagation, all with no gh."""
@@ -1011,12 +1011,12 @@ class StatusComputeTests(unittest.TestCase):
             paginated=lambda path: [{"name": f"project:{p}"}
                                     for p in (projects or [])],
         )
-        return kraken.compute_status(
-            api, project, nodes, self.NOW,
-            leases=kraken.lease_state(refs, commit_meta, self.NOW,
-                                      kraken.lease_ttl_seconds(ttl)),
-            commit_meta=commit_meta,
-            pr_merged=lambda u: merged.get(u, False))
+        leases = kraken.lease_state(refs, commit_meta, self.NOW,
+                                    kraken.lease_ttl_seconds(ttl))
+        return kraken.StatusReport(
+            api, project, self.NOW,
+            pr_merged=lambda u: merged.get(u, False),
+        ).of(kraken.QueueRead(nodes, leases, commit_meta))
 
     def test_groups_by_held_label_with_ref_liveness(self):
         nodes = [
@@ -1104,10 +1104,8 @@ class StatusComputeTests(unittest.TestCase):
             comment_records=lambda i: comments.get(i, []),
             paginated=lambda path: [{"name": "project:app"}],
         )
-        report = kraken.compute_status(
-            api, "", nodes, self.NOW,
-            leases={}, commit_meta={},
-            pr_merged=lambda u: kraken.pr_is_merged(api, u))
+        report = kraken.StatusReport(api, "", self.NOW).of(
+            kraken.QueueRead(nodes, {}, {}))
         self.assertIsNotNone(report, "a non-GitHub delivery must not be gh-failure")
         self.assertEqual(report["orphans"], [])
         self.assertEqual(calls, [], "gh must never be asked about a non-GitHub URL")
@@ -1155,20 +1153,18 @@ class StatusComputeTests(unittest.TestCase):
     def test_awaiting_merge_comment_failure_propagates_none(self):
         nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]
         api = FakeApi("o/tasks", comment_records=lambda i: None)  # transport failure
-        report = kraken.compute_status(
-            api, "", nodes, self.NOW,
-            leases={}, commit_meta={},
-            pr_merged=lambda u: False)
+        report = kraken.StatusReport(
+            api, "", self.NOW, pr_merged=lambda u: False,
+        ).of(kraken.QueueRead(nodes, {}, {}))
         self.assertIsNone(report)
 
     def test_pr_read_failure_propagates_none(self):
         nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]
         comments = {88: [{"body": dlv("w", pr="https://x/pull/5"), "createdAt": "t"}]}
         api = FakeApi("o/tasks", comment_records=lambda i: comments.get(i, []))
-        report = kraken.compute_status(
-            api, "", nodes, self.NOW,
-            leases={}, commit_meta={},
-            pr_merged=lambda u: None)  # transport failure
+        report = kraken.StatusReport(
+            api, "", self.NOW, pr_merged=lambda u: None,  # transport failure
+        ).of(kraken.QueueRead(nodes, {}, {}))
         self.assertIsNone(report)
 
 

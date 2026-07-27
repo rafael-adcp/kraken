@@ -19,7 +19,7 @@ from .comments import parse_marker
 from .transport import Api
 from .lease import Lease, live_leases
 from .queue import (
-    Queue, claim_meta_of,
+    Queue, QueueRead, claim_meta_of,
     is_empty_section, label_names_of, project_names_of, requeued_labels,
     section_body
 )
@@ -104,7 +104,7 @@ def pr_is_merged(api: Api, pr_url: str) -> bool | None:
     evaluate (not a github.com pull-request URL) — "not confirmed merged",
     never guessed, so a legitimate non-GitHub delivery no longer bricks the
     whole status read. None is reserved for an actual gh transport failure on a
-    github.com PR URL it did understand — compute_status still propagates that
+    github.com PR URL it did understand — `StatusReport` still propagates that
     as the stage=read failure it actually is. The web `…/pull/N` URL recorded
     in the delivery marker maps to the REST `pulls/N` endpoint, whose
     `merged`/`merged_at` fields are the authoritative merge signal."""
@@ -152,105 +152,131 @@ def queue_hygiene(nodes: Sequence[Node], project: str = "") -> list[Json]:
     return out
 
 
-def compute_status(api: Api, project: str, nodes: Sequence[Node],
-                   now: Epoch, *, leases: dict[Issue, Lease],
-                   commit_meta: CommitMeta,
-                   pr_merged: Callable[[str], bool | None]) -> Json | None:
-    """Pure-ish status computation, transport injected so it is unit-testable:
-    given the queue nodes (from fetch_open_tasks), the lease state of every claim
-    ref + their commit meta, build the review/decision/in-flight/projects report.
-    Returns the report dict, or None on any injected-transport failure
-    (propagated as exit 20).
+class StatusReport:
+    """The operator console's report, computed from one queue read.
 
-    The comment and project reads used to be two more injected callbacks; they
-    are `api`'s job now, because they read the SAME coordination repo this
-    function was already handed a client for. `pr_merged` stays a callback
-    because it is a genuinely different collaborator — the merge state of a PR
-    in some OTHER repo — and keeping it separate is what lets the merge cases be
-    tested without hand-building pull-request payloads."""
-    # Queue hygiene reads the UNFILTERED walk on purpose: the most valuable case
-    # it reports — a task carrying no project label at all — is precisely the one
-    # a project scope would hide, since the task belongs to no project.
-    hygiene = queue_hygiene(nodes, project)
-    live = live_leases(leases)
+    It was a 99-line function taking seven arguments, three of them keyword-only
+    and one of them a callable — the last big procedure of the family whose claim
+    and next-action halves already became `ClaimAttempt` and `NextAction`. The
+    arguments were never really parameters of a call: `api`, the project scope
+    and the clock are what a report IS, so they live here, and `of` takes the
+    one thing that genuinely varies — the read.
 
-    if project:
-        pl = project
-        nodes = [n for n in nodes if pl in project_names_of(n)]
+    Each held state gets its own row builder. They answer None on a transport
+    failure and `of` propagates it, which is how a console that could not read
+    a comment thread exits 20 rather than reporting a queue it did not see.
 
-    review, decision, in_flight = [], [], []
-    seen_projects = set()
+    `pr_merged` stays injectable and defaults to the real thing. It is the one
+    genuinely different collaborator — the merge state of a PR in some OTHER
+    repo — and keeping it separate is what lets the merge cases be tested
+    without hand-building pull-request payloads."""
 
-    for node in sorted(nodes, key=lambda n: (n.get("createdAt", ""), n.get("number", 0))):
-        seen_projects |= project_names_of(node)
-        number = node["number"]
-        title = node.get("title", "")
-        # The console reads the queue the way a worker does (§6): a task whose
-        # operator has already replied is back in the queue, so it must not keep
-        # sitting in the review or decision list waiting for a call already made.
-        labels = [l for l in label_names_of(node)
-                  if l not in requeued_labels(node, live)]
+    def __init__(self, api: Api, project: str, now: Epoch, *,
+                 pr_merged: Callable[[str], bool | None] | None = None):
+        self.api = api
+        self.project = project
+        self.now = now
+        self.pr_merged = pr_merged or (lambda url: pr_is_merged(api, url))
 
-        if "awaiting-merge" in labels:
-            records = api.comment_records(number)
-            if records is None:
-                return None
-            pr_url, pr_source = parse_pr_url(records)
-            orphan = False
-            merge_state_unknown = False
-            if pr_url:
-                merged = pr_merged(pr_url)
-                if merged is None:
+    def of(self, read: QueueRead) -> Json | None:
+        """The report dict, or None on any transport failure inside it
+        (propagated by the caller as exit 20)."""
+        # Queue hygiene reads the UNFILTERED walk on purpose: the most valuable
+        # case it reports — a task carrying no project label at all — is
+        # precisely the one a project scope would hide, since the task belongs
+        # to no project.
+        hygiene = queue_hygiene(read.nodes, self.project)
+        live = live_leases(read.leases)
+        review, decision, in_flight = [], [], []
+
+        for node in self._scoped(read.nodes):
+            # The console reads the queue the way a worker does (§6): a task
+            # whose operator has already replied is back in the queue, so it
+            # must not keep sitting in the review or decision list waiting for a
+            # call already made.
+            labels = [l for l in label_names_of(node)
+                      if l not in requeued_labels(node, live)]
+            if "awaiting-merge" in labels:
+                row = self._reviewed(node)
+                if row is None:
                     return None
-                orphan = bool(merged)
-                # A non-GitHub delivery (GitLab MR, Bitbucket PR, ...) is never
-                # flagged an orphan — pr_merged already returns False for it —
-                # but the operator should still see it wasn't actually checked.
-                merge_state_unknown = parse_github_pr_url(pr_url) is None
-            review.append({"number": number, "title": title, "pr_url": pr_url,
-                           "pr_source": pr_source, "orphan": orphan,
-                           "merge_state_unknown": merge_state_unknown})
-        elif "needs-decision" in labels:
-            decision.append({"number": number, "title": title})
-        elif number in leases:
-            # In flight is the LEASE, never the label (§3): the label is written
-            # for the human reading the issue list and nothing repairs it, so a
-            # console that read it would strand a "worker unknown" row on every
-            # task whose release crashed — forever. Keying on the lease also
-            # covers the opposite window, a claim whose label has not landed yet.
-            lease = leases[number]
-            worker, msg, anchor = claim_meta_of(lease.sha, commit_meta)
-            age = lease.age
-            # An expired lease is not a claim any more: the next drain to read
-            # the queue steals it, no repair pass involved. The console still has
-            # to say so out loud — a lease due to expire in a minute looks
-            # exactly like one being renewed, and only the operator can tell
-            # which of their workers is actually alive.
-            in_flight.append({"number": number, "title": title, "worker": worker,
-                              "heartbeat_anchor": anchor,
-                              "heartbeat_age_seconds": age,
-                              "heartbeat_msg": msg,
-                              "stale": lease.expired})
+                review.append(row)
+            elif "needs-decision" in labels:
+                decision.append({"number": node["number"],
+                                 "title": node.get("title", "")})
+            elif node["number"] in read.leases:
+                in_flight.append(self._in_flight(
+                    node, read.leases[node["number"]], read.commit_meta))
 
-    if project:
-        projects = [project]
-    else:
-        projects = list_projects(api)
+        projects = self._projects()
         if projects is None:
             return None
+        return {
+            "repo": self.api.repo,
+            "project": self.project or None,
+            "generated_at": datetime.datetime.fromtimestamp(
+                self.now, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "review_queue": review,
+            "decision_queue": decision,
+            "in_flight": in_flight,
+            "orphans": [r["number"] for r in review if r["orphan"]],
+            "queue_hygiene": hygiene,
+            "projects": projects,
+        }
 
-    return {
-        "repo": api.repo,
-        "project": project or None,
-        "generated_at": datetime.datetime.fromtimestamp(
-            now, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "review_queue": review,
-        "decision_queue": decision,
-        "in_flight": in_flight,
-        "orphans": [r["number"] for r in review if r["orphan"]],
-        "queue_hygiene": hygiene,
-        "projects": projects,
-    }
+    def _scoped(self, nodes: Sequence[Node]) -> list[Node]:
+        """The tasks this report covers, oldest first — the project scope applied
+        and the order the console prints in."""
+        if self.project:
+            nodes = [n for n in nodes if self.project in project_names_of(n)]
+        return sorted(nodes,
+                      key=lambda n: (n.get("createdAt", ""), n.get("number", 0)))
+
+    def _reviewed(self, node: Node) -> Json | None:
+        """One awaiting-merge row: the delivered PR link, where it came from, and
+        whether it has already been merged (which makes the still-open task an
+        orphan). None on a transport failure — the thread read or the PR read."""
+        records = self.api.comment_records(node["number"])
+        if records is None:
+            return None
+        pr_url, pr_source = parse_pr_url(records)
+        orphan = False
+        merge_state_unknown = False
+        if pr_url:
+            merged = self.pr_merged(pr_url)
+            if merged is None:
+                return None
+            orphan = bool(merged)
+            # A non-GitHub delivery (GitLab MR, Bitbucket PR, ...) is never
+            # flagged an orphan — pr_merged already returns False for it — but
+            # the operator should still see it wasn't actually checked.
+            merge_state_unknown = parse_github_pr_url(pr_url) is None
+        return {"number": node["number"], "title": node.get("title", ""),
+                "pr_url": pr_url, "pr_source": pr_source, "orphan": orphan,
+                "merge_state_unknown": merge_state_unknown}
+
+    def _in_flight(self, node: Node, lease: Lease,
+                   commit_meta: CommitMeta) -> Json:
+        """One in-flight row, keyed on the LEASE and never the label (§3): the
+        label is written for the human reading the issue list and nothing repairs
+        it, so a console that read it would strand a "worker unknown" row on
+        every task whose release crashed — forever. Keying on the lease also
+        covers the opposite window, a claim whose label has not landed yet.
+
+        An expired lease is not a claim any more: the next drain to read the
+        queue steals it, no repair pass involved. The console still says so out
+        loud — a lease due to expire in a minute looks exactly like one being
+        renewed, and only the operator can tell which of their workers is alive."""
+        worker, msg, anchor = claim_meta_of(lease.sha, commit_meta)
+        return {"number": node["number"], "title": node.get("title", ""),
+                "worker": worker, "heartbeat_anchor": anchor,
+                "heartbeat_age_seconds": lease.age, "heartbeat_msg": msg,
+                "stale": lease.expired}
+
+    def _projects(self) -> list[str] | None:
+        """The launch recon: a scoped report names its own project, an unscoped
+        one reads the repo's whole `project:` label set. None on a failed read."""
+        return [self.project] if self.project else list_projects(self.api)
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -265,12 +291,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("status: gh-failure stage=list", file=sys.stderr)
         return EXIT_TRANSPORT
 
-    report = compute_status(
-        api, project, read.nodes, now,
-        leases=read.leases,
-        commit_meta=read.commit_meta,
-        pr_merged=lambda url: pr_is_merged(api, url),
-    )
+    report = StatusReport(api, project, now).of(read)
     if report is None:
         print("status: gh-failure stage=read", file=sys.stderr)
         return EXIT_TRANSPORT

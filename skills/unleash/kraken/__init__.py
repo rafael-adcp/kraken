@@ -101,8 +101,8 @@ from .watch import (
     wake_retry_due, watch, watch_failure_action
 )
 from .status import (
-    cmd_status, compute_status, parse_github_pr_url, parse_pr_url,
-    pr_is_merged, queue_hygiene
+    StatusReport, cmd_status, parse_github_pr_url, parse_pr_url, pr_is_merged,
+    queue_hygiene
 )
 from .workflow import (
     CANONICAL_LABELS, INIT_ASSETS, OBSOLETE_ASSETS, PROJECT_LABEL_COLOR,
