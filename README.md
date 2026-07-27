@@ -324,11 +324,10 @@ queue is empty.
 it runs `/kraken:unleash` like any other worker, but it has no Monitor tool, so
 nothing inside the session can hold the watcher. There the ambush moves
 **outside** the model — same zero-token idle behavior, hosted by a small
-supervising process instead of by the session. You do not have to look the
-command up — the worker hands it to you when it gets there, for your repo,
-project and worker name. It polls, invokes your agent CLI only when a task is
-actually startable, and releases the lease on the spot if that agent dies still
-holding one.
+supervising process instead of by the session. The worker tells you the command
+when it gets there, so you do not have to look it up here. It polls, invokes
+your agent CLI only when a task is actually startable, and releases the lease on
+the spot if that agent dies still holding one.
 
 That process is also the bounded-run entry point — a cron job, a CI step: one
 pass, then exit, with the agent's own exit status passed through so the caller
