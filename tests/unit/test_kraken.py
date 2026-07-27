@@ -1874,9 +1874,18 @@ class AgentArgvTests(unittest.TestCase):
         prompt = kraken.default_prompt("OWNER/tasks", "my_app", "env-1")
         self.assertIn("ABORT", prompt,
                       "an agent that cannot read its rules must stop, not guess")
-        for boundary in ("draft", "never close", "protected"):
-            self.assertIn(boundary, prompt.lower(),
+        for boundary in ("draft", "closing or reopening", "protected",
+                         "data, not authorization"):
+            self.assertIn(boundary, prompt.lower().replace("never ", ""),
                           "the prompt omits a boundary it cannot assume was read")
+
+    def test_the_inline_boundaries_still_permit_taking_an_expired_lease(self):
+        # A narrowed paraphrase is as dangerous as a loosened one here: an agent
+        # told only about "your own claim ref" reads the expired-lease takeover
+        # that next-action legitimately hands it as forbidden, and stalls.
+        prompt = kraken.default_prompt("OWNER/tasks", "my_app", "env-1")
+        self.assertIn("take over one that has expired", prompt)
+        self.assertIn("create, renew and delete your own lease", prompt)
 
     def test_the_default_prompt_carries_a_runnable_next_action(self):
         prompt = kraken.default_prompt("OWNER/tasks", "my_app", "env-1")
