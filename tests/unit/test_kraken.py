@@ -1778,6 +1778,85 @@ class WatchFailureLoopTests(unittest.TestCase):
         self.assertIn("3", err, "the give-up line must name the failure count")
 
 
+class LoopFireGateTests(unittest.TestCase):
+    """The loop's pass gate (should_fire): how many model runs an operator pays
+    for. The edge is the trigger, and the spaced retry is what keeps an
+    unchanged queue from becoming either a stall or a run every poll."""
+
+    def test_nothing_startable_never_fires(self):
+        # An idle queue spends no tokens — the reason the loop polls at all.
+        self.assertFalse(kraken.should_fire(0, "7:held", None, None, 300, 1000.0))
+        self.assertFalse(kraken.should_fire(0, "7:held", "6:held", 500.0, 300, 1000.0))
+
+    def test_the_first_poll_with_work_fires(self):
+        self.assertTrue(kraken.should_fire(1, "7:startable", None, None, 300, 1000.0))
+
+    def test_a_changed_queue_fires_immediately(self):
+        # New work must not wait out a timer.
+        self.assertTrue(kraken.should_fire(
+            1, "7:startable", "7:held", 999.0, 300, 1000.0))
+
+    def test_an_unchanged_queue_waits_out_the_retry_spacing(self):
+        # The agent ran and claimed nothing, so the snapshot is identical. A
+        # pure edge gate would go silent forever; the bash loop re-ran the model
+        # every poll. Neither: retry, spaced.
+        snap = "7:startable"
+        self.assertFalse(kraken.should_fire(1, snap, snap, 1000.0, 300, 1299.0))
+        self.assertTrue(kraken.should_fire(1, snap, snap, 1000.0, 300, 1300.0))
+
+    def test_an_unchanged_queue_never_fired_at_is_left_alone(self):
+        # No pass has run, so there is nothing to retry and no clock to measure
+        # against — the changed-snapshot rule is what fires the first one.
+        snap = "7:startable"
+        self.assertFalse(kraken.should_fire(1, snap, snap, None, 300, 9999.0))
+
+
+class AgentArgvTests(unittest.TestCase):
+    """How the operator's agent command reaches the loop, and how the drain
+    prompt reaches the agent."""
+
+    def test_the_tail_after_a_bare_dashdash_is_the_agent(self):
+        head, agent = kraken.split_agent_argv(
+            ["loop", "o/t", "app", "w1", "--once", "--", "copilot", "-p", "{prompt}"])
+        self.assertEqual(head, ["loop", "o/t", "app", "w1", "--once"],
+                         "the split ate one of kraken's own flags")
+        self.assertEqual(agent, ["copilot", "-p", "{prompt}"])
+
+    def test_no_dashdash_means_no_agent(self):
+        self.assertEqual(kraken.split_agent_argv(["status", "o/t"]),
+                         (["status", "o/t"], []))
+
+    def test_only_the_first_dashdash_splits(self):
+        # The agent's own `--` belongs to the agent.
+        _head, agent = kraken.split_agent_argv(
+            ["loop", "o/t", "app", "w1", "--", "sh", "-c", "x", "--", "y"])
+        self.assertEqual(agent, ["sh", "-c", "x", "--", "y"])
+
+    def test_the_prompt_is_substituted_token_wise(self):
+        argv = kraken.build_agent_argv(
+            ["copilot", "-p", "{prompt}", "--allow-all-tools"], "do the thing")
+        self.assertEqual(argv, ["copilot", "-p", "do the thing", "--allow-all-tools"])
+
+    def test_a_multiline_prompt_stays_one_token(self):
+        # Nothing goes through a shell, so newlines and quotes in the prompt
+        # cannot be re-split into extra arguments.
+        prompt = 'line one\nline "two"'
+        self.assertEqual(kraken.build_agent_argv(["a", "{prompt}"], prompt),
+                         ["a", prompt])
+
+    def test_every_occurrence_is_substituted(self):
+        self.assertEqual(
+            kraken.build_agent_argv(["x={prompt}", "y={prompt}"], "P"),
+            ["x=P", "y=P"])
+
+    def test_the_default_prompt_names_the_worker_project_and_repo(self):
+        prompt = kraken.default_prompt("OWNER/tasks", "my_app", "env-1")
+        for expected in ("OWNER/tasks", "project:my_app", "env-1"):
+            self.assertIn(expected, prompt)
+        self.assertIn("ONE drain pass", prompt,
+                      "the loop owns the cadence; the agent must do one pass")
+
+
 class OpenClaimRecordsTests(unittest.TestCase):
     """The claim-state sweep (open_claim_records): every open claim recorded on
     this machine, discovered by file name. It replaced a bash loop that globbed

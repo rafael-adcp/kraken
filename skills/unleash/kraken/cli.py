@@ -4,6 +4,7 @@ Part of the kraken protocol package; see __init__.py."""
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Sequence
 
 from .contract import EXIT_OK, PROTOCOL_VERSION
@@ -20,6 +21,7 @@ from .claim import (
 )
 from .next_action import NEXT_ACTIONS, cmd_next_action
 from .watch import cmd_watch
+from .loop import DEFAULT_POLL_SECONDS, cmd_loop, split_agent_argv
 from .status import cmd_status
 from .workflow import cmd_cleanup, cmd_init, cmd_validate
 
@@ -162,6 +164,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser(
+        "loop",
+        help="drive a drain from OUTSIDE the model: poll the queue and invoke "
+             "an agent CLI only when a task is startable (an idle queue spends "
+             "no tokens); release this worker's claim if the agent dies holding "
+             "it. The agent command goes after `--` and must carry {prompt}",
+        epilog="example: loop OWNER/tasks my_app env-1 -- copilot -p \"{prompt}\" "
+               "--allow-all-tools --no-ask-user",
+    )
+    p.add_argument("repo")
+    p.add_argument("project")
+    p.add_argument("worker")
+    p.add_argument("--once", action="store_true",
+                   help="run one drain pass and exit instead of polling")
+    p.add_argument("--poll", type=int, default=None,
+                   help="poll cadence in seconds (default: "
+                        "KRAKEN_LOOP_POLL_SECONDS env, else "
+                        f"{DEFAULT_POLL_SECONDS})")
+    p.add_argument("--prompt-file", default="",
+                   help="file holding the drain instruction handed to the agent "
+                        "(default: the built-in one-pass prompt)")
+    p.set_defaults(func=cmd_loop)
+
+    p = sub.add_parser(
         "reap",
         help="run the §6 reconcile stand-alone — reclaim repeatedly expired "
              "claims, delete orphan locks (a drain does this itself)",
@@ -240,8 +265,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # `<kraken args> -- <agent command>` is split before parsing, because
+    # argparse cannot express it: REMAINDER would swallow this program's own
+    # flags along with the tail. Only `loop` reads it; every other subcommand
+    # gets an empty list it never looks at. See split_agent_argv.
+    head, agent = split_agent_argv(
+        sys.argv[1:] if argv is None else argv)
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(head)
+    args.agent = agent
     # The client every subcommand talks through, built ONCE here and carried on
     # the parsed args. Constructing it inside each `cmd_*` would give a test no
     # way to hand the program a stand-in short of rebinding a module attribute,

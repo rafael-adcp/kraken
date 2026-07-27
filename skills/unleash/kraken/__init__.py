@@ -21,6 +21,7 @@ acyclic:
     claim        the contended claim sequence and the terminal transitions
     next_action  the driver loop as one envelope
     watch        the zero-token ambush
+    loop         the supervising driver: poll, spawn the agent, release
     status       the read-only console
     workflow     init, validate, cleanup
     cli          argument parsing and dispatch
@@ -98,6 +99,10 @@ from .next_action import (
 from .watch import (
     WATCH_MAX_FAILURES, WATCH_WARN_EVERY, cmd_watch, snapshot_state,
     wake_retry_due, watch, watch_failure_action
+)
+from .loop import (
+    DEFAULT_POLL_SECONDS, PROMPT_PLACEHOLDER, build_agent_argv, cmd_loop,
+    default_prompt, loop, should_fire, spawn_agent, split_agent_argv
 )
 from .status import (
     cmd_status, compute_status, parse_github_pr_url, parse_pr_url,
