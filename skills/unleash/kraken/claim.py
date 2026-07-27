@@ -411,27 +411,28 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
     is no interleaving in which a live worker is stolen from *and* believes it
     still holds the lease — the loser is told, immediately, with exit 10."""
     api, issue, worker, message = args.api, args.issue, args.worker, args.message
-    lost, head, refusal = Refs(api).hold(issue, worker)
+    refs = Refs(api)
+    lost, head, refusal = refs.hold(issue, worker)
     if lost is not None:
         diag(f"heartbeat: {refusal}")
         return lost
-    outcome, gen, _sha = Refs(api).advance(
+    outcome, gen, _sha = refs.advance(
         issue, head.gen,
         {"type": "heartbeat", "worker": worker, "msg": message},
     )
     if outcome.startswith("fail"):
-        print(f"heartbeat: gh-failure issue={issue} stage={outcome[len('fail-'):]}")
+        diag(f"heartbeat: gh-failure issue={issue} stage={outcome[len('fail-'):]}")
         return EXIT_TRANSPORT
     if outcome == "lost":
-        print(f"heartbeat: lost-lease issue={issue} — another worker took the "
-              "lease while this one was silent")
+        diag(f"heartbeat: lost-lease issue={issue} — another worker took the "
+             "lease while this one was silent")
         return EXIT_LOST
-    Refs(api).drop(issue, [g for g in head.gens if g < gen])
-    print(f"heartbeat: renewed issue={issue} worker={worker}")
+    refs.drop(issue, head.superseded_below(gen))
+    diag(f"heartbeat: renewed issue={issue} worker={worker}")
     return EXIT_OK
 
 
-# --- subcommand: escalate ----------------------------------------------------
+# --- the terminal transitions: escalate, deliver, release --------------------
 
 def read_body_file(path: str) -> str:
     """Read a file the way `$(cat file)` did: content with trailing newlines
@@ -440,42 +441,117 @@ def read_body_file(path: str) -> str:
         return fh.read().rstrip("\n")
 
 
+@dataclasses.dataclass(frozen=True)
+class Terminal:
+    """What one terminal transition WRITES — the four things escalate, deliver
+    and release disagree about. How they write it is the same six steps in the
+    same order for all three, which is why that lives in `TerminalTransition`
+    and this is a table."""
+
+    command: str          # the subcommand name every diagnostic is prefixed with
+    marker: str           # the comment's marker type (PROTOCOL.md §4)
+    done: str             # the verb the success line reports
+    add_label: str | None = None  # the operator-facing state the task lands on
+    label_stage: str = "labels"   # the stage name a failed label swap reports
+    clear_on_lost: bool = False   # also drop the state file on a lost lease
+
+
+ESCALATE = Terminal("escalate", "needs-decision", "escalated",
+                    add_label="needs-decision")
+DELIVER = Terminal("deliver", "delivered", "delivered",
+                   add_label="awaiting-merge")
+# Release adds no label — stripping `in-progress` IS the transition, and the
+# task rejoins the queue wearing nothing. `clear_on_lost` is not a symmetry to
+# tidy away: a release whose lease turned out to be somebody else's must still
+# drop the local claim state, or the caller that asked for it (a lifecycle hook,
+# the ambush loop) retries forever a release that is no longer its business.
+RELEASE = Terminal("release", "released", "released",
+                   label_stage="label", clear_on_lost=True)
+
+
+class TerminalTransition:
+    """A transition that ends a claim: prove the lease, write the record, then
+    release the lock — in that order, because a half-executed transition must
+    leave the task HELD, never free with no record on the thread. A leftover ref
+    is an orphan lock the reaper deletes; a freed task with nothing on its
+    timeline is a task two workers can deliver.
+
+    That ordering rule is the reason this is an object. It used to be stated
+    three times, once per subcommand, and kept honest by a comment inside
+    `deliver` that named `escalate` as the authority — a protocol invariant with
+    no home. Changing the order is now one edit, and the three cannot drift.
+
+    The three also had no collaborator, only a recipe for fabricating one:
+    `Refs(api)` was rebuilt at each step of each transition. Here the gateway is
+    `self.refs`, made once.
+
+    Diagnostics go through `diag`, so a caller that owns stdout for a machine
+    payload can route them without this knowing."""
+
+    def __init__(self, api: Api, issue: Issue, worker: Worker,
+                 terminal: Terminal):
+        self.api = api
+        self.refs = Refs(api)
+        self.issue = issue
+        self.worker = worker
+        self.terminal = terminal
+
+    def run(self, prose: str, *, payload: Json | None = None,
+            suffix: str = "") -> int:
+        """Execute the transition and return its exit code. `prose` is the
+        human-facing comment body, `payload` the marker fields beyond
+        `type`/`worker` (a PR url, a release reason), `suffix` whatever extra the
+        success line reports."""
+        t = self.terminal
+        # The lease first (§5.3), before a single write. This is the case the
+        # short TTL is built around: a worker that went silent long enough to be
+        # stolen from may still finish and come back, and its write would land on
+        # a task another worker is now executing — two deliveries, one task, a
+        # question nobody is waiting on, or a release that deletes the NEW
+        # holder's lock and strips the label out from under them. The work is not
+        # lost: re-claiming the task writes it honestly.
+        lost, head, refusal = self.refs.hold(self.issue, self.worker)
+        if lost is not None:
+            diag(f"{t.command}: {refusal}")
+            if t.clear_on_lost and lost == EXIT_LOST:
+                clear_claim_state(self.worker)
+            return lost
+
+        body = compose_comment(
+            self.worker, prose,
+            {"type": t.marker, "worker": self.worker, **(payload or {})})
+        if not self.api.post_comment(self.issue, body):
+            return self._failed("comment")
+        if not self.api.swap_labels(self.issue, remove="in-progress",
+                                    add=t.add_label):
+            return self._failed(t.label_stage)
+        # The record and the labels first, the lock LAST: the ref is the claim,
+        # so deleting it is what actually frees the task — everything above is
+        # narrative, and the task must never look free while half-released.
+        if not self.refs.drop(self.issue, head.gens):
+            return self._failed("ref")
+
+        clear_claim_state(self.worker)
+        diag(f"{t.command}: {t.done} issue={self.issue} "
+             f"worker={self.worker}{suffix}")
+        return EXIT_OK
+
+    def _failed(self, stage: str) -> int:
+        """A write that did not land. The lease is still ours and the task is
+        still held — exit 20 says re-check, never push on."""
+        diag(f"{self.terminal.command}: gh-failure issue={self.issue} "
+             f"stage={stage}")
+        return EXIT_TRANSPORT
+
+
 def cmd_escalate(args: argparse.Namespace) -> int:
     api, issue, worker, question_file = args.api, args.issue, args.worker, args.question_file
     if not os.path.isfile(question_file):
         print(f"escalate: no such file {question_file}", file=sys.stderr)
         return EXIT_USAGE
+    return TerminalTransition(api, issue, worker, ESCALATE).run(
+        read_body_file(question_file))
 
-    # The lease first (§5): a question posted onto a task another worker is now
-    # executing puts a decision in front of the operator that nobody is waiting on.
-    lost, head, refusal = Refs(api).hold(issue, worker)
-    if lost is not None:
-        diag(f"escalate: {refusal}")
-        return lost
-
-    body = compose_comment(
-        worker, read_body_file(question_file),
-        {"type": "needs-decision", "worker": worker},
-    )
-    if not api.post_comment(issue, body):
-        print(f"escalate: gh-failure issue={issue} stage=comment")
-        return EXIT_TRANSPORT
-    if not api.swap_labels(issue, remove="in-progress", add="needs-decision"):
-        print(f"escalate: gh-failure issue={issue} stage=labels")
-        return EXIT_TRANSPORT
-    # Comment and labels first, the lock last: a half-executed escalation leaves
-    # the task held, not free with no question on record. A leftover ref is an
-    # orphan lock the reaper deletes.
-    if not Refs(api).drop(issue, head.gens):
-        print(f"escalate: gh-failure issue={issue} stage=ref")
-        return EXIT_TRANSPORT
-
-    clear_claim_state(worker)
-    print(f"escalate: escalated issue={issue} worker={worker}")
-    return EXIT_OK
-
-
-# --- subcommand: deliver -----------------------------------------------------
 
 def cmd_deliver(args: argparse.Namespace) -> int:
     api, issue, worker, result_file = args.api, args.issue, args.worker, args.result_file
@@ -484,79 +560,24 @@ def cmd_deliver(args: argparse.Namespace) -> int:
         print(f"deliver: no such file {result_file}", file=sys.stderr)
         return EXIT_USAGE
 
-    # The write-after-expiry check (§5), before a single write. This is the case
-    # the short TTL is built around: a worker that went silent long enough to be
-    # stolen from may still finish and come back to deliver, and its result would
-    # land on a task another worker is now executing — two deliveries, one task,
-    # and a review queue that lies. The work is not lost: the branch and PR
-    # exist, and re-claiming the task delivers them honestly.
-    lost, head, refusal = Refs(api).hold(issue, worker)
-    if lost is not None:
-        diag(f"deliver: {refusal}")
-        return lost
-
-    payload = {"type": "delivered", "worker": worker}
     prose = read_body_file(result_file)
+    payload = {}
     if pr_url:
         payload["pr"] = pr_url
         prose = f"{prose}\n\nPR: {pr_url}"
-    body = compose_comment(worker, prose, payload)
-    if not api.post_comment(issue, body):
-        print(f"deliver: gh-failure issue={issue} stage=comment")
-        return EXIT_TRANSPORT
-    if not api.swap_labels(issue, remove="in-progress", add="awaiting-merge"):
-        print(f"deliver: gh-failure issue={issue} stage=labels")
-        return EXIT_TRANSPORT
-    # Result and labels first, the lock last (escalate's ordering rule).
-    if not Refs(api).drop(issue, head.gens):
-        print(f"deliver: gh-failure issue={issue} stage=ref")
-        return EXIT_TRANSPORT
+    return TerminalTransition(api, issue, worker, DELIVER).run(
+        prose, payload=payload, suffix=f" pr={pr_url}" if pr_url else "")
 
-    clear_claim_state(worker)
-    suffix = f" pr={pr_url}" if pr_url else ""
-    print(f"deliver: delivered issue={issue} worker={worker}{suffix}")
-    return EXIT_OK
-
-
-# --- subcommand: release -----------------------------------------------------
 
 def cmd_release(args: argparse.Namespace) -> int:
     api, issue, worker, reason = args.api, args.issue, args.worker, args.reason
-
-    # Releasing a lease that is no longer ours would delete the NEW holder's
-    # lease and strip the label out from under a worker mid-task — the one way a
-    # well-meaning cleanup can corrupt someone else's claim. So the check is not
-    # optional here, and the local state file is cleared either way: the caller
-    # (a lifecycle hook, the ambush loop) must not be left retrying forever a
-    # release that is no longer its business.
-    lost, head, refusal = Refs(api).hold(issue, worker)
-    if lost is not None:
-        diag(f"release: {refusal}")
-        if lost == EXIT_LOST:
-            clear_claim_state(worker)
-        return lost
-
-    payload = {"type": "released", "worker": worker}
     prose = "Released this claim — the task rejoins the queue."
+    payload = {}
     if reason:
         payload["reason"] = reason
         prose = f"{prose}\n\nReason: {reason}"
-    body = compose_comment(worker, prose, payload)
-    if not api.post_comment(issue, body):
-        print(f"release: gh-failure issue={issue} stage=comment")
-        return EXIT_TRANSPORT
-    if not api.swap_labels(issue, remove="in-progress"):
-        print(f"release: gh-failure issue={issue} stage=label")
-        return EXIT_TRANSPORT
-    # The ref IS the claim: deleting it is what frees the task (comment and label
-    # are narrative). Last, so the task never looks free while half-released.
-    if not Refs(api).drop(issue, head.gens):
-        print(f"release: gh-failure issue={issue} stage=ref")
-        return EXIT_TRANSPORT
-
-    clear_claim_state(worker)
-    print(f"release: released issue={issue} worker={worker}")
-    return EXIT_OK
+    return TerminalTransition(api, issue, worker, RELEASE).run(
+        prose, payload=payload)
 
 
 # --- subcommand: note --------------------------------------------------------
