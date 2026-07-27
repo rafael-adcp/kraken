@@ -1866,6 +1866,18 @@ class AgentArgvTests(unittest.TestCase):
         self.assertIn("/plugins/kraken/skills/unleash/SKILL.md", prompt)
         self.assertIn("/plugins/kraken/skills/unleash/DELIVERY.md", prompt)
 
+    def test_the_default_prompt_carries_the_boundaries_it_cannot_risk_a_read_on(self):
+        # SKILL.md's own rule for a fresh agent: the authorization boundaries go
+        # inline, because one that ends up rule-less while holding push access is
+        # the case not worth risking on a file read. This loop spawns exactly
+        # that agent, so the floor travels in the prompt.
+        prompt = kraken.default_prompt("OWNER/tasks", "my_app", "env-1")
+        self.assertIn("ABORT", prompt,
+                      "an agent that cannot read its rules must stop, not guess")
+        for boundary in ("draft", "never close", "protected"):
+            self.assertIn(boundary, prompt.lower(),
+                          "the prompt omits a boundary it cannot assume was read")
+
     def test_the_default_prompt_carries_a_runnable_next_action(self):
         prompt = kraken.default_prompt("OWNER/tasks", "my_app", "env-1")
         self.assertIn("next-action OWNER/tasks my_app env-1", prompt,

@@ -337,6 +337,14 @@ after one: if the agent dies still holding a lease, the loop releases it on the
 spot instead of leaving the task until the TTL — and its teardown does the same
 when you Ctrl-C the loop itself.
 
+Add `--once` for a bounded run (a cron job, a CI step): one pass, then exit. In
+that mode the loop **passes the agent's own exit status through** rather than
+reporting its own `0`, so the caller can tell a clean drain from an agent that
+crashed mid-task. Worth knowing that this shares a namespace with kraken's exit
+codes — an agent that exits `20` is indistinguishable from the loop failing to
+read the queue — so treat any non-zero from `--once` as "this drain did not
+complete cleanly", and read the `kraken-loop:` lines on stderr for which it was.
+
 ## The operator's cheat sheet
 
 Every gesture you ever need, in one table — the tentacles handle

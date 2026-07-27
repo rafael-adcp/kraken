@@ -175,8 +175,9 @@ confirm; either way it dies with the session.
 
 **Cannot arm one?** Then the ambush belongs **outside** the model, and starting it is
 mine, not yours. Say so, end the turn as if `--once`, and offer me the two ways to get
-it — `kraken.py loop OWNER/tasks <project> <worker> -- <my agent CLI>`, which polls
-outside the model and spends no tokens while the queue is idle, or
+it — `kraken.py loop OWNER/tasks <project> <worker> -- <my agent CLI> "{prompt}"` (the
+`{prompt}` placeholder is required; it is where the loop puts the drain instruction),
+which polls outside the model and spends no tokens while the queue is idle, or
 `/loop /kraken:unleash ... --once`, a dumb timer that costs a turn per fire. **Never
 improvise a watcher of your own.**
 
