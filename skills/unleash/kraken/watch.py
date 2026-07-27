@@ -13,7 +13,6 @@ from .contract import EXIT_TRANSPORT, EXIT_UNKNOWN_PROJECT, Epoch
 from .transport import Api
 from .lease import wake_retry_mtime
 from .queue import Queue
-from .claim import verify_project
 
 # --- subcommand: watch -------------------------------------------------------
 
@@ -24,7 +23,7 @@ def snapshot_state(api: Api, project: str) -> str | None:
     if rows is None:
         return None
     return "\n".join(
-        f"{n}:{state}" for n, _, _, state in sorted(rows, key=lambda r: r[0])
+        f"{c.number}:{c.state}" for c in sorted(rows, key=lambda c: c.number)
     )
 
 
@@ -91,7 +90,7 @@ def watch(api: Api, project: str, *,
     # a silent no-op dressed as an ambush. A label read that merely FAILED is not
     # a refusal — the poll loop already rides out transport faults, so warn and
     # arm rather than killing the watcher over a startup blip.
-    ok, message = verify_project(api, project)
+    ok, message = Queue(api).verify_project(project)
     if ok is False:
         print(message, file=sys.stderr)
         return EXIT_UNKNOWN_PROJECT

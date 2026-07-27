@@ -40,17 +40,32 @@ def render_next_action(env: Envelope) -> None:
 
 def render_status(report: Json) -> str:
     """The human console — the shape skills/status/SKILL.md documents. A thin
-    renderer over compute_status's report; empty groups say so plainly."""
-    repo = report["repo"]
-    project = report["project"]
+    renderer over StatusReport's report; empty groups say so plainly.
+
+    One function per section, each answering its own lines: the three standing
+    queues always report (a console that hid an empty queue would read the same
+    as one that failed to look), the two advisories appear only when they have
+    something to say, and the launch recon is for an unscoped report only."""
+    repo, project = report["repo"], report["project"]
     scope = f"project:{project} @ {repo}" if project else f"@ {repo}"
     lines = [f"🐙 kraken status — {scope}", ""]
+    lines += _review_lines(report["review_queue"])
+    lines += _decision_lines(report["decision_queue"])
+    lines += _in_flight_lines(report["in_flight"])
+    lines += _hygiene_lines(report.get("queue_hygiene") or [])
+    lines += _orphan_lines(report["orphans"])
+    if project is None:
+        lines += _launch_lines(repo, report["projects"])
+    return "\n".join(lines)
 
-    review = report["review_queue"]
-    lines.append(f"  📋 Review queue (awaiting-merge) — "
-                 f"{len(review) or 'nothing'} waiting for your merge"
-                 if review else
-                 "  📋 Review queue (awaiting-merge) — nothing waiting")
+
+def _review_lines(review: list[Json]) -> list[str]:
+    """The awaiting-merge queue: what is waiting on the operator's merge, with
+    the delivery link and how much the link can be trusted."""
+    lines = [f"  📋 Review queue (awaiting-merge) — "
+             f"{len(review) or 'nothing'} waiting for your merge"
+             if review else
+             "  📋 Review queue (awaiting-merge) — nothing waiting"]
     for item in review:
         link = f" → {item['pr_url']}" if item["pr_url"] else " → (no PR link recorded)"
         # A link the delivery never recorded is a guess off the thread's prose —
@@ -64,21 +79,27 @@ def render_status(report: Json) -> str:
         else:
             flag = ""
         lines.append(f"     #{item['number']}  {item['title']}{link}{flag}")
-    lines.append("")
+    return lines + [""]
 
-    decision = report["decision_queue"]
-    lines.append(f"  ❓ Decision queue (needs-decision) — "
-                 f"{len(decision)} waiting for your call"
-                 if decision else
-                 "  ❓ Decision queue (needs-decision) — nothing waiting")
+
+def _decision_lines(decision: list[Json]) -> list[str]:
+    """The needs-decision queue: what is blocked on a call only the operator can
+    make. The options are in the thread, so the line only has to point at it."""
+    lines = [f"  ❓ Decision queue (needs-decision) — "
+             f"{len(decision)} waiting for your call"
+             if decision else
+             "  ❓ Decision queue (needs-decision) — nothing waiting"]
     for item in decision:
         lines.append(f"     #{item['number']}  {item['title']}  (options in thread)")
-    lines.append("")
+    return lines + [""]
 
-    in_flight = report["in_flight"]
-    lines.append(f"  ⚙️  In flight (in-progress) — {len(in_flight)} running"
-                 if in_flight else
-                 "  ⚙️  In flight (in-progress) — nothing running")
+
+def _in_flight_lines(in_flight: list[Json]) -> list[str]:
+    """What is being worked on right now, by whom, and how long since the lease
+    last renewed."""
+    lines = [f"  ⚙️  In flight (in-progress) — {len(in_flight)} running"
+             if in_flight else
+             "  ⚙️  In flight (in-progress) — nothing running"]
     for item in in_flight:
         worker = item["worker"] or "unknown"
         age = format_age(item["heartbeat_age_seconds"])
@@ -89,37 +110,45 @@ def render_status(report: Json) -> str:
         flag = "  ⚠️  lease expired — the next drain steals it" if item.get("stale") else ""
         lines.append(f"     #{item['number']}  {item['title']}  · worker {worker} "
                      f"· lease renewed {age} ago{note}{flag}")
-    lines.append("")
+    return lines + [""]
 
-    hygiene = report.get("queue_hygiene") or []
-    if hygiene:
-        lines.append(f"  🧹 Queue hygiene — {len(hygiene)} task(s) a worker "
-                     f"cannot start as filed")
-        for item in hygiene:
-            lines.append(f"     #{item['number']}  {item['title']}  "
-                         f"· missing: {', '.join(item['missing'])}")
-        lines.append("     A task with no project: label is invisible to every "
-                     "worker; one with no Goal or Acceptance stalls on arrival.")
-        lines.append("")
 
-    orphans = report["orphans"]
-    if orphans:
-        joined = ", ".join(f"#{n}" for n in orphans)
-        lines.append(f"  ⚠️  {len(orphans)} possible orphan(s): {joined} — "
-                     f"PR looks merged but the issue is still open. You decide.")
-        lines.append("")
+def _hygiene_lines(hygiene: list[Json]) -> list[str]:
+    """The tasks no worker can start as filed. Silent when there are none —
+    this is an advisory, not a standing queue."""
+    if not hygiene:
+        return []
+    lines = [f"  🧹 Queue hygiene — {len(hygiene)} task(s) a worker "
+             f"cannot start as filed"]
+    for item in hygiene:
+        lines.append(f"     #{item['number']}  {item['title']}  "
+                     f"· missing: {', '.join(item['missing'])}")
+    lines.append("     A task with no project: label is invisible to every "
+                 "worker; one with no Goal or Acceptance stalls on arrival.")
+    return lines + [""]
 
-    if project is None:
-        projects = report["projects"]
-        if projects:
-            lines.append("  🚀 Launch — one worker per prepared environment")
-            for name in projects:
-                lines.append(f"     /kraken:unleash {repo} "
-                             f"--worker-name <worker-name> --project {name}")
-        else:
-            lines.append("  🚀 Launch — no project: labels yet "
-                         "(create one with init --project)")
-    return "\n".join(lines)
+
+def _orphan_lines(orphans: list[int]) -> list[str]:
+    """The merged-PR-but-still-open tasks, gathered into one line. A heuristic,
+    so it ends by saying whose call it is."""
+    if not orphans:
+        return []
+    joined = ", ".join(f"#{n}" for n in orphans)
+    return [f"  ⚠️  {len(orphans)} possible orphan(s): {joined} — "
+            f"PR looks merged but the issue is still open. You decide.", ""]
+
+
+def _launch_lines(repo: str, projects: list[str]) -> list[str]:
+    """The launch recon: the exact command that starts one worker per configured
+    project — the only section that tells the operator to DO something."""
+    if not projects:
+        return ["  🚀 Launch — no project: labels yet "
+                "(create one with init --project)"]
+    lines = ["  🚀 Launch — one worker per prepared environment"]
+    for name in projects:
+        lines.append(f"     /kraken:unleash {repo} "
+                     f"--worker-name <worker-name> --project {name}")
+    return lines
 
 
 def render_init(report: Json) -> str:

@@ -223,7 +223,7 @@ def reconcile_pass(api: Api, worker: Worker, ttl: int | None = None, *,
     if got is None:
         print("reap: gh-failure stage=list", file=sys.stderr)
         return (EXIT_TRANSPORT, None)
-    nodes, leases = got
+    nodes, leases = got.nodes, got.leases
 
     plan = reconcile_plan(nodes, leases)
     counts = apply_reconcile(api, plan, worker)

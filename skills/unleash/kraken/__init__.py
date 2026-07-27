@@ -72,9 +72,10 @@ from .refs import (
     CLAIM_REF_PREFIX, EMPTY_TREE_SHA, Refs, claim_ref, parse_claim_ref
 )
 from .queue import (
-    COMMENT_HYDRATE_CHUNK, NO_RESPONSE_PLACEHOLDER, QUEUE_COMMENT_WINDOW, Queue,
-    claim_meta_of, cmd_list_startable, comment_hungry, comment_nodes_of,
-    has_requeue_directive, is_empty_section, is_worker_comment, label_names_of,
+    COMMENT_HYDRATE_CHUNK, DEPENDS_ON_RE, NO_RESPONSE_PLACEHOLDER,
+    QUEUE_COMMENT_WINDOW, Candidate, Queue, QueueRead, claim_meta_of, cmd_list_startable,
+    comment_hungry, comment_nodes_of, depends_on_ref, has_requeue_directive,
+    is_empty_section, is_worker_comment, label_names_of, node_state,
     project_names_of, requeue_verdict, requeued_labels, section_body
 )
 from .render import (
@@ -85,9 +86,10 @@ from .reconcile import (
     project_reconcile, reconcile_pass, reconcile_plan, stale_claim_body
 )
 from .claim import (
-    ClaimAttempt, acquire_next, cmd_claim, cmd_claim_next, cmd_deliver,
-    cmd_escalate, cmd_heartbeat, cmd_note, cmd_release, lease_expired_body,
-    list_projects, probe_lease_state, read_body_file, verify_project
+    ClaimAttempt, DELIVER, ESCALATE, RELEASE, Terminal, TerminalTransition,
+    acquire_next, cmd_claim, cmd_claim_next, cmd_deliver, cmd_escalate,
+    cmd_heartbeat, cmd_note, cmd_release, lease_expired_body,
+    probe_lease_state, read_body_file
 )
 from .next_action import (
     NEXT_ACTIONS, NEXT_ACTION_EXIT, NextAction, NextActionEnvelope,
@@ -99,8 +101,8 @@ from .watch import (
     wake_retry_due, watch, watch_failure_action
 )
 from .status import (
-    cmd_status, compute_status, parse_github_pr_url, parse_pr_url,
-    pr_is_merged, queue_hygiene
+    StatusReport, cmd_status, parse_github_pr_url, parse_pr_url, pr_is_merged,
+    queue_hygiene
 )
 from .workflow import (
     CANONICAL_LABELS, INIT_ASSETS, OBSOLETE_ASSETS, PROJECT_LABEL_COLOR,

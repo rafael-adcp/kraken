@@ -636,10 +636,11 @@ class ClaimNextIterationTests(unittest.TestCase):
         # claim-next re-derives each candidate's requeue verdict off the node the
         # filter used, so the read has to carry a node per row.
         # rows=None models a failed queue read, which surfaces at read_queue.
-        nodes = [{"number": r[0], "title": r[1], "createdAt": r[2], "body": "",
+        nodes = [{"number": c.number, "title": c.title, "createdAt": c.created,
+                  "body": "",
                   "labels": {"nodes": [{"name": "kraken-task"}]},
                   "comments": {"nodes": []},
-                  "blockedBy": {"nodes": []}} for r in (rows or [])]
+                  "blockedBy": {"nodes": []}} for c in (rows or [])]
 
         def fake_claim_step(api, issue, worker, allow_held=(), lease=None,
                             ttl=None, probe_lease=False):
@@ -655,13 +656,13 @@ class ClaimNextIterationTests(unittest.TestCase):
                 queue=FakeQueue(
                     api,
                     read=lambda now=None, ttl=None: (
-                        None if rows is None else (nodes, {})),
-                    candidates=lambda p, include_body=False, read=None: rows),
+                        None if rows is None else kraken.QueueRead(nodes, {}, {})),
+                    candidates=lambda p, read=None: rows),
                 claim_step=fake_claim_step)
         return rc, won, buf.getvalue()
 
     def test_claims_first_startable(self):
-        rows = [(7, "oldest", "t1", "startable", "body-7")]
+        rows = [kraken.Candidate(7, "oldest", "t1", "startable", "body-7")]
         rc, won, _ = self._run(rows, {7: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.attempted, [7])
@@ -669,8 +670,8 @@ class ClaimNextIterationTests(unittest.TestCase):
 
     def test_skips_held_rows_without_attempting_them(self):
         rows = [
-            (5, "held one", "t1", "held", "b5"),
-            (7, "startable", "t2", "startable", "b7"),
+            kraken.Candidate(5, "held one", "t1", "held", "b5"),
+            kraken.Candidate(7, "startable", "t2", "startable", "b7"),
         ]
         rc, _, _ = self._run(rows, {7: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
@@ -680,8 +681,8 @@ class ClaimNextIterationTests(unittest.TestCase):
         # THE §5 invariant: a lost CAS on the oldest candidate moves on to the
         # next — it must never retry the issue it just lost.
         rows = [
-            (7, "lost this", "t1", "startable", "b7"),
-            (9, "win this", "t2", "startable", "b9"),
+            kraken.Candidate(7, "lost this", "t1", "startable", "b7"),
+            kraken.Candidate(9, "win this", "t2", "startable", "b9"),
         ]
         rc, won, _ = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
@@ -691,8 +692,8 @@ class ClaimNextIterationTests(unittest.TestCase):
 
     def test_skip_on_held_since_listing_moves_to_next(self):
         rows = [
-            (7, "now held", "t1", "startable", "b7"),
-            (9, "clear", "t2", "startable", "b9"),
+            kraken.Candidate(7, "now held", "t1", "startable", "b7"),
+            kraken.Candidate(9, "clear", "t2", "startable", "b9"),
         ]
         rc, _, _ = self._run(rows, {7: kraken.EXIT_NOT_CLEAR, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
@@ -707,8 +708,8 @@ class ClaimNextIterationTests(unittest.TestCase):
 
     def test_all_candidates_lost_or_held_is_none(self):
         rows = [
-            (7, "a", "t1", "startable", "b7"),
-            (9, "b", "t2", "startable", "b9"),
+            kraken.Candidate(7, "a", "t1", "startable", "b7"),
+            kraken.Candidate(9, "b", "t2", "startable", "b9"),
         ]
         rc, won, _ = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_NOT_CLEAR})
         self.assertEqual(rc, kraken.EXIT_NONE)
@@ -717,8 +718,8 @@ class ClaimNextIterationTests(unittest.TestCase):
 
     def test_transport_during_claim_stops_immediately(self):
         rows = [
-            (7, "ambiguous", "t1", "startable", "b7"),
-            (9, "untouched", "t2", "startable", "b9"),
+            kraken.Candidate(7, "ambiguous", "t1", "startable", "b7"),
+            kraken.Candidate(9, "untouched", "t2", "startable", "b9"),
         ]
         rc, won, out = self._run(rows, {7: kraken.EXIT_TRANSPORT, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
@@ -742,13 +743,13 @@ class VerifyProjectTests(unittest.TestCase):
     project missing from a label read that merely failed."""
 
     def _verify(self, projects, project="app"):
-        # Faked at the Api, not at `list_projects`: the real label read and the
-        # real `project:` stripping stay under test, and a failed read is a
+        # Faked at the Api, not at `Queue.projects`: the real label read and
+        # the real `project:` stripping stay under test, and a failed read is a
         # `paginated` answering None — what the transport actually does.
         labels = (None if projects is None
                   else [{"name": f"project:{p}"} for p in projects])
         api = FakeApi(paginated=lambda path: labels)
-        return kraken.verify_project(api, project)
+        return kraken.Queue(api).verify_project(project)
 
     def test_configured_project_passes(self):
         ok, message = self._verify(["app", "docs"])
@@ -781,7 +782,7 @@ class ClaimNextProjectGateTests(unittest.TestCase):
     def setUp(self):
         self.classified = []
 
-    def _candidates(self, project, include_body=False, read=None):
+    def _candidates(self, project, read=None):
         self.classified.append(project)
         return []
 
@@ -793,7 +794,8 @@ class ClaimNextProjectGateTests(unittest.TestCase):
         with redirect_stdout(buf):
             rc, _won = kraken.acquire_next(
                 api, "app", "w-gate",
-                queue=FakeQueue(api, read=lambda now=None, ttl=None: ([], {}),
+                queue=FakeQueue(api,
+                                read=lambda now=None, ttl=None: kraken.QueueRead([], {}, {}),
                                 candidates=self._candidates))
         return rc, buf.getvalue()
 
@@ -980,7 +982,7 @@ class PrIsMergedTests(unittest.TestCase):
 
 
 class StatusComputeTests(unittest.TestCase):
-    """compute_status: the whole report assembled from queue nodes, the claim
+    """StatusReport: the whole report assembled from queue nodes, the claim
     refs (in-flight worker/age/msg) and an injected Api (comment threads, the
     label set) — grouping, project filter, orphan flagging, and transport-failure
     propagation, all with no gh."""
@@ -1001,7 +1003,7 @@ class StatusComputeTests(unittest.TestCase):
         # Tests seed {issue: sha}; the lease view wants the generation ladder.
         refs = {n: [(1, sha)] for n, sha in (claim_refs or {}).items()}
         # The comment thread and the label set both come off the injected Api
-        # now. `paginated` is faked rather than `list_projects`, so the real
+        # now. `paginated` is faked rather than `Queue.projects`, so the real
         # project:<name> stripping is under test too.
         api = FakeApi(
             "o/tasks",
@@ -1009,12 +1011,12 @@ class StatusComputeTests(unittest.TestCase):
             paginated=lambda path: [{"name": f"project:{p}"}
                                     for p in (projects or [])],
         )
-        return kraken.compute_status(
-            api, project, nodes, self.NOW,
-            leases=kraken.lease_state(refs, commit_meta, self.NOW,
-                                      kraken.lease_ttl_seconds(ttl)),
-            commit_meta=commit_meta,
-            pr_merged=lambda u: merged.get(u, False))
+        leases = kraken.lease_state(refs, commit_meta, self.NOW,
+                                    kraken.lease_ttl_seconds(ttl))
+        return kraken.StatusReport(
+            api, project, self.NOW,
+            pr_merged=lambda u: merged.get(u, False),
+        ).of(kraken.QueueRead(nodes, leases, commit_meta))
 
     def test_groups_by_held_label_with_ref_liveness(self):
         nodes = [
@@ -1102,10 +1104,8 @@ class StatusComputeTests(unittest.TestCase):
             comment_records=lambda i: comments.get(i, []),
             paginated=lambda path: [{"name": "project:app"}],
         )
-        report = kraken.compute_status(
-            api, "", nodes, self.NOW,
-            leases={}, commit_meta={},
-            pr_merged=lambda u: kraken.pr_is_merged(api, u))
+        report = kraken.StatusReport(api, "", self.NOW).of(
+            kraken.QueueRead(nodes, {}, {}))
         self.assertIsNotNone(report, "a non-GitHub delivery must not be gh-failure")
         self.assertEqual(report["orphans"], [])
         self.assertEqual(calls, [], "gh must never be asked about a non-GitHub URL")
@@ -1153,20 +1153,18 @@ class StatusComputeTests(unittest.TestCase):
     def test_awaiting_merge_comment_failure_propagates_none(self):
         nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]
         api = FakeApi("o/tasks", comment_records=lambda i: None)  # transport failure
-        report = kraken.compute_status(
-            api, "", nodes, self.NOW,
-            leases={}, commit_meta={},
-            pr_merged=lambda u: False)
+        report = kraken.StatusReport(
+            api, "", self.NOW, pr_merged=lambda u: False,
+        ).of(kraken.QueueRead(nodes, {}, {}))
         self.assertIsNone(report)
 
     def test_pr_read_failure_propagates_none(self):
         nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]
         comments = {88: [{"body": dlv("w", pr="https://x/pull/5"), "createdAt": "t"}]}
         api = FakeApi("o/tasks", comment_records=lambda i: comments.get(i, []))
-        report = kraken.compute_status(
-            api, "", nodes, self.NOW,
-            leases={}, commit_meta={},
-            pr_merged=lambda u: None)  # transport failure
+        report = kraken.StatusReport(
+            api, "", self.NOW, pr_merged=lambda u: None,  # transport failure
+        ).of(kraken.QueueRead(nodes, {}, {}))
         self.assertIsNone(report)
 
 

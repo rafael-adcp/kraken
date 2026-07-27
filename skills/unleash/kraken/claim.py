@@ -60,15 +60,7 @@ def probe_lease_state(api: Api, issue: Issue, ttl: int) -> Lease:
     the one this saw, so a holder that renewed in the meantime already took that
     generation and the challenger simply loses. This read decides whether to
     *try*, never who wins."""
-    head = Refs(api).head(issue)
-    if not head.present:
-        return head  # NO_LEASE or UNREADABLE_LEASE — the caller tells them apart
-    # `claim_ref_head` cannot know the TTL, so it reports the clock and leaves
-    # the verdict open; re-deciding `age`/`live` here against `now` is the whole
-    # difference between the two.
-    age = None if head.epoch is None else max(0, int(time.time() - head.epoch))
-    return dataclasses.replace(head, age=age,
-                               live=age is not None and age < ttl)
+    return Refs(api).head(issue).aged_at(time.time(), ttl)
 
 
 class ClaimAttempt:
@@ -258,30 +250,6 @@ def cmd_claim(args: argparse.Namespace) -> int:
 
 # --- subcommand: claim-next --------------------------------------------------
 
-def verify_project(api: Api, project: str) -> tuple[bool | None, str]:
-    """Check that the coordination repo actually carries the `project:<name>`
-    label this worker was pointed at. Returns (ok, message): True when the label
-    exists, False (with a message naming the configured projects and the fix)
-    when it does not, and None when the label read itself failed — a project is
-    never declared missing from a read that never landed.
-
-    Routing is entirely client-side (§3): a worker scoped to a label nobody uses
-    filters every task out and reads as an empty queue forever, so a typo'd or
-    never-created project silently produces a worker that hears nothing. Cheap to
-    check once, so check it before the drain rather than never."""
-    names = list_projects(api)
-    if names is None:
-        return (None, "project check: gh-failure stage=labels")
-    if project in names:
-        return (True, "")
-    configured = ", ".join(names) if names else "(none configured)"
-    return (False,
-            "unknown project: %s has no `project:%s` label, so this worker would "
-            "never see a task. Configured projects: %s. Fix the --project "
-            "spelling, or create the label with `kraken.py init %s --project %s`."
-            % (api.repo, project, configured, api.repo, project))
-
-
 def cmd_claim_next(args: argparse.Namespace) -> int:
     """Collapse the deterministic claim loop into one invocation: read the queue,
     reconcile it (§6), then list startable candidates oldest-first and guard + CAS
@@ -335,7 +303,7 @@ def acquire_next(api: Api, project: str, worker: Worker,
     # Project preflight: before the queue is read and before any write,
     # because a worker scoped to a project label the repo does not carry is deaf,
     # not idle — it would report an honest-looking empty queue forever.
-    ok, message = verify_project(api, project)
+    ok, message = queue.verify_project(project)
     if ok is None:
         diag(message)
         return (EXIT_TRANSPORT, None)
@@ -348,7 +316,7 @@ def acquire_next(api: Api, project: str, worker: Worker,
     if read is None:
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)
-    nodes, leases = read
+    nodes, leases = read.nodes, read.leases
 
     # Reconcile before classifying (PROTOCOL.md §6). A dead worker's lease
     # obstructs exactly one party — the next worker who wants to claim — and that
@@ -366,30 +334,31 @@ def acquire_next(api: Api, project: str, worker: Worker,
             return (EXIT_TRANSPORT, None)
         project_reconcile(plan, nodes, leases)
 
-    rows = queue.candidates(project, include_body=True, read=read)
+    rows = queue.candidates(project, read=read)
     if rows is None:
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)
 
     by_number = {n["number"]: n for n in nodes}
     live = live_leases(leases)
-    for number, title, _created, state, body in rows:  # priority-first, then FIFO
-        if state != "startable":
+    for cand in rows:  # priority-first, then FIFO
+        if not cand.startable:
             continue
         # Re-derive the requeue verdict from the same node the filter used — a
         # pure call, no request — so the guard accepts a task an operator reply
         # has already requeued instead of refusing what was just offered.
-        allow_held = requeued_labels(by_number[number], live)
+        allow_held = requeued_labels(by_number[cand.number], live)
         # Hand the claim the lease this read already saw: it decides which
         # generation the CAS starts from, and whether this is a steal at all.
-        rc = claim_step(api, number, worker, allow_held=allow_held,
-                       lease=leases.get(number, NO_LEASE), ttl=ttl)
+        rc = claim_step(api, cand.number, worker, allow_held=allow_held,
+                       lease=leases.get(cand.number, NO_LEASE), ttl=ttl)
         if rc == EXIT_OK:
-            return (EXIT_OK, {"issue": number, "title": title, "body": body})
+            return (EXIT_OK, {"issue": cand.number, "title": cand.title,
+                              "body": cand.body})
         if rc == EXIT_TRANSPORT:
             # State is now ambiguous — do NOT move on to another candidate while
             # a write of ours may have half-landed. Re-check before any retry.
-            diag(f"claim-next: gh-failure issue={number} — state unknown, re-check")
+            diag(f"claim-next: gh-failure issue={cand.number} — state unknown, re-check")
             return (EXIT_TRANSPORT, None)
         # EXIT_LOST (10) / EXIT_NOT_CLEAR (11): back off, try the next candidate.
 
@@ -411,26 +380,28 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
     is no interleaving in which a live worker is stolen from *and* believes it
     still holds the lease — the loser is told, immediately, with exit 10."""
     api, issue, worker, message = args.api, args.issue, args.worker, args.message
-    lost, head = Refs(api).hold("heartbeat", issue, worker)
+    refs = Refs(api)
+    lost, head, refusal = refs.hold(issue, worker)
     if lost is not None:
+        diag(f"heartbeat: {refusal}")
         return lost
-    outcome, gen, _sha = Refs(api).advance(
+    outcome, gen, _sha = refs.advance(
         issue, head.gen,
         {"type": "heartbeat", "worker": worker, "msg": message},
     )
     if outcome.startswith("fail"):
-        print(f"heartbeat: gh-failure issue={issue} stage={outcome[len('fail-'):]}")
+        diag(f"heartbeat: gh-failure issue={issue} stage={outcome[len('fail-'):]}")
         return EXIT_TRANSPORT
     if outcome == "lost":
-        print(f"heartbeat: lost-lease issue={issue} — another worker took the "
-              "lease while this one was silent")
+        diag(f"heartbeat: lost-lease issue={issue} — another worker took the "
+             "lease while this one was silent")
         return EXIT_LOST
-    Refs(api).drop(issue, [g for g in head.gens if g < gen])
-    print(f"heartbeat: renewed issue={issue} worker={worker}")
+    refs.drop(issue, head.superseded_below(gen))
+    diag(f"heartbeat: renewed issue={issue} worker={worker}")
     return EXIT_OK
 
 
-# --- subcommand: escalate ----------------------------------------------------
+# --- the terminal transitions: escalate, deliver, release --------------------
 
 def read_body_file(path: str) -> str:
     """Read a file the way `$(cat file)` did: content with trailing newlines
@@ -439,41 +410,117 @@ def read_body_file(path: str) -> str:
         return fh.read().rstrip("\n")
 
 
+@dataclasses.dataclass(frozen=True)
+class Terminal:
+    """What one terminal transition WRITES — the four things escalate, deliver
+    and release disagree about. How they write it is the same six steps in the
+    same order for all three, which is why that lives in `TerminalTransition`
+    and this is a table."""
+
+    command: str          # the subcommand name every diagnostic is prefixed with
+    marker: str           # the comment's marker type (PROTOCOL.md §4)
+    done: str             # the verb the success line reports
+    add_label: str | None = None  # the operator-facing state the task lands on
+    label_stage: str = "labels"   # the stage name a failed label swap reports
+    clear_on_lost: bool = False   # also drop the state file on a lost lease
+
+
+ESCALATE = Terminal("escalate", "needs-decision", "escalated",
+                    add_label="needs-decision")
+DELIVER = Terminal("deliver", "delivered", "delivered",
+                   add_label="awaiting-merge")
+# Release adds no label — stripping `in-progress` IS the transition, and the
+# task rejoins the queue wearing nothing. `clear_on_lost` is not a symmetry to
+# tidy away: a release whose lease turned out to be somebody else's must still
+# drop the local claim state, or the caller that asked for it (a lifecycle hook,
+# the ambush loop) retries forever a release that is no longer its business.
+RELEASE = Terminal("release", "released", "released",
+                   label_stage="label", clear_on_lost=True)
+
+
+class TerminalTransition:
+    """A transition that ends a claim: prove the lease, write the record, then
+    release the lock — in that order, because a half-executed transition must
+    leave the task HELD, never free with no record on the thread. A leftover ref
+    is an orphan lock the reaper deletes; a freed task with nothing on its
+    timeline is a task two workers can deliver.
+
+    That ordering rule is the reason this is an object. It used to be stated
+    three times, once per subcommand, and kept honest by a comment inside
+    `deliver` that named `escalate` as the authority — a protocol invariant with
+    no home. Changing the order is now one edit, and the three cannot drift.
+
+    The three also had no collaborator, only a recipe for fabricating one:
+    `Refs(api)` was rebuilt at each step of each transition. Here the gateway is
+    `self.refs`, made once.
+
+    Diagnostics go through `diag`, so a caller that owns stdout for a machine
+    payload can route them without this knowing."""
+
+    def __init__(self, api: Api, issue: Issue, worker: Worker,
+                 terminal: Terminal):
+        self.api = api
+        self.refs = Refs(api)
+        self.issue = issue
+        self.worker = worker
+        self.terminal = terminal
+
+    def run(self, prose: str, *, payload: Json | None = None,
+            suffix: str = "") -> int:
+        """Execute the transition and return its exit code. `prose` is the
+        human-facing comment body, `payload` the marker fields beyond
+        `type`/`worker` (a PR url, a release reason), `suffix` whatever extra the
+        success line reports."""
+        t = self.terminal
+        # The lease first (§5.3), before a single write. This is the case the
+        # short TTL is built around: a worker that went silent long enough to be
+        # stolen from may still finish and come back, and its write would land on
+        # a task another worker is now executing — two deliveries, one task, a
+        # question nobody is waiting on, or a release that deletes the NEW
+        # holder's lock and strips the label out from under them. The work is not
+        # lost: re-claiming the task writes it honestly.
+        lost, head, refusal = self.refs.hold(self.issue, self.worker)
+        if lost is not None:
+            diag(f"{t.command}: {refusal}")
+            if t.clear_on_lost and lost == EXIT_LOST:
+                clear_claim_state(self.worker)
+            return lost
+
+        body = compose_comment(
+            self.worker, prose,
+            {"type": t.marker, "worker": self.worker, **(payload or {})})
+        if not self.api.post_comment(self.issue, body):
+            return self._failed("comment")
+        if not self.api.swap_labels(self.issue, remove="in-progress",
+                                    add=t.add_label):
+            return self._failed(t.label_stage)
+        # The record and the labels first, the lock LAST: the ref is the claim,
+        # so deleting it is what actually frees the task — everything above is
+        # narrative, and the task must never look free while half-released.
+        if not self.refs.drop(self.issue, head.gens):
+            return self._failed("ref")
+
+        clear_claim_state(self.worker)
+        diag(f"{t.command}: {t.done} issue={self.issue} "
+             f"worker={self.worker}{suffix}")
+        return EXIT_OK
+
+    def _failed(self, stage: str) -> int:
+        """A write that did not land. The lease is still ours and the task is
+        still held — exit 20 says re-check, never push on."""
+        diag(f"{self.terminal.command}: gh-failure issue={self.issue} "
+             f"stage={stage}")
+        return EXIT_TRANSPORT
+
+
 def cmd_escalate(args: argparse.Namespace) -> int:
     api, issue, worker, question_file = args.api, args.issue, args.worker, args.question_file
     if not os.path.isfile(question_file):
         print(f"escalate: no such file {question_file}", file=sys.stderr)
         return EXIT_USAGE
+    return TerminalTransition(api, issue, worker, ESCALATE).run(
+        read_body_file(question_file))
 
-    # The lease first (§5): a question posted onto a task another worker is now
-    # executing puts a decision in front of the operator that nobody is waiting on.
-    lost, head = Refs(api).hold("escalate", issue, worker)
-    if lost is not None:
-        return lost
-
-    body = compose_comment(
-        worker, read_body_file(question_file),
-        {"type": "needs-decision", "worker": worker},
-    )
-    if not api.post_comment(issue, body):
-        print(f"escalate: gh-failure issue={issue} stage=comment")
-        return EXIT_TRANSPORT
-    if not api.swap_labels(issue, remove="in-progress", add="needs-decision"):
-        print(f"escalate: gh-failure issue={issue} stage=labels")
-        return EXIT_TRANSPORT
-    # Comment and labels first, the lock last: a half-executed escalation leaves
-    # the task held, not free with no question on record. A leftover ref is an
-    # orphan lock the reaper deletes.
-    if not Refs(api).drop(issue, head.gens):
-        print(f"escalate: gh-failure issue={issue} stage=ref")
-        return EXIT_TRANSPORT
-
-    clear_claim_state(worker)
-    print(f"escalate: escalated issue={issue} worker={worker}")
-    return EXIT_OK
-
-
-# --- subcommand: deliver -----------------------------------------------------
 
 def cmd_deliver(args: argparse.Namespace) -> int:
     api, issue, worker, result_file = args.api, args.issue, args.worker, args.result_file
@@ -482,77 +529,24 @@ def cmd_deliver(args: argparse.Namespace) -> int:
         print(f"deliver: no such file {result_file}", file=sys.stderr)
         return EXIT_USAGE
 
-    # The write-after-expiry check (§5), before a single write. This is the case
-    # the short TTL is built around: a worker that went silent long enough to be
-    # stolen from may still finish and come back to deliver, and its result would
-    # land on a task another worker is now executing — two deliveries, one task,
-    # and a review queue that lies. The work is not lost: the branch and PR
-    # exist, and re-claiming the task delivers them honestly.
-    lost, head = Refs(api).hold("deliver", issue, worker)
-    if lost is not None:
-        return lost
-
-    payload = {"type": "delivered", "worker": worker}
     prose = read_body_file(result_file)
+    payload = {}
     if pr_url:
         payload["pr"] = pr_url
         prose = f"{prose}\n\nPR: {pr_url}"
-    body = compose_comment(worker, prose, payload)
-    if not api.post_comment(issue, body):
-        print(f"deliver: gh-failure issue={issue} stage=comment")
-        return EXIT_TRANSPORT
-    if not api.swap_labels(issue, remove="in-progress", add="awaiting-merge"):
-        print(f"deliver: gh-failure issue={issue} stage=labels")
-        return EXIT_TRANSPORT
-    # Result and labels first, the lock last (escalate's ordering rule).
-    if not Refs(api).drop(issue, head.gens):
-        print(f"deliver: gh-failure issue={issue} stage=ref")
-        return EXIT_TRANSPORT
+    return TerminalTransition(api, issue, worker, DELIVER).run(
+        prose, payload=payload, suffix=f" pr={pr_url}" if pr_url else "")
 
-    clear_claim_state(worker)
-    suffix = f" pr={pr_url}" if pr_url else ""
-    print(f"deliver: delivered issue={issue} worker={worker}{suffix}")
-    return EXIT_OK
-
-
-# --- subcommand: release -----------------------------------------------------
 
 def cmd_release(args: argparse.Namespace) -> int:
     api, issue, worker, reason = args.api, args.issue, args.worker, args.reason
-
-    # Releasing a lease that is no longer ours would delete the NEW holder's
-    # lease and strip the label out from under a worker mid-task — the one way a
-    # well-meaning cleanup can corrupt someone else's claim. So the check is not
-    # optional here, and the local state file is cleared either way: the caller
-    # (a lifecycle hook, the ambush loop) must not be left retrying forever a
-    # release that is no longer its business.
-    lost, head = Refs(api).hold("release", issue, worker)
-    if lost is not None:
-        if lost == EXIT_LOST:
-            clear_claim_state(worker)
-        return lost
-
-    payload = {"type": "released", "worker": worker}
     prose = "Released this claim — the task rejoins the queue."
+    payload = {}
     if reason:
         payload["reason"] = reason
         prose = f"{prose}\n\nReason: {reason}"
-    body = compose_comment(worker, prose, payload)
-    if not api.post_comment(issue, body):
-        print(f"release: gh-failure issue={issue} stage=comment")
-        return EXIT_TRANSPORT
-    if not api.swap_labels(issue, remove="in-progress"):
-        print(f"release: gh-failure issue={issue} stage=label")
-        return EXIT_TRANSPORT
-    # The ref IS the claim: deleting it is what frees the task (comment and label
-    # are narrative). Last, so the task never looks free while half-released.
-    if not Refs(api).drop(issue, head.gens):
-        print(f"release: gh-failure issue={issue} stage=ref")
-        return EXIT_TRANSPORT
-
-    clear_claim_state(worker)
-    print(f"release: released issue={issue} worker={worker}")
-    return EXIT_OK
+    return TerminalTransition(api, issue, worker, RELEASE).run(
+        prose, payload=payload)
 
 
 # --- subcommand: note --------------------------------------------------------
@@ -582,18 +576,3 @@ def cmd_note(args: argparse.Namespace) -> int:
 
     print(f"note: posted issue={issue} worker={worker}")
     return EXIT_OK
-
-
-def list_projects(api: Api) -> list[str] | None:
-    """Every project:<name> label configured in the repo, sorted, prefix
-    stripped — the launch recon points a worker at each. Read from the repo's
-    label set (not the open-task walk) so a project with no open task still gets
-    a launch line. Returns a sorted name list, or None on transport failure."""
-    items = api.paginated(f"/repos/{api.repo}/labels")
-    if items is None:
-        return None
-    return sorted(
-        n["name"][len("project:"):]
-        for n in items
-        if isinstance(n, dict) and str(n.get("name", "")).startswith("project:")
-    )

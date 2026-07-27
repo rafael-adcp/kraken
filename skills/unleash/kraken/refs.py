@@ -297,12 +297,20 @@ class Refs:
         return (verdict, gen + 1 if verdict == "won" else None,
                 sha if verdict == "won" else None)
 
-    def hold(self, command: str, issue: Issue,
-             worker: Worker) -> tuple[int | None, Lease]:
+    def hold(self, issue: Issue,
+             worker: Worker) -> tuple[int | None, Lease, str]:
         """The write-after-expiry check (PROTOCOL.md §5.3): prove this worker still
-        holds the lease BEFORE any write of a transition. Returns `(code, head)` —
-        `code` None when the lease is ours and the caller may proceed (with `head`
-        naming the generations to release), otherwise the exit code to return.
+        holds the lease BEFORE any write of a transition. Returns
+        `(code, head, reason)` — `code` None when the lease is ours and the caller
+        may proceed (with `head` naming the generations to release), otherwise the
+        exit code to return and the diagnostic the caller prefixes with its own
+        subcommand name.
+
+        The refusal is REPORTED, not printed: a gateway that writes to stdout is a
+        hidden dependency on the output channel, and `next-action` owns stdout for
+        its JSON envelope. Returning the sentence also drops the `command`
+        parameter this took only to interpolate it — information that flowed down
+        from the edge just to come back formatted.
 
         Ownership is the HIGHEST generation: a thief takes the lease by creating the
         one above ours, so our own ref still existing proves nothing — what proves it
@@ -320,17 +328,16 @@ class Refs:
         who holds the lease, not how old it is."""
         head = self.head(issue)
         if head.unknown:
-            print(f"{command}: gh-failure issue={issue} stage=lease")
-            return (EXIT_TRANSPORT, head)
+            return (EXIT_TRANSPORT, head, f"gh-failure issue={issue} stage=lease")
         if not head.present:
-            print(f"{command}: lost-lease issue={issue} — the lease is gone, "
-                  "re-claim the task before writing to it")
-            return (EXIT_LOST, head)
+            return (EXIT_LOST, head,
+                    f"lost-lease issue={issue} — the lease is gone, "
+                    "re-claim the task before writing to it")
         if not head.held_by(worker):
             holder = head.worker or "another worker"
-            print(f"{command}: lost-lease issue={issue} — the lease is held by {holder}")
-            return (EXIT_LOST, head)
-        return (None, head)
+            return (EXIT_LOST, head,
+                    f"lost-lease issue={issue} — the lease is held by {holder}")
+        return (None, head, "")
 
     # --- internals ------------------------------------------------------------
 
