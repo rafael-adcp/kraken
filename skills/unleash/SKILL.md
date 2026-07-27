@@ -160,10 +160,12 @@ Run it as a **persistent background process**, however your harness provides one
 Claude Code, the Monitor tool with `persistent: true` — and if Monitor is not in your
 tool list, **load it first rather than concluding you have none**; some harnesses defer
 tool schemas, and taking the `--once` fallback here silently throws away the ambush this
-skill exists for. Elsewhere,
-[`scripts/kraken-loop.sh`](../../scripts/kraken-loop.sh), which polls and re-invokes a
-one-shot drain from outside the model. One watcher per worker, never two — skip this if
-a previous drain already armed one.
+skill exists for. One watcher per worker, never two — skip this if a previous drain
+already armed one.
+
+No background process at all? Then the ambush belongs **outside** the model: the operator
+runs `kraken.py loop`, which polls the queue and re-invokes a one-shot drain itself. Say
+so and end the turn as if `--once` — that loop is theirs to start, not yours.
 
 It polls every 60s and prints a `kraken-queue:` line only when the queue changes **and**
 something is startable, so an idle queue costs nothing. A failed queue read is never

@@ -320,15 +320,22 @@ Want a bounded run instead — a scheduled container, a one-off drain? Pass
 --once`) still works — it just costs one full LLM turn per fire even when the
 queue is empty.
 
-For the GitHub Copilot CLI worker (no Monitor tool), the shipped
-[`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) is the ready-made ambush loop:
-run it from a kraken checkout and it polls the queue outside the model, invoking
-`copilot` only when a task is actually startable — the same zero-token idle
-behavior as the Monitor watcher, without copying anything out of a session folder.
+Want the ambush **outside** the model instead — no session to keep open, no
+harness background tooling? `kraken.py loop` is the supervising driver: it polls
+the queue itself and invokes an agent CLI only when a task is actually startable,
+so an idle queue still costs nothing. The agent command goes after `--`, so it
+drives whichever CLI you run:
 
 ```
-scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app
+kraken.py loop OWNER/tasks my_app env-1 -- copilot -p "{prompt}" --allow-all-tools --no-ask-user
+kraken.py loop OWNER/tasks my_app env-1 -- claude -p "{prompt}"
 ```
+
+`{prompt}` is where the drain instruction lands (override it with
+`--prompt-file`). Because the loop outlives each agent process, it also cleans up
+after one: if the agent dies still holding a lease, the loop releases it on the
+spot instead of leaving the task until the TTL — and its teardown does the same
+when you Ctrl-C the loop itself.
 
 ## The operator's cheat sheet
 
@@ -545,9 +552,8 @@ read the queue takes the task over (§5). The hooks only make that immediate; no
 server-side job, so it needs nothing running anywhere. And the watcher is no
 escape hatch: it is armed by `unleash` itself (its *Staying in ambush* step),
 inside the same session — not a command of its own — so it dies with it. Moving the poll out of the model is
-what [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) already does, though it
-still needs a live shell to run in; a genuinely headless driver (system cron,
-GitHub Actions) is open work —
+what `kraken.py loop` already does, though it still needs a live shell to run in;
+a genuinely headless driver (system cron, GitHub Actions) is open work —
 [#57](https://github.com/rafael-adcp/kraken/issues/57).
 
 </details>
@@ -563,16 +569,15 @@ nothing installed. The bundled `SessionEnd`/`StopFailure` hooks are **Claude Cod
 hook events** and still never fire around a `copilot` process — they are now an
 optimization (seconds instead of minutes), not the mechanism.
 
-[`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) carries the same optimization
-for Copilot: `kraken.py claim` records the open claim in
-`~/.kraken/claim-<worker>.json` and every terminal transition
-(deliver/escalate/release) removes it, so when the `copilot` process exits with
-that file still present the drain provably died holding the lease — crash, kill,
-or a rate-limit abort — and the loop runs `kraken.py release` on the spot. Its
-exit/Ctrl-C trap does the same when the loop itself is stopped mid-drain. The
-release is scoped to the loop's own `--worker-name`, and `release` refuses (exit
-10) on a lease that is no longer this worker's, so a co-located or successor
-worker's live lease is never touched.
+`kraken.py loop` carries the same optimization, for any agent CLI: `kraken.py
+claim` records the open claim in `~/.kraken/claim-<worker>.json` and every
+terminal transition (deliver/escalate/release) removes it, so when the agent
+process exits with that file still present the drain provably died holding the
+lease — crash, kill, or a rate-limit abort — and the loop releases it on the
+spot. Its teardown does the same when the loop itself is stopped mid-drain
+(Ctrl-C, SIGTERM, a closing terminal). The release is scoped to the loop's own
+worker name, and `release` refuses (exit 10) on a lease that is no longer this
+worker's, so a co-located or successor worker's live lease is never touched.
 
 A **bare** `copilot -p …` invocation outside the loop is therefore no longer a
 correctness gap, just a slower one: its task comes back in minutes rather than

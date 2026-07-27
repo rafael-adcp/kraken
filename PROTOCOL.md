@@ -10,11 +10,11 @@ conforming client can share one queue. Agent-agnostic scopes the **wire
 contract** — the labels, the claim-ref CAS, the lease, the markers, the
 attribution — and as of protocol/6 that contract also covers **recovery
 latency**: a dead worker's task returns to the queue within one lease TTL (§5)
-for every conforming worker, with nothing installed. Harness-specific
-self-healing machinery — the bundled Claude Code lifecycle hooks, or
-`scripts/kraken-loop.sh`'s release-on-exit for Copilot CLI — is an
-**optimization** on top of that floor, never a requirement: it returns a lease
-in seconds rather than at the TTL, and nothing normative depends on it.
+for every conforming worker, with nothing installed. Release-on-exit machinery —
+the bundled Claude Code lifecycle hooks, or `kraken.py loop`'s teardown when it
+supervises an agent process — is an **optimization** on top of that floor, never
+a requirement: it returns a lease in seconds rather than at the TTL, and nothing
+normative depends on it.
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY**
 are to be interpreted as described in RFC 2119.

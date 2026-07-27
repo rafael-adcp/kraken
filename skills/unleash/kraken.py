@@ -4,8 +4,8 @@
 The implementation is the `kraken/` package next to this file, one module per
 layer; its `__init__.py` documents the layering. This file stays because it is
 the path every caller already names — the unleash and status skills, the
-release hook, `scripts/kraken-loop.sh`, the coordination workflows, and the
-conformance harness all invoke `python3 <skill>/kraken.py <subcommand>`. Nothing
+lifecycle hooks, the supervising `loop`, and the conformance harness all invoke
+`python3 <skill>/kraken.py <subcommand>`. Nothing
 outside had to change when the module became a package, and nothing outside
 should have to know it did.
 

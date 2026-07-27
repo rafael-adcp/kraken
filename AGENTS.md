@@ -34,9 +34,9 @@ SKILL.md used to assume two Claude Code facilities, and this file used to substi
 them. It no longer has to, because the skill now states both as harness-neutral options:
 
 - **The watcher.** SKILL.md asks for a *persistent background process* running
-  `kraken.py watch`, and names the Claude Code Monitor tool and
-  [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) as the two ways to get one. Use the
-  loop; it is the versioned home of exactly this fallback.
+  `kraken.py watch`, and says that a harness without one leaves the ambush to the
+  operator's `kraken.py loop`. Use the loop; it is the versioned home of exactly this
+  fallback, and it needs no background facility from the harness at all.
 - **Per-task context isolation.** SKILL.md calls the subagent an explicit optimization
   and says to run the task inline when the harness has none. A fresh `copilot` process
   per pass gives you the same isolation anyway.
@@ -57,19 +57,24 @@ execute the task it hands you end to end, deliver it as a draft PR, then stop." 
   --allow-all-tools --no-ask-user --silent
 ```
 
-Wrap it in a shell loop for continuous ambush — the operator owns the cadence and the
-stop. Rather than hand-rolling that loop, use the shipped
-[`scripts/kraken-loop.sh`](scripts/kraken-loop.sh): a self-locating, argument-driven
-ambush loop you run straight from a kraken checkout (no copying it out of a session
-folder):
+Wrap it in a loop for continuous ambush — the operator owns the cadence and the stop.
+Rather than hand-rolling one, use the shipped `kraken.py loop`, which takes the agent
+command after `--`:
 
 ```bash
-scripts/kraken-loop.sh OWNER/tasks --worker-name <worker-name> --project <name>
+python3 <skill>/kraken.py loop OWNER/tasks <name> <worker-name> \
+  -- copilot -p "{prompt}" --allow-all-tools --no-ask-user --silent
 ```
 
-Each poll runs the free, read-only `list-startable` check first and only invokes
-`copilot` when a task is actually startable, so an idle queue never spends a token. Pass
-`--once` for a single bounded drain, or `--poll <seconds>` to change the 60s cadence.
+`{prompt}` is where the drain instruction lands — the loop builds the one-pass prompt
+above for you, or reads yours with `--prompt-file`. Each poll reads the queue first and
+only invokes `copilot` when a task is actually startable, so an idle queue never spends
+a token. Pass `--once` for a single bounded drain, or `--poll <seconds>` to change the
+60s cadence.
+
+A queue read that *fails* is never mistaken for an idle one: the loop warns on stderr
+and eventually exits `20` rather than sit there printing nothing while it can reach
+nothing.
 
 ## Self-healing: the lease does it, the loop only does it faster
 
@@ -85,8 +90,8 @@ The `hooks/` (SessionEnd, StopFailure) and the loop's release-on-exit are an
 claim in `$KRAKEN_STATE_DIR/claim-<worker>.json` (default `~/.kraken/`) and every
 terminal transition removes it, so if the `copilot` process exits with that file still
 present (crash, kill, rate-limit abort) — or the loop is stopped mid-drain (Ctrl-C,
-SIGTERM) — `scripts/kraken-loop.sh` runs `kraken.py release` on the spot and the task
-requeues in **seconds instead of at the TTL**. Nothing normative depends on it.
+SIGTERM) — `kraken.py loop` releases the claim on the spot and the task requeues in
+**seconds instead of at the TTL**. Nothing normative depends on it.
 
 So a **bare** `copilot -p …` invocation outside the loop is not a correctness problem,
 only a slightly slower one: its abandoned task comes back within one lease TTL. And a
