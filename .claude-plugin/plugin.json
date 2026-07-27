@@ -1,6 +1,6 @@
 {
   "name": "kraken",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "One head, many tentacles: a task queue built on GitHub Issues where named agent workers (Claude Code, GitHub Copilot CLI, or any protocol-conforming tool) claim tasks, execute them, validate against acceptance criteria, and record the evidence — dependencies, expiring leases, and automatic dead-worker recovery included — with no server-side job to install. Implements kraken-protocol/7 (PROTOCOL.md).",
   "author": {
     "name": "Rafael Prado",
