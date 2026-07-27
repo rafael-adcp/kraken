@@ -1778,6 +1778,52 @@ class WatchFailureLoopTests(unittest.TestCase):
         self.assertIn("3", err, "the give-up line must name the failure count")
 
 
+class AmbushCommandTests(unittest.TestCase):
+    """The `ambush` block on the `idle` envelope: the one instruction a worker
+    used to assemble by hand, emitted by the program instead."""
+
+    def idle(self, project="my_app", worker="env-1"):
+        return kraken.next_action_envelope(
+            "idle", "OWNER/tasks", worker, project=project,
+            script="/plugins/kraken/skills/unleash/kraken.py")
+
+    def test_idle_carries_both_ways_to_stay_in_ambush(self):
+        self.assertEqual(sorted(self.idle()["ambush"]), ["loop", "watch"])
+
+    def test_the_commands_are_interpolated_not_templated(self):
+        # The point: no <project>/<worker> left for an agent to substitute.
+        ambush = self.idle()["ambush"]
+        for command in ambush.values():
+            self.assertIn("OWNER/tasks", command)
+            self.assertIn("my_app", command)
+            self.assertNotIn("<project>", command)
+            self.assertNotIn("<worker>", command)
+        self.assertIn("env-1", ambush["loop"])
+
+    def test_the_agent_cli_stays_the_operators_to_choose(self):
+        # Which CLI, with which flags and permission mode, is not a worker's
+        # call to make — so it is the one placeholder that survives.
+        loop = self.idle()["ambush"]["loop"]
+        self.assertIn("{prompt}", loop,
+                      "the operator must be told where the prompt goes")
+        self.assertIn("your agent CLI", loop)
+
+    def test_the_watch_command_is_the_bare_two_argument_form(self):
+        # watch takes repo + project and no worker: a wake is not a claim.
+        self.assertTrue(
+            self.idle()["ambush"]["watch"].endswith("watch OWNER/tasks my_app"),
+            self.idle()["ambush"]["watch"])
+
+    def test_only_idle_carries_it(self):
+        # It is not a write, so it has no place on the verdicts that authorize
+        # one — and nowhere else is it the thing the worker needs next.
+        for action in ("execute", "abandon", "blocked", "stop", "retry"):
+            env = kraken.next_action_envelope(
+                action, "OWNER/tasks", "env-1", project="my_app",
+                issue=7, holding={"repo": "OWNER/tasks", "issue": 7})
+            self.assertNotIn("ambush", env, "%s should carry no ambush" % action)
+
+
 class LoopFireGateTests(unittest.TestCase):
     """The loop's pass gate (should_fire): how many model runs an operator pays
     for. The edge is the trigger, and the spaced retry is what keeps an

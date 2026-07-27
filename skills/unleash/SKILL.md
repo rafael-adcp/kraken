@@ -150,11 +150,9 @@ only the one-shot one; it is the summary I read. Then: if I passed `--once`, you
 done — end the turn.
 
 Otherwise stay in ambush behind a **zero-token watcher** — a read-only queue poll that
-invokes no model until a task is actually startable:
-
-```
-python3 "<skill>/kraken.py" watch OWNER/tasks <project>
-```
+invokes no model until a task is actually startable. The `idle` envelope hands you both
+ways to get one under **`ambush`**, already filled in with this repo, project and worker
+name: run **`ambush.watch`** as given. Do not hand-assemble either command.
 
 Run it as a **persistent background process**, however your harness provides one: in
 Claude Code, the Monitor tool with `persistent: true` — and if Monitor is not in your
@@ -174,14 +172,14 @@ again until `idle`, then go quiet; the watcher stays armed. When I say stop, sto
 confirm; either way it dies with the session.
 
 **Cannot arm one?** Then the ambush belongs **outside** the model, and starting it is
-mine, not yours. Say so, end the turn as if `--once`, and offer me the two ways to get
-it — `kraken.py loop OWNER/tasks <project> <worker> -- <my agent CLI>`, which polls
-outside the model and spends no tokens while the queue is idle (the agent command must
-carry a `{prompt}` token **wherever that CLI takes its prompt** — `copilot -p
-"{prompt}"`, `claude -p "{prompt}"` — because that is where the loop puts the drain
-instruction), or
-`/loop /kraken:unleash ... --once`, a dumb timer that costs a turn per fire. **Never
-improvise a watcher of your own.**
+mine, not yours. Say so, end the turn as if `--once`, and give me the envelope's
+**`ambush.loop`** line **verbatim** — it already names the repo, project and worker, and
+the only thing left in it is my agent CLI, which is mine to choose. Tell me the
+`{prompt}` token has to sit wherever that CLI takes its prompt (`copilot -p "{prompt}"`,
+`claude -p "{prompt}"`), because that is where the loop puts the drain instruction. The
+alternative, if I would rather keep it in-session, is `/loop /kraken:unleash ... --once`
+— a dumb timer that costs a turn per fire. **Never improvise a watcher of your own, and
+never start the loop for me.**
 
 ## Attribution
 

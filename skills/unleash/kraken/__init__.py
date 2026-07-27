@@ -93,8 +93,9 @@ from .claim import (
 )
 from .next_action import (
     NEXT_ACTIONS, NEXT_ACTION_EXIT, NextAction, NextActionEnvelope,
-    cmd_next_action, issue_is_finished, lease_block, next_action,
-    next_action_envelope, resume_verdict, task_brief, then_commands
+    ambush_commands, cmd_next_action, issue_is_finished, lease_block,
+    next_action, next_action_envelope, resume_verdict, task_brief,
+    then_commands
 )
 from .watch import (
     WATCH_MAX_FAILURES, WATCH_WARN_EVERY, cmd_watch, snapshot_state,

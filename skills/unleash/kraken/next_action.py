@@ -82,6 +82,31 @@ def then_commands(repo: Repo, issue: Issue, worker: Worker,
     }
 
 
+def ambush_commands(repo: Repo, project: str, worker: Worker,
+                    script: str | None = None) -> dict[str, str]:
+    """The two ways to keep draining once the queue is empty, fully
+    interpolated — the `then` treatment applied to the one instruction a worker
+    was still assembling by hand.
+
+    `watch` is the in-session ambush: a harness that can host a background
+    process runs it and the worker wakes on the `kraken-queue:` line. `loop` is
+    the same ambush hosted OUTSIDE the model, for a harness that cannot — it is
+    the operator's to start, so the worker's job is to hand it over already
+    carrying this repo, project and worker name rather than a template with
+    three placeholders to fill in.
+
+    The agent CLI stays a placeholder in `loop`, and only that: which CLI to
+    spawn, with which flags and which permission mode, is genuinely the
+    operator's call and not something a worker may choose on their behalf."""
+    script = script or ENTRYPOINT
+    base = f'python3 "{script}"'
+    return {
+        "watch": f"{base} watch {repo} {project}",
+        "loop": f"{base} loop {repo} {project} {worker} "
+                "-- <your agent CLI, with {prompt} where it takes its prompt>",
+    }
+
+
 def lease_block(
     epoch: Epoch | None, now: Epoch, ttl: int,
     generation: Gen | None = None, source: str = "claim-ref",
@@ -140,10 +165,14 @@ class NextActionEnvelope:
     the human sentence — so a consumer branches on the slug and a human reads
     the sentence, never the other way round."""
 
-    def __init__(self, repo: Repo, worker: Worker, script: str | None = None):
+    def __init__(self, repo: Repo, worker: Worker, script: str | None = None,
+                 project: str = ""):
         self.repo = repo
         self.worker = worker
         self.script = script
+        # Only the `idle` envelope's ambush block needs it, which is why it
+        # trails the signature rather than joining repo/worker up front.
+        self.project = project
 
     def answer(self, action: str, **fields) -> tuple[int, Envelope]:
         """The envelope AND the exit code that carries the same verdict to a
@@ -191,6 +220,12 @@ class NextActionEnvelope:
             env["then"] = self._then(self.repo, issue)
         elif action == "blocked" and holding is not None:
             env["then"] = self._then(holding["repo"], int(holding["issue"]))
+        # `ambush` rides `idle` and only `idle`: it is not a write, so it has no
+        # place in `then` (which is the legal-writes block), and it is the one
+        # thing a worker needs at exactly the moment the queue runs dry.
+        if action == "idle":
+            env["ambush"] = ambush_commands(self.repo, self.project,
+                                            self.worker, self.script)
         return env
 
     def _then(self, repo: Repo, issue: Issue) -> dict[str, str]:
@@ -198,10 +233,12 @@ class NextActionEnvelope:
 
 
 def next_action_envelope(action: str, repo: Repo, worker: Worker, *,
-                         script: str | None = None, **fields) -> Envelope:
+                         script: str | None = None, project: str = "",
+                         **fields) -> Envelope:
     """The envelope as a single call, for a caller that has no context object in
     hand."""
-    return NextActionEnvelope(repo, worker, script).build(action, **fields)
+    return NextActionEnvelope(repo, worker, script, project).build(
+        action, **fields)
 
 
 def issue_is_finished(issue_obj: Json | None) -> bool:
@@ -298,7 +335,7 @@ class NextAction:
         self.worker = worker
         self.ttl = lease_ttl_seconds(ttl)
         self.now = time.time() if now is None else now
-        self.envelope = NextActionEnvelope(api.repo, worker, script)
+        self.envelope = NextActionEnvelope(api.repo, worker, script, project)
 
     def run(self) -> tuple[int, Envelope]:
         """Resume what is held, else acquire. Returns `(exit_code, envelope)`."""

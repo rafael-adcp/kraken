@@ -73,6 +73,7 @@ class Envelope(_EnvelopeRequired, total=False):
     brief: Json      # the task briefing (title / goal / acceptance)
     lease: Json      # the renewal contract: expires_at, renew_every_seconds, …
     then: dict[str, str]  # fully-interpolated commands for the legal next writes
+    ambush: dict[str, str]  # `idle` only: how to keep draining (watch / loop)
 
 
 class ReconcileAction(TypedDict, total=False):

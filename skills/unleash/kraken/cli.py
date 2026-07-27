@@ -176,9 +176,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("project")
     p.add_argument("worker")
     p.add_argument("--once", action="store_true",
-                   help="run one drain pass and exit instead of polling; the "
+                   help="run one drain pass and exit instead of polling. The "
                         "agent's own exit status is passed through, so a cron "
-                        "or CI caller can tell a failed drain from a clean one")
+                        "or CI caller can tell a failed drain from a clean one "
+                        "— but it shares this program's namespace, so a "
+                        "non-zero may equally be the loop itself (20 the queue "
+                        "read, 13 an unknown project, 2 an unrunnable agent). "
+                        "Treat any non-zero as 'this drain did not complete' "
+                        "and read the kraken-loop: lines on stderr for which")
     p.add_argument("--poll", type=int, default=None,
                    help="poll cadence in seconds (default: "
                         "KRAKEN_LOOP_POLL_SECONDS env, else "
