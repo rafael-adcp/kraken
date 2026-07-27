@@ -9,6 +9,7 @@ Stdlib only (unittest), no network, no gh. Run: python3 tests/unit/test_kraken.p
 
 import os
 import re
+import shutil
 import time
 import datetime
 import sys
@@ -1775,6 +1776,151 @@ class WatchFailureLoopTests(unittest.TestCase):
                          "a watcher that can never read the queue must die loudly")
         self.assertIn("giving up", err)
         self.assertIn("3", err, "the give-up line must name the failure count")
+
+
+class OpenClaimRecordsTests(unittest.TestCase):
+    """The claim-state sweep (open_claim_records): every open claim recorded on
+    this machine, discovered by file name. It replaced a bash loop that globbed
+    the same directory and re-parsed the JSON with jq-or-sed, so the format now
+    has exactly one reader."""
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp(prefix="kraken-claims-")
+        self.addCleanup(shutil.rmtree, self.state, ignore_errors=True)
+        os.environ["KRAKEN_STATE_DIR"] = self.state
+        self.addCleanup(os.environ.pop, "KRAKEN_STATE_DIR", None)
+
+    def write(self, name, text):
+        with open(os.path.join(self.state, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_missing_state_dir_is_no_open_claims(self):
+        shutil.rmtree(self.state, ignore_errors=True)
+        self.assertEqual(kraken.open_claim_records(), [])
+
+    def test_every_claim_file_is_a_record(self):
+        self.write("claim-w1.json", '{"repo":"o/t","issue":"7","worker":"w1"}')
+        self.write("claim-w2.json", '{"repo":"o/t","issue":"8","worker":"w2"}')
+        self.assertEqual(
+            [(r["worker"], r["issue"]) for r in kraken.open_claim_records()],
+            [("w1", "7"), ("w2", "8")])
+
+    def test_worker_falls_back_to_the_file_name(self):
+        # The name is what claim_state_path built the file from, so it is the
+        # one field that cannot go missing — a payload that omits it is still
+        # actionable, which is what the bash loop got wrong (it skipped).
+        self.write("claim-env-1.json", '{"repo":"o/t","issue":"7"}')
+        self.assertEqual(kraken.open_claim_records()[0]["worker"], "env-1")
+
+    def test_malformed_and_foreign_files_are_skipped_never_guessed(self):
+        self.write("claim-bad.json", "{not json")
+        self.write("claim-noissue.json", '{"repo":"o/t","worker":"w"}')
+        self.write("wake-retry", "2026-07-26T00:00:00Z")
+        self.write("claim-w1.json", '{"repo":"o/t","issue":"7","worker":"w1"}')
+        self.assertEqual([r["worker"] for r in kraken.open_claim_records()], ["w1"])
+
+    def test_open_claim_record_reads_the_same_file(self):
+        # The single-worker reader and the sweep must not drift: one parser.
+        self.write("claim-w1.json", '{"repo":"o/t","issue":"7","worker":"w1"}')
+        self.assertEqual(kraken.open_claim_record("w1"),
+                         kraken.open_claim_records()[0])
+
+
+class ReleaseOpenClaimsTests(unittest.TestCase):
+    """The release-on-exit sweep (release_open_claims): which records it acts
+    on, and — the one that matters — which it must leave alone. A loop or hook
+    that swept unscoped on a shared machine would free a co-located worker's
+    LIVE claim."""
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp(prefix="kraken-release-")
+        self.addCleanup(shutil.rmtree, self.state, ignore_errors=True)
+        os.environ["KRAKEN_STATE_DIR"] = self.state
+        self.addCleanup(os.environ.pop, "KRAKEN_STATE_DIR", None)
+
+    def write(self, worker, repo="o/t", issue="7"):
+        with open(os.path.join(self.state, "claim-%s.json" % worker),
+                  "w", encoding="utf-8") as fh:
+            json.dump({"repo": repo, "issue": issue, "worker": worker}, fh)
+
+    def sweep(self, reason, worker=None):
+        """Run the sweep against a recording release; returns what it touched."""
+        touched = []
+
+        def release(api, issue, released_worker, released_reason):
+            touched.append((api.repo, issue, released_worker, released_reason))
+            return kraken.EXIT_OK
+
+        count = kraken.release_open_claims(reason, worker, release=release)
+        return count, touched
+
+    def test_scoped_sweep_touches_only_its_own_worker(self):
+        self.write("w1", issue="7")
+        self.write("other", issue="8")
+        count, touched = self.sweep("loop terminated", "w1")
+        self.assertEqual(count, 1)
+        self.assertEqual(touched,
+                         [("o/t", "7", "w1", "loop terminated")],
+                         "the sweep freed a co-located worker's live claim")
+
+    def test_unscoped_sweep_takes_every_claim(self):
+        # SessionEnd's shape: the whole session is going away, so every claim it
+        # recorded here goes with it.
+        self.write("w1", issue="7")
+        self.write("w2", issue="8")
+        count, touched = self.sweep("session ended")
+        self.assertEqual(count, 2)
+        self.assertEqual(sorted(w for _r, _i, w, _x in touched), ["w1", "w2"])
+
+    def test_a_record_naming_no_repo_is_skipped(self):
+        # Nothing to release against: the release would have to guess a repo,
+        # and guessing is what this program never does.
+        self.write("w1", repo="")
+        count, touched = self.sweep("session ended")
+        self.assertEqual((count, touched), (0, []))
+
+    def test_a_refused_release_is_not_counted(self):
+        # Exit 10 means the lease was already stolen — the correct outcome, not
+        # a failure, and the sweep carries on to the next record.
+        self.write("w1", issue="7")
+        self.write("w2", issue="8")
+        seen = []
+
+        def release(api, issue, worker, reason):
+            seen.append(worker)
+            return kraken.EXIT_LOST if worker == "w1" else kraken.EXIT_OK
+
+        self.assertEqual(kraken.release_open_claims("x", release=release), 1)
+        self.assertEqual(seen, ["w1", "w2"], "the sweep stopped on a refusal")
+
+
+class StampWakeRetryTests(unittest.TestCase):
+    """The wake-retry flag, stamped by the StopFailure hook and read by the
+    watcher. mtime is the signal; the file content is for a human."""
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp(prefix="kraken-wake-")
+        self.addCleanup(shutil.rmtree, self.state, ignore_errors=True)
+        os.environ["KRAKEN_STATE_DIR"] = self.state
+        self.addCleanup(os.environ.pop, "KRAKEN_STATE_DIR", None)
+
+    def test_stamping_creates_a_flag_the_watcher_can_read(self):
+        self.assertIsNone(kraken.wake_retry_mtime(), "setup: flag already there")
+        kraken.stamp_wake_retry()
+        self.assertIsNotNone(kraken.wake_retry_mtime(),
+                             "the watcher cannot see the stamped flag")
+
+    def test_it_creates_the_state_dir_when_absent(self):
+        # The hook can fire before any claim wrote the directory.
+        shutil.rmtree(self.state, ignore_errors=True)
+        kraken.stamp_wake_retry()
+        self.assertIsNotNone(kraken.wake_retry_mtime())
+
+    def test_the_content_is_a_timestamp_kraken_can_read_back(self):
+        kraken.stamp_wake_retry()
+        with open(kraken.wake_retry_flag_path(), encoding="utf-8") as fh:
+            self.assertIsNotNone(kraken.parse_iso(fh.read().strip()),
+                                 "the stamped timestamp is not ISO-8601 UTC")
 
 
 class BundledAssetTests(unittest.TestCase):

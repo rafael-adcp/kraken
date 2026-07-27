@@ -8,6 +8,7 @@ import dataclasses
 import datetime
 import json
 import os
+import time
 
 from .contract import (
     ClaimRecord, CommitMeta, EXIT_NOT_CLEAR, Epoch, Gen, Issue,
@@ -243,20 +244,16 @@ def clear_claim_state(worker: Worker) -> None:
         pass
 
 
-def open_claim_record(worker: Worker) -> ClaimRecord | None:
-    """The whole claim-<worker>.json record — `{"repo", "issue", "worker"}` with
-    `issue` normalized to a string — or None when this worker holds no open
-    claim. The file's *presence* is the signal that a claim is unresolved: every
-    terminal transition (deliver / escalate / release) removes it, so a resolved
-    claim leaves nothing behind. A missing, unreadable, or malformed file is
-    treated as no open claim — the guards it feeds must never fail a claim over
-    an unparseable scratch file (the lease backs us up regardless).
+def _read_claim_file(path: str, worker: Worker) -> ClaimRecord | None:
+    """One claim-state file as a record, or None when it is missing, unreadable
+    or malformed. `worker` is the fallback identity for a file whose payload
+    does not name one — the caller knows it either because it asked for that
+    worker's file or because the file name carries it.
 
-    `next-action` reads the record rather than the bare issue number, because
-    resuming a claim means proving the lease on the repo the claim was made in,
-    not on whichever repo this invocation happens to name."""
+    Never raises and never guesses: the guards this feeds must not fail a claim
+    over an unparseable scratch file, and the lease backs them up regardless."""
     try:
-        with open(claim_state_path(worker), encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError):
         return None
@@ -270,6 +267,44 @@ def open_claim_record(worker: Worker) -> ClaimRecord | None:
         "issue": str(issue),
         "worker": str(data.get("worker") or worker),
     }
+
+
+def open_claim_record(worker: Worker) -> ClaimRecord | None:
+    """The whole claim-<worker>.json record — `{"repo", "issue", "worker"}` with
+    `issue` normalized to a string — or None when this worker holds no open
+    claim. The file's *presence* is the signal that a claim is unresolved: every
+    terminal transition (deliver / escalate / release) removes it, so a resolved
+    claim leaves nothing behind.
+
+    `next-action` reads the record rather than the bare issue number, because
+    resuming a claim means proving the lease on the repo the claim was made in,
+    not on whichever repo this invocation happens to name."""
+    return _read_claim_file(claim_state_path(worker), worker)
+
+
+def open_claim_records() -> list[ClaimRecord]:
+    """Every open claim recorded on this machine, one per surviving
+    claim-<worker>.json — what the release-on-exit path (a lifecycle hook, the
+    supervising loop) acts on when a drain died holding a lease.
+
+    The worker identity comes from the FILE NAME when the payload omits it: the
+    name is what `claim_state_path` built it from, so it is the one field that
+    cannot go missing. A file that names no issue is skipped rather than guessed
+    at, and a state dir that does not exist is simply no open claims."""
+    directory = state_dir()
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    records = []
+    for name in names:
+        if not (name.startswith("claim-") and name.endswith(".json")):
+            continue
+        record = _read_claim_file(os.path.join(directory, name),
+                                  name[len("claim-"):-len(".json")])
+        if record is not None:
+            records.append(record)
+    return records
 
 
 def open_claim(worker: Worker) -> str | None:
@@ -308,9 +343,26 @@ def wake_retry_flag_path() -> str:
     return os.path.join(state_dir(), "wake-retry")
 
 
+def stamp_wake_retry() -> None:
+    """Stamp the wake-retry flag: a turn on this machine died on a usage limit,
+    so the wake the watcher spent on it was consumed by nothing and owes a
+    retry. **mtime is the signal** the watcher reads (`wake_retry_mtime`); the
+    ISO timestamp written into the file is for a human looking at it.
+
+    Best-effort, like every other write to the scratch dir: a flag that cannot
+    be stamped costs a retry, never correctness — the lease still expires on its
+    own."""
+    try:
+        os.makedirs(state_dir(), exist_ok=True)
+        with open(wake_retry_flag_path(), "w", encoding="utf-8") as fh:
+            fh.write(format_iso(time.time()) + "\n")
+    except OSError:
+        pass
+
+
 def wake_retry_mtime() -> float | None:
-    """mtime of the wake-retry flag the StopFailure hook stamps when a usage
-    limit kills a turn on this machine (hooks/stop-failure-release.sh), or None
+    """mtime of the wake-retry flag stamped when a usage limit kills a turn on
+    this machine (`stamp_wake_retry`, via hooks/stop-failure-release.sh), or None
     when no flag exists. The watcher compares it against its own last emission
     to decide whether a wake it spent was consumed by a dead turn."""
     try:

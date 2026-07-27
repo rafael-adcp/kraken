@@ -13,6 +13,12 @@
 #      requeues in seconds, and this worker re-claims it after reset via the
 #      retry wake and continues on the existing branch.
 #
+# Both ride ONE `kraken.py release-open --stamp-wake-retry`: the program stamps
+# before it releases, so an ordering that used to be two bash lines — and could
+# be interrupted between them — is now internal to a single process. Even with no
+# claim held the consumed wake must be retried, and if the release fails the
+# retry still has to happen, which is why the stamp is never conditional on it.
+#
 # Matcher is `rate_limit` only: a usage limit is account-wide, so any session's
 # rate_limit failure implies the worker sessions here are limited too — releasing
 # their claims is correct. Per-session error types could fire on a healthy worker
@@ -24,14 +30,9 @@
 # stdin is unused — the matcher already scoped the error type.
 set -u
 
-. "$(dirname "$0")/lib-release-claims.sh"
+KRAKEN_ROOT="${CLAUDE_PLUGIN_ROOT:-"$(cd "$(dirname "$0")/.." && pwd)"}"
 
-# Flag first, release second: even with no claim held, the consumed wake must be
-# retried — and if the release fails, the retry still has to happen. mtime is the
-# signal the watcher reads; the timestamp content is for humans.
-mkdir -p "$KRAKEN_STATE" 2>/dev/null || true
-date -u +"%Y-%m-%dT%H:%M:%SZ" > "$KRAKEN_STATE/wake-retry" 2>/dev/null || true
-
-release_all_claims "usage limit"
+python3 "$KRAKEN_ROOT/skills/unleash/kraken.py" release-open \
+  --stamp-wake-retry --reason "usage limit" >/dev/null 2>&1 || true
 
 exit 0

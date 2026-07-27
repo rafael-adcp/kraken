@@ -20,7 +20,8 @@ from .comments import compose_comment, compose_note
 from .transport import Api
 from .lease import (
     Lease, NO_LEASE, clear_claim_state, format_age, lease_ttl_seconds,
-    live_leases, refuse_second_claim, write_claim_state
+    live_leases, open_claim_records, refuse_second_claim, stamp_wake_retry,
+    write_claim_state
 )
 from .refs import Refs
 from .queue import Queue, requeued_labels
@@ -517,9 +518,15 @@ def cmd_deliver(args: argparse.Namespace) -> int:
 
 # --- subcommand: release -----------------------------------------------------
 
-def cmd_release(args: argparse.Namespace) -> int:
-    api, issue, worker, reason = args.api, args.issue, args.worker, args.reason
+def release_claim(api: Api, issue: Issue, worker: Worker,
+                  reason: str = "") -> int:
+    """Hand one claim back (PROTOCOL.md §9), as a call rather than as an argv.
 
+    `cmd_release` is the CLI shape of this and `release_open_claims` is the
+    sweep over every claim recorded on this machine — both reach the same
+    implementation, so the ordering rule below cannot drift between the operator
+    running `release` and a lifecycle hook running the same thing on the way
+    out."""
     # Releasing a lease that is no longer ours would delete the NEW holder's
     # lease and strip the label out from under a worker mid-task — the one way a
     # well-meaning cleanup can corrupt someone else's claim. So the check is not
@@ -552,6 +559,66 @@ def cmd_release(args: argparse.Namespace) -> int:
 
     clear_claim_state(worker)
     print(f"release: released issue={issue} worker={worker}")
+    return EXIT_OK
+
+
+def cmd_release(args: argparse.Namespace) -> int:
+    return release_claim(args.api, args.issue, args.worker, args.reason)
+
+
+def release_open_claims(reason: str, worker: Worker | None = None, *,
+                        release: Callable[..., int] | None = None) -> int:
+    """Release every claim still recorded on this machine — the fast path a
+    lifecycle hook and the supervising loop take when a drain died holding a
+    lease. Returns how many releases landed.
+
+    `kraken.py claim` writes the state file and every terminal transition
+    removes it, so a file that OUTLIVED its drain is proof the drain died
+    holding the lease (crash, kill, rate-limit abort). Releasing it here returns
+    the task in seconds instead of at the TTL.
+
+    `worker` scopes the sweep to one identity, and a caller that knows its own
+    name MUST pass it: a loop or a hook that swept the whole directory would
+    free a co-located worker's LIVE claim. Unscoped is for the session-wide hook,
+    where every claim on the machine belongs to the session that is ending.
+
+    Best-effort by construction, exactly like the bash it replaces: a record with
+    no repo cannot be acted on and is skipped rather than guessed at, and a
+    refused release (exit 10 — the lease was already stolen) is the correct
+    outcome, not a failure. The lease expiry is the actual recovery mechanism;
+    this only makes it immediate.
+
+    `release` defaults to the real transition and exists so the SWEEP — which
+    records it visits, which it skips, how it scopes — is testable without
+    transport. A caller in production passes nothing."""
+    release = release or release_claim
+    released = 0
+    for record in open_claim_records():
+        if worker is not None and record["worker"] != worker:
+            continue
+        if not record["repo"]:
+            continue
+        if release(Api(record["repo"]), record["issue"],
+                   record["worker"], reason) == EXIT_OK:
+            released += 1
+    return released
+
+
+def cmd_release_open(args: argparse.Namespace) -> int:
+    """The release-on-exit entry point every caller outside this program shares:
+    the two lifecycle hooks and `loop`'s own teardown. It replaced a bash library
+    that re-parsed the claim-state JSON with `jq`-or-`sed` — one format, one
+    reader.
+
+    ALWAYS exits 0. A hook must never block session exit and a loop must never
+    fail its teardown over a release that did not land: the lease expiry is what
+    actually recovers the task, and this is only the fast path."""
+    if args.stamp_wake_retry:
+        # Flag FIRST, release second. Even with no claim held the consumed wake
+        # has to be retried, and if the release below fails the retry still has
+        # to happen — so the stamp cannot be conditional on it.
+        stamp_wake_retry()
+    release_open_claims(args.reason, args.worker)
     return EXIT_OK
 
 

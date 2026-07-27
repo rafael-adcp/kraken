@@ -16,7 +16,7 @@ from .queue import cmd_list_startable
 from .reconcile import RECONCILER_WORKER, cmd_reap
 from .claim import (
     cmd_claim, cmd_claim_next, cmd_deliver, cmd_escalate, cmd_heartbeat,
-    cmd_note, cmd_release
+    cmd_note, cmd_release, cmd_release_open
 )
 from .next_action import NEXT_ACTIONS, cmd_next_action
 from .watch import cmd_watch
@@ -127,6 +127,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("worker")
     p.add_argument("reason", nargs="?", default="")
     p.set_defaults(func=cmd_release)
+
+    p = sub.add_parser(
+        "release-open",
+        help="release every claim still recorded on this machine — the "
+             "release-on-exit fast path a lifecycle hook or `loop` takes when a "
+             "drain died holding a lease (always exits 0)",
+    )
+    p.add_argument("--worker", default=None,
+                   help="scope the sweep to this worker's own claim. A caller "
+                        "that knows its identity MUST pass it: an unscoped "
+                        "sweep frees a co-located worker's live claim")
+    p.add_argument("--reason", default="",
+                   help="reason recorded on the `released` marker")
+    p.add_argument("--stamp-wake-retry", action="store_true",
+                   help="stamp the wake-retry flag first, so an armed watcher "
+                        "re-emits the wake the dead turn consumed")
+    p.set_defaults(func=cmd_release_open)
 
     p = sub.add_parser(
         "note",

@@ -106,10 +106,9 @@ cd "$REPO_DIR" || { echo "kraken-loop: cannot cd into $REPO_DIR" >&2; exit 1; }
 # recovery mechanism; this is only the fast path. `release` itself refuses (exit
 # 10) if the lease has already been stolen, so a late release can never free a
 # task another worker is running.
-. "$REPO_DIR/hooks/lib-release-claims.sh"
-
 release_own_claim() { # $1 = reason
-  release_all_claims "$1" "$WORKER"
+  python3 "$KRAKEN_PY" release-open --worker "$WORKER" --reason "$1" \
+    >/dev/null 2>&1 || true
 }
 
 # The trap covers the loop itself dying while a drain is in flight: Ctrl-C
