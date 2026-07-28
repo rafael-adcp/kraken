@@ -15,7 +15,7 @@ acyclic:
     transport    Api: the one object that talks to GitHub
     lease        the Lease object, the TTL, the local claim-state file
     refs         the claim-ref CAS — the generation ladder
-    queue        the batched walk, hydration, the startable filter
+    queue        the Task object, the batched walk, hydration, the filter
     render       report objects to text
     reconcile    the §6 repair pass
     claim        the contended claim sequence and the terminal transitions
@@ -73,16 +73,15 @@ from .refs import (
 )
 from .queue import (
     COMMENT_HYDRATE_CHUNK, DEPENDS_ON_RE, NO_RESPONSE_PLACEHOLDER,
-    QUEUE_COMMENT_WINDOW, Candidate, Queue, QueueRead, claim_meta_of, cmd_list_startable,
-    comment_hungry, comment_nodes_of, depends_on_ref, has_requeue_directive,
-    is_empty_section, is_worker_comment, label_names_of, node_state,
-    project_names_of, requeue_verdict, requeued_labels, section_body
+    QUEUE_COMMENT_WINDOW, Candidate, Queue, QueueRead, Task, claim_meta_of,
+    cmd_list_startable, comment_hungry, has_requeue_directive,
+    is_empty_section, is_worker_comment, requeue_verdict, section_body
 )
 from .render import (
     render_init, render_next_action, render_status
 )
 from .reconcile import (
-    RECONCILER_WORKER, apply_reconcile, cmd_reap, expiry_count,
+    RECONCILER_WORKER, apply_reconcile, cmd_reap,
     project_reconcile, reconcile_pass, reconcile_plan, stale_claim_body
 )
 from .claim import (

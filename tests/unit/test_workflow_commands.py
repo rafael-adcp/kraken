@@ -251,10 +251,11 @@ class ReapCommandTests(unittest.TestCase):
 
     @staticmethod
     def _node(number, labels, comments=()):
-        return {"number": number, "title": "t", "createdAt": "2026-01-01",
-                "body": "", "labels": {"nodes": [{"name": l} for l in labels]},
-                "comments": {"nodes": [{"body": b, "createdAt": "2026-01-01"}
-                                       for b in comments]}}
+        return kraken.Task(
+            {"number": number, "title": "t", "createdAt": "2026-01-01",
+             "body": "", "labels": {"nodes": [{"name": l} for l in labels]},
+             "comments": {"nodes": [{"body": b, "createdAt": "2026-01-01"}
+                                    for b in comments]}})
 
     def _run(self, nodes, refs, commit_meta, ttl=None, worker="reconciler"):
         # Tests seed {issue: sha}; a lease is a generation ladder. The queue read
@@ -437,50 +438,51 @@ class RequeueVerdictTests(unittest.TestCase):
 
 
 class RequeuedLabelsTests(unittest.TestCase):
-    """requeued_labels: the derivation as the classifier and the claim both see
+    """Task.requeued: the derivation as the classifier and the claim both see
     it — which held labels an operator reply has already lifted."""
 
     @staticmethod
     def _node(number, labels, comments=()):
-        return {"number": number, "title": "t", "createdAt": "2026-01-01",
-                "body": "", "labels": {"nodes": [{"name": l} for l in labels]},
-                "comments": {"nodes": list(comments)},
-                "blockedBy": {"nodes": []}}
+        return kraken.Task(
+            {"number": number, "title": "t", "createdAt": "2026-01-01",
+             "body": "", "labels": {"nodes": [{"name": l} for l in labels]},
+             "comments": {"nodes": list(comments)},
+             "blockedBy": {"nodes": []}})
 
     def test_answered_needs_decision_is_lifted(self):
-        node = self._node(1, ["kraken-task", "needs-decision"],
+        task = self._node(1, ["kraken-task", "needs-decision"],
                           [_worker_cmt(), _cmt("do option B")])
-        self.assertEqual(kraken.requeued_labels(node, {}), ("needs-decision",))
+        self.assertEqual(task.requeued({}), ("needs-decision",))
 
     def test_unanswered_stays_held(self):
-        node = self._node(1, ["kraken-task", "needs-decision"], [_worker_cmt()])
-        self.assertEqual(kraken.requeued_labels(node, {}), ())
+        task = self._node(1, ["kraken-task", "needs-decision"], [_worker_cmt()])
+        self.assertEqual(task.requeued({}), ())
 
     def test_a_live_claim_ref_outranks_the_thread(self):
         # A comment on a CLAIMED task is context for its worker, never a requeue:
         # the lock is the truth (§5), so the timeline is not consulted at all.
-        node = self._node(1, ["kraken-task", "needs-decision"],
+        task = self._node(1, ["kraken-task", "needs-decision"],
                           [_worker_cmt(), _cmt("do option B")])
-        self.assertEqual(kraken.requeued_labels(node, {1: "sha"}), ())
+        self.assertEqual(task.requeued({1: "sha"}), ())
 
     def test_in_progress_needs_no_lifting(self):
         # Nothing to lift: the badge is write-only (§3), so the task is already
         # queued and the derivation has no held label to report.
-        node = self._node(1, ["kraken-task", "in-progress"],
+        task = self._node(1, ["kraken-task", "in-progress"],
                           [_worker_cmt(), _cmt("any news?")])
-        self.assertEqual(kraken.requeued_labels(node, {}), ())
+        self.assertEqual(task.requeued({}), ())
 
     def test_a_stale_badge_cannot_suppress_a_requeue(self):
         # Both labels at once — a crashed escalate that left the badge on. Under
         # protocol/6 the in-progress label short-circuited the whole derivation,
         # so the operator's answer was silently ignored. It holds nothing now.
-        node = self._node(1, ["kraken-task", "in-progress", "needs-decision"],
+        task = self._node(1, ["kraken-task", "in-progress", "needs-decision"],
                           [_worker_cmt(), _cmt("do option B")])
-        self.assertEqual(kraken.requeued_labels(node, {}), ("needs-decision",))
+        self.assertEqual(task.requeued({}), ("needs-decision",))
 
     def test_an_unheld_task_lifts_nothing(self):
-        node = self._node(1, ["kraken-task"], [_cmt("just chatter")])
-        self.assertEqual(kraken.requeued_labels(node, {}), ())
+        task = self._node(1, ["kraken-task"], [_cmt("just chatter")])
+        self.assertEqual(task.requeued({}), ())
 
 
 # --- cmd_validate: gate + debounce, transport mocked ------------------------

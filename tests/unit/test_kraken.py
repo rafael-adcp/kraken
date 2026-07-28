@@ -632,15 +632,22 @@ class ClaimNextIterationTests(unittest.TestCase):
     def setUp(self):
         self.attempted = []
 
+    @staticmethod
+    def _candidate(number, title, state, body):
+        """One classified candidate. It carries its whole `Task`, which is how
+        claim-next re-derives the requeue verdict off the very task the filter
+        used — the read no longer has to be seeded with a parallel node list."""
+        return kraken.Candidate(
+            kraken.Task({"number": number, "title": title,
+                         "createdAt": "2026-01-01", "body": body,
+                         "labels": {"nodes": [{"name": "kraken-task"}]},
+                         "comments": {"nodes": []},
+                         "blockedBy": {"nodes": []}}),
+            state)
+
     def _run(self, rows, claim_results):
-        # claim-next re-derives each candidate's requeue verdict off the node the
-        # filter used, so the read has to carry a node per row.
-        # rows=None models a failed queue read, which surfaces at read_queue.
-        nodes = [{"number": c.number, "title": c.title, "createdAt": c.created,
-                  "body": "",
-                  "labels": {"nodes": [{"name": "kraken-task"}]},
-                  "comments": {"nodes": []},
-                  "blockedBy": {"nodes": []}} for c in (rows or [])]
+        # rows=None models a failed queue read, which surfaces at Queue.read.
+        tasks = [c.task for c in (rows or [])]
 
         def fake_claim_step(api, issue, worker, allow_held=(), lease=None,
                             ttl=None, probe_lease=False):
@@ -656,13 +663,13 @@ class ClaimNextIterationTests(unittest.TestCase):
                 queue=FakeQueue(
                     api,
                     read=lambda now=None, ttl=None: (
-                        None if rows is None else kraken.QueueRead(nodes, {}, {})),
+                        None if rows is None else kraken.QueueRead(tasks, {}, {})),
                     candidates=lambda p, read=None: rows),
                 claim_step=fake_claim_step)
         return rc, won, buf.getvalue()
 
     def test_claims_first_startable(self):
-        rows = [kraken.Candidate(7, "oldest", "t1", "startable", "body-7")]
+        rows = [self._candidate(7, "oldest", "startable", "body-7")]
         rc, won, _ = self._run(rows, {7: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.attempted, [7])
@@ -670,8 +677,8 @@ class ClaimNextIterationTests(unittest.TestCase):
 
     def test_skips_held_rows_without_attempting_them(self):
         rows = [
-            kraken.Candidate(5, "held one", "t1", "held", "b5"),
-            kraken.Candidate(7, "startable", "t2", "startable", "b7"),
+            self._candidate(5, "held one", "held", "b5"),
+            self._candidate(7, "startable", "startable", "b7"),
         ]
         rc, _, _ = self._run(rows, {7: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
@@ -681,8 +688,8 @@ class ClaimNextIterationTests(unittest.TestCase):
         # THE §5 invariant: a lost CAS on the oldest candidate moves on to the
         # next — it must never retry the issue it just lost.
         rows = [
-            kraken.Candidate(7, "lost this", "t1", "startable", "b7"),
-            kraken.Candidate(9, "win this", "t2", "startable", "b9"),
+            self._candidate(7, "lost this", "startable", "b7"),
+            self._candidate(9, "win this", "startable", "b9"),
         ]
         rc, won, _ = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
@@ -692,8 +699,8 @@ class ClaimNextIterationTests(unittest.TestCase):
 
     def test_skip_on_held_since_listing_moves_to_next(self):
         rows = [
-            kraken.Candidate(7, "now held", "t1", "startable", "b7"),
-            kraken.Candidate(9, "clear", "t2", "startable", "b9"),
+            self._candidate(7, "now held", "startable", "b7"),
+            self._candidate(9, "clear", "startable", "b9"),
         ]
         rc, _, _ = self._run(rows, {7: kraken.EXIT_NOT_CLEAR, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
@@ -708,8 +715,8 @@ class ClaimNextIterationTests(unittest.TestCase):
 
     def test_all_candidates_lost_or_held_is_none(self):
         rows = [
-            kraken.Candidate(7, "a", "t1", "startable", "b7"),
-            kraken.Candidate(9, "b", "t2", "startable", "b9"),
+            self._candidate(7, "a", "startable", "b7"),
+            self._candidate(9, "b", "startable", "b9"),
         ]
         rc, won, _ = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_NOT_CLEAR})
         self.assertEqual(rc, kraken.EXIT_NONE)
@@ -718,8 +725,8 @@ class ClaimNextIterationTests(unittest.TestCase):
 
     def test_transport_during_claim_stops_immediately(self):
         rows = [
-            kraken.Candidate(7, "ambiguous", "t1", "startable", "b7"),
-            kraken.Candidate(9, "untouched", "t2", "startable", "b9"),
+            self._candidate(7, "ambiguous", "startable", "b7"),
+            self._candidate(9, "untouched", "startable", "b9"),
         ]
         rc, won, out = self._run(rows, {7: kraken.EXIT_TRANSPORT, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
@@ -990,10 +997,10 @@ class StatusComputeTests(unittest.TestCase):
     NOW = kraken.parse_iso("2026-07-01T10:00:00Z")
 
     def _node(self, number, title, labels, created="2026-07-01T00:00:00Z"):
-        return {
+        return kraken.Task({
             "number": number, "title": title, "createdAt": created,
             "labels": {"nodes": [{"name": n} for n in labels]},
-        }
+        })
 
     def _call(self, nodes, project="", claim_refs=None, commit_meta=None,
               comments=None, merged=None, projects=None, ttl=None):
@@ -1177,8 +1184,9 @@ class QueueHygieneTests(unittest.TestCase):
     GOOD = "### Goal\n\nShip it.\n\n### Acceptance\n\n`npm test` passes.\n"
 
     def _node(self, number, labels, body, created="2026-07-01T00:00:00Z"):
-        return {"number": number, "title": "t%d" % number, "createdAt": created,
-                "body": body, "labels": {"nodes": [{"name": l} for l in labels]}}
+        return kraken.Task(
+            {"number": number, "title": "t%d" % number, "createdAt": created,
+             "body": body, "labels": {"nodes": [{"name": l} for l in labels]}})
 
     def test_a_compliant_task_is_not_reported(self):
         node = self._node(1, ["kraken-task", "project:app"], self.GOOD)
@@ -1218,13 +1226,14 @@ class QueueHygieneTests(unittest.TestCase):
 
 
 def _task_node(number, labels, comments=()):
-    """A minimal open-task node the way fetch_open_tasks returns it — the only
-    issue input reconcile_plan reads. `comments` is the trailing window the
+    """A minimal open task the way `Queue.open_tasks` returns it — the only issue
+    input reconcile_plan reads. `comments` is the trailing window the
     repeat-expiry guard counts `lease-expired` markers in."""
-    return {"number": number, "title": "t%d" % number, "createdAt": "2026-01-01",
-            "body": "", "labels": {"nodes": [{"name": l} for l in labels]},
-            "comments": {"nodes": [{"body": b, "createdAt": "2026-01-01"}
-                                   for b in comments]}}
+    return kraken.Task(
+        {"number": number, "title": "t%d" % number, "createdAt": "2026-01-01",
+         "body": "", "labels": {"nodes": [{"name": l} for l in labels]},
+         "comments": {"nodes": [{"body": b, "createdAt": "2026-01-01"}
+                                for b in comments]}})
 
 
 def _at(hours_ago):
@@ -1465,14 +1474,11 @@ class CommentHydrationTests(unittest.TestCase):
     def test_hydration_fills_only_the_hungry_nodes(self):
         held = _task_node(1, ["kraken-task", "needs-decision"])
         free = _task_node(2, ["kraken-task"])
-        # _task_node volunteers a window; strip it so the fetch is what fills it.
-        del held["comments"], free["comments"]
         api = self._reply([1])
 
         self.assertIsNotNone(kraken.Queue(api).hydrate([held, free], {}))
-        self.assertEqual(kraken.comment_nodes_of(held)[0]["body"], "c1-0")
-        self.assertNotIn("comments", free, "a free task must stay unhydrated")
-        self.assertEqual(kraken.comment_nodes_of(free), [])
+        self.assertEqual(held.comments[0]["body"], "c1-0")
+        self.assertEqual(free.comments, [], "a free task must stay unhydrated")
 
     def test_hydration_transport_failure_propagates_as_none(self):
         held = _task_node(1, ["kraken-task", "needs-decision"])
@@ -1485,14 +1491,14 @@ class ExpiryCountTests(unittest.TestCase):
     stolen, read off the comment window the hydration pass filled."""
 
     def test_counts_only_lease_expired_markers(self):
-        node = _task_node(1, ["kraken-task"], comments=[
+        task = _task_node(1, ["kraken-task"], comments=[
             "> prose\n" + expired(), clm("w1"), stale("something else"),
             "operator reply", expired(previous="w2"),
         ])
-        self.assertEqual(kraken.expiry_count(node), 2)
+        self.assertEqual(task.expiries, 2)
 
     def test_a_clean_thread_counts_zero(self):
-        self.assertEqual(kraken.expiry_count(_task_node(1, ["kraken-task"])), 0)
+        self.assertEqual(_task_node(1, ["kraken-task"]).expiries, 0)
 
 
 class ReconcilerPlanTests(unittest.TestCase):
@@ -1643,16 +1649,16 @@ class ReconcilerApplyTests(unittest.TestCase):
 
     def test_project_reconcile_folds_the_plan_into_the_read(self):
         # The drain must see the state it just repaired without re-fetching it.
-        nodes = [_task_node(1, ["kraken-task", "in-progress"]),
+        tasks = [_task_node(1, ["kraken-task", "in-progress"]),
                  _task_node(5, ["kraken-task"])]
         leases = _leases(i1=10, i5=10, i6=10)
         plan = [{"rule": "reclaim", "issue": 1, "reason": "x", "held": True,
                  "gens": [1]},
                 {"rule": "orphan-lock", "issue": 6, "reason": "x", "gens": [1]}]
-        kraken.project_reconcile(plan, nodes, leases)
+        kraken.project_reconcile(plan, tasks, leases)
         self.assertEqual(sorted(leases), [5],
                          "reclaimed/orphan leases must be dropped")
-        labels = {n["number"]: set(kraken.label_names_of(n)) for n in nodes}
+        labels = {t.number: t.labels for t in tasks}
         self.assertEqual(labels[1], {"kraken-task", "needs-decision"})
         # #5's live lease is untouched, badge or no badge: the fold mirrors the
         # writes, and protocol/7 plans no label write for it.
