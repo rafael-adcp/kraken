@@ -12,17 +12,12 @@ import time
 from typing import Callable, Sequence
 
 from .contract import (
-    CommentRecord, CommitMeta, EXIT_OK, EXIT_TRANSPORT, Epoch, Issue, Json,
-    Node
+    CommentRecord, CommitMeta, EXIT_OK, EXIT_TRANSPORT, Epoch, Json
 )
 from .comments import parse_marker
 from .transport import Api
 from .lease import Lease, live_leases
-from .queue import (
-    Queue, QueueRead, claim_meta_of,
-    is_empty_section, label_names_of, project_names_of, requeued_labels,
-    section_body
-)
+from .queue import Queue, QueueRead, Task, claim_meta_of
 from .render import render_status
 
 # --- subcommand: status ------------------------------------------------------
@@ -118,7 +113,7 @@ def pr_is_merged(api: Api, pr_url: str) -> bool | None:
             or str(data.get("state", "")).upper() == "MERGED")
 
 
-def queue_hygiene(nodes: Sequence[Node], project: str = "") -> list[Json]:
+def queue_hygiene(tasks: Sequence[Task], project: str = "") -> list[Json]:
     """The queue entries that are dead on arrival, read off the walk the console
     already performed (PROTOCOL.md §2.1): no `project:<name>` label (invisible to
     every worker), or an empty/absent Goal or Acceptance section (a worker claims
@@ -127,26 +122,19 @@ def queue_hygiene(nodes: Sequence[Node], project: str = "") -> list[Json]:
     This is the read-side twin of the arrival-time validator: the same three
     checks, the same wording, decided from the issue bodies the queue walk
     already carries — so it costs no request of its own and needs nothing running
-    in the coordination repo.
+    in the coordination repo. What is missing from ONE task is `Task.missing`;
+    this is the scope and the ordering around it.
 
     A `project` scope filters tasks that HAVE a project label, but never hides a
     task that has none: belonging to no project, it is exactly what the scope
     would bury, and it is the failure this check exists to surface."""
     out = []
-    for node in sorted(nodes, key=lambda n: (n.get("createdAt", ""), n.get("number", 0))):
-        projects = project_names_of(node)
-        if projects and project and project not in projects:
+    for task in sorted(tasks, key=lambda t: (t.created, t.number)):
+        if task.projects and project and project not in task.projects:
             continue
-        body = node.get("body") or ""
-        missing = []
-        if not projects:
-            missing.append("project label")
-        if is_empty_section(section_body(body, "Goal")):
-            missing.append("Goal")
-        if is_empty_section(section_body(body, "Acceptance")):
-            missing.append("Acceptance")
+        missing = task.missing
         if missing:
-            out.append({"number": node["number"], "title": node.get("title", ""),
+            out.append({"number": task.number, "title": task.title,
                         "missing": missing})
     return out
 
@@ -184,28 +172,26 @@ class StatusReport:
         # case it reports — a task carrying no project label at all — is
         # precisely the one a project scope would hide, since the task belongs
         # to no project.
-        hygiene = queue_hygiene(read.nodes, self.project)
+        hygiene = queue_hygiene(read.tasks, self.project)
         live = live_leases(read.leases)
         review, decision, in_flight = [], [], []
 
-        for node in self._scoped(read.nodes):
+        for task in self._scoped(read.tasks):
             # The console reads the queue the way a worker does (§6): a task
             # whose operator has already replied is back in the queue, so it
             # must not keep sitting in the review or decision list waiting for a
             # call already made.
-            labels = [l for l in label_names_of(node)
-                      if l not in requeued_labels(node, live)]
+            labels = task.labels - set(task.requeued(live))
             if "awaiting-merge" in labels:
-                row = self._reviewed(node)
+                row = self._reviewed(task)
                 if row is None:
                     return None
                 review.append(row)
             elif "needs-decision" in labels:
-                decision.append({"number": node["number"],
-                                 "title": node.get("title", "")})
-            elif node["number"] in read.leases:
+                decision.append({"number": task.number, "title": task.title})
+            elif task.number in read.leases:
                 in_flight.append(self._in_flight(
-                    node, read.leases[node["number"]], read.commit_meta))
+                    task, read.leases[task.number], read.commit_meta))
 
         projects = self._projects()
         if projects is None:
@@ -223,19 +209,18 @@ class StatusReport:
             "projects": projects,
         }
 
-    def _scoped(self, nodes: Sequence[Node]) -> list[Node]:
+    def _scoped(self, tasks: Sequence[Task]) -> list[Task]:
         """The tasks this report covers, oldest first — the project scope applied
         and the order the console prints in."""
         if self.project:
-            nodes = [n for n in nodes if self.project in project_names_of(n)]
-        return sorted(nodes,
-                      key=lambda n: (n.get("createdAt", ""), n.get("number", 0)))
+            tasks = [t for t in tasks if self.project in t.projects]
+        return sorted(tasks, key=lambda t: (t.created, t.number))
 
-    def _reviewed(self, node: Node) -> Json | None:
+    def _reviewed(self, task: Task) -> Json | None:
         """One awaiting-merge row: the delivered PR link, where it came from, and
         whether it has already been merged (which makes the still-open task an
         orphan). None on a transport failure — the thread read or the PR read."""
-        records = self.api.comment_records(node["number"])
+        records = self.api.comment_records(task.number)
         if records is None:
             return None
         pr_url, pr_source = parse_pr_url(records)
@@ -250,11 +235,11 @@ class StatusReport:
             # flagged an orphan — pr_merged already returns False for it — but
             # the operator should still see it wasn't actually checked.
             merge_state_unknown = parse_github_pr_url(pr_url) is None
-        return {"number": node["number"], "title": node.get("title", ""),
+        return {"number": task.number, "title": task.title,
                 "pr_url": pr_url, "pr_source": pr_source, "orphan": orphan,
                 "merge_state_unknown": merge_state_unknown}
 
-    def _in_flight(self, node: Node, lease: Lease,
+    def _in_flight(self, task: Task, lease: Lease,
                    commit_meta: CommitMeta) -> Json:
         """One in-flight row, keyed on the LEASE and never the label (§3): the
         label is written for the human reading the issue list and nothing repairs
@@ -267,7 +252,7 @@ class StatusReport:
         loud — a lease due to expire in a minute looks exactly like one being
         renewed, and only the operator can tell which of their workers is alive."""
         worker, msg, anchor = claim_meta_of(lease.sha, commit_meta)
-        return {"number": node["number"], "title": node.get("title", ""),
+        return {"number": task.number, "title": task.title,
                 "worker": worker, "heartbeat_anchor": anchor,
                 "heartbeat_age_seconds": lease.age, "heartbeat_msg": msg,
                 "stale": lease.expired}

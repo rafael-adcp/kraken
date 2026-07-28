@@ -23,7 +23,7 @@ from .lease import (
     live_leases, refuse_second_claim, write_claim_state
 )
 from .refs import Refs
-from .queue import Queue, requeued_labels
+from .queue import Queue
 from .reconcile import apply_reconcile, project_reconcile, reconcile_plan
 
 # --- subcommand: claim -------------------------------------------------------
@@ -316,7 +316,7 @@ def acquire_next(api: Api, project: str, worker: Worker,
     if read is None:
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)
-    nodes, leases = read.nodes, read.leases
+    leases = read.leases
 
     # Reconcile before classifying (PROTOCOL.md §6). A dead worker's lease
     # obstructs exactly one party — the next worker who wants to claim — and that
@@ -325,29 +325,30 @@ def acquire_next(api: Api, project: str, worker: Worker,
     # extra, and an expired lease costs no write at all: it is simply not held,
     # and the claim below steals it. The pass is repo-wide (not project-scoped)
     # because a lock is repo-wide, exactly like the cron it replaces.
-    plan = reconcile_plan(nodes, leases)
+    plan = reconcile_plan(read.tasks, leases)
     if plan:
         if apply_reconcile(api, plan, worker) is None:
             # Writes of ours may have half-landed — same state-unknown rule as a
             # failed claim: re-check before retrying, never push on.
             diag("claim-next: gh-failure stage=reconcile — state unknown, re-check")
             return (EXIT_TRANSPORT, None)
-        project_reconcile(plan, nodes, leases)
+        project_reconcile(plan, read.tasks, leases)
 
     rows = queue.candidates(project, read=read)
     if rows is None:
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)
 
-    by_number = {n["number"]: n for n in nodes}
     live = live_leases(leases)
     for cand in rows:  # priority-first, then FIFO
         if not cand.startable:
             continue
-        # Re-derive the requeue verdict from the same node the filter used — a
+        # Re-derive the requeue verdict from the same task the filter used — a
         # pure call, no request — so the guard accepts a task an operator reply
-        # has already requeued instead of refusing what was just offered.
-        allow_held = requeued_labels(by_number[cand.number], live)
+        # has already requeued instead of refusing what was just offered. The
+        # candidate carries that task, so this needs no second index over the
+        # queue read.
+        allow_held = cand.task.requeued(live)
         # Hand the claim the lease this read already saw: it decides which
         # generation the CAS starts from, and whether this is a steal at all.
         rc = claim_step(api, cand.number, worker, allow_held=allow_held,

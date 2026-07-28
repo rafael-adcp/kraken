@@ -8,13 +8,13 @@ import sys
 from typing import Any, Callable, Sequence
 
 from .contract import (
-    EXIT_OK, EXIT_TRANSPORT, Issue, Json, Node, ReconcileAction, Worker, diag
+    EXIT_OK, EXIT_TRANSPORT, Issue, Json, ReconcileAction, Worker, diag
 )
-from .comments import compose_comment, parse_marker
+from .comments import compose_comment
 from .transport import Api
 from .lease import LEASE_EXPIRY_ESCALATE, Lease
 from .refs import Refs
-from .queue import Queue, comment_nodes_of, label_names_of
+from .queue import Queue, Task
 
 # --- coordination-repo subcommands -------------------------------------------
 # The logic-bearing coordination passes (reconcile, validate-task) live here
@@ -63,25 +63,8 @@ def stale_claim_body(worker: Worker, reason: str) -> str:
     )
 
 
-def expiry_count(node: Node) -> int:
-    """How many times this task's lease has already expired and been stolen —
-    counted from the `lease-expired` markers each steal leaves (§5). Only reached
-    for a task whose lease EXPIRED, which is exactly what makes the task one the
-    hydration pass filled (see comment_hungry), so the count reads a window that
-    is already in hand; a window that has scrolled past the oldest steals
-    undercounts, which errs toward giving the task another worker rather than
-    escalating early."""
-    total = 0
-    for rec in comment_nodes_of(node):
-        for line in (rec.get("body") or "").split("\n"):
-            payload = parse_marker(line)
-            if payload and payload.get("type") == "lease-expired":
-                total += 1
-    return total
-
-
 def reconcile_plan(
-    nodes: Sequence[Node], leases: dict[Issue, Lease],
+    tasks: Sequence[Task], leases: dict[Issue, Lease],
     max_expiries: int = LEASE_EXPIRY_ESCALATE,
 ) -> list[ReconcileAction]:
     """The reconciler's decision as a PURE function of one queue read — no
@@ -108,7 +91,7 @@ def reconcile_plan(
     repair the reader owes anyone, and the next transition on the task overwrites
     it anyway.
 
-    `nodes` is the open-kraken-task walk (repo-wide, before any project filter),
+    `tasks` is the open-kraken-task walk (repo-wide, before any project filter),
     so rule 1 needs no per-ref issue read: a ref on an issue absent from that
     walk is a ref on an issue that is closed, or no longer a task at all —
     either way it holds a lock over nothing. Nothing on the issue timeline
@@ -118,23 +101,21 @@ def reconcile_plan(
     Returns a list of `{"rule", "issue", "reason"}` actions ordered by rule then
     issue number; an empty list means every lease is one a worker is entitled to
     hold (the overwhelmingly common case, and it costs zero writes)."""
-    open_labels = {n["number"]: set(label_names_of(n)) for n in nodes}
-    by_number = {n["number"]: n for n in nodes}
+    by_number = {task.number: task for task in tasks}
     plan = []
 
     # Every rule is keyed on a lease, so the walk is over the refs — a task with
     # no ref has nothing for this pass to repair, whatever labels it wears.
     for num in sorted(leases):
-        labels = open_labels.get(num)
-        if (labels is None or "needs-decision" in labels
-                or "awaiting-merge" in labels):
+        task = by_number.get(num)
+        if task is None or task.held:
             plan.append({"rule": "orphan-lock", "issue": num,
                          "reason": "the task already left the claim",
                          "gens": list(leases[num].gens)})
             continue
 
         if leases[num].expired:
-            expiries = expiry_count(by_number[num])
+            expiries = task.expiries
             if expiries >= max_expiries:
                 plan.append({"rule": "reclaim", "issue": num,
                              # The escalation writes needs-decision, and clears
@@ -142,7 +123,7 @@ def reconcile_plan(
                              # write-only does not mean write-and-forget.
                              "reason": f"the lease expired {expiries} times and "
                                        "no worker has finished the task",
-                             "held": "in-progress" in labels,
+                             "held": "in-progress" in task.labels,
                              "gens": list(leases[num].gens)})
             # Below the threshold: not held, not repaired — stolen by the claim.
 
@@ -190,23 +171,27 @@ def apply_reconcile(api: Api, plan: Sequence[ReconcileAction],
     return counts
 
 
-def project_reconcile(plan: Sequence[ReconcileAction], nodes: list[Node],
+def project_reconcile(plan: Sequence[ReconcileAction], tasks: list[Task],
                       leases: dict[Issue, Lease]) -> None:
     """Fold an APPLIED plan back into the in-memory queue read, in place, so the
     drain that just reconciled classifies the reconciled state without paying for
     a second fetch. Mirrors exactly what apply_reconcile wrote — nothing more:
-    the leases it deleted, and the one label swap a reclaim performs."""
-    by_number = {n["number"]: n for n in nodes}
+    the leases it deleted, and the one label swap a reclaim performs.
+
+    It used to re-encode that label swap as GraphQL — `{"nodes": [{"name": …}]}`
+    — because the next reader would decode it again on the way out. `Task` owns
+    the decoded set, so the fold is `task.reclaim()` and the wire shape never
+    reappears above the walk."""
+    by_number = {task.number: task for task in tasks}
     for action in plan:
         rule, num = action["rule"], action["issue"]
         if rule in ("orphan-lock", "reclaim"):
             leases.pop(num, None)
-        node = by_number.get(num)
-        if node is None:
+        task = by_number.get(num)
+        if task is None:
             continue
         if rule == "reclaim":
-            labels = (set(label_names_of(node)) - {"in-progress"}) | {"needs-decision"}
-            node["labels"] = {"nodes": [{"name": n} for n in sorted(labels)]}
+            task.reclaim()
 
 
 def reconcile_pass(api: Api, worker: Worker, ttl: int | None = None, *,
@@ -223,9 +208,9 @@ def reconcile_pass(api: Api, worker: Worker, ttl: int | None = None, *,
     if got is None:
         print("reap: gh-failure stage=list", file=sys.stderr)
         return (EXIT_TRANSPORT, None)
-    nodes, leases = got.nodes, got.leases
+    leases = got.leases
 
-    plan = reconcile_plan(nodes, leases)
+    plan = reconcile_plan(got.tasks, leases)
     counts = apply_reconcile(api, plan, worker)
     if counts is None:
         return (EXIT_TRANSPORT, None)
