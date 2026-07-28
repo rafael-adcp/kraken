@@ -17,13 +17,12 @@ from .comments import parse_marker
 
 # --- the lease: how long a claim ref holds -----------------------------------
 #
-# Through protocol/5 the claim ref was a lock that never expired, and repairing a
-# dead worker's claim was a threshold measured in HOURS. Under protocol/6 it is a
-# LEASE: the ref's commit date is the lease timestamp, the TTL below is how long
-# that timestamp holds, and the party that applies the expiry is the READER —
-# no scheduled job, no new state, no extra request (the date is already in hand
-# from the queue read). Recovery from a dead worker therefore takes at most one
-# TTL, in every harness, with nothing installed.
+# The claim ref is a LEASE, not a lock that holds forever: the ref's commit date
+# is the lease timestamp, the TTL below is how long that timestamp holds, and the
+# party that applies the expiry is the READER — no scheduled job, no new state,
+# no extra request (the date is already in hand from the queue read). Recovery
+# from a dead worker therefore takes at most one TTL, in every harness, with
+# nothing installed.
 
 # The lease TTL in seconds. Minutes, not hours: this is the worst-case time a
 # dead worker's task sits unavailable. It is bounded below by what a LIVE worker
@@ -133,8 +132,8 @@ class Lease:
         `Refs.head` reports ownership and the raw clock but knows no TTL, so it
         leaves the verdict open; this is where the verdict is made. `lease_state`
         makes the same one for a whole queue read, through here, so a single
-        probe's expiry rule and the queue's cannot drift — they used to be two
-        copies of the arithmetic that a docstring had to reconcile."""
+        probe's expiry rule and the queue's cannot drift into two copies of the
+        arithmetic."""
         if not self.present:
             return self
         age = None if self.epoch is None else max(0, int(now - self.epoch))

@@ -49,24 +49,21 @@ COMMENT_HYDRATE_CHUNK = 50
 
 
 # --- the requeue derivation (PROTOCOL.md §6) ---------------------------------
-# When the operator answers a held task, the task rejoins the queue. Through
-# protocol/4 that was a MUTATION: a workflow watched the comment stream and
-# removed the holding label. But "an operator replied after the last worker
-# comment" is a property of the thread, readable at any time — so protocol/5
-# DERIVES it on the read instead. No workflow, no label write, and no window
-# where the queue disagrees with the thread.
+# When the operator answers a held task, the task rejoins the queue. "An operator
+# replied after the last worker comment" is a property of the thread, readable at
+# any time, so it is DERIVED on the read rather than mutated onto the task. No
+# workflow, no label write, and no window where the queue disagrees with the
+# thread.
 #
-# The derivation reads a trailing comment window (QUEUE_COMMENT_WINDOW). It used
-# to ride the queue walk, which made it free per task but charged every task for
-# it; it is now hydrated for the held/leased handful instead (see
-# hydrate_comment_windows), which is the same free on an idle queue and O(held)
-# rather than O(queue) on a busy one.
+# The derivation reads a trailing comment window (QUEUE_COMMENT_WINDOW), hydrated
+# for the held/leased handful rather than carried by the queue walk (see
+# `Queue.hydrate`): free on an idle queue, and O(held) rather than O(queue) on a
+# busy one.
 
 # The labels a reply can lift are exactly the labels that hold (HELD_LABELS):
-# both are operator-facing states, and answering one is what ends it. Under
-# protocol/6 this was a second, narrower tuple because `in-progress` held without
-# being requeueable; protocol/7 made that label write-only, so the two sets
-# coincide and one name is enough.
+# both are operator-facing states, and answering one is what ends it. There is no
+# third, narrower set — `in-progress` is write-only (§3) and holds nothing, so
+# one name is enough.
 
 
 def is_worker_comment(body: str) -> bool:
@@ -83,8 +80,8 @@ def is_worker_comment(body: str) -> bool:
     A comment whose FIRST line opens with the attribution disclaimer also counts,
     as a back-compat fallback for legacy threads and any comment written before
     `note` gained its marker (the prefix is derived from the DISCLAIMER constant,
-    never a second copy). The disclaimer stays the human-facing attribution but is
-    no longer load-bearing for requeue.
+    never a second copy). The disclaimer stays the human-facing attribution; the
+    marker, not the disclaimer, is what requeue leans on.
 
     Accepted edge (§4): an operator who pastes a raw kraken marker into a reply is
     read as a worker and will not requeue — the same class of edge as an operator
@@ -100,8 +97,8 @@ def is_worker_comment(body: str) -> bool:
 def has_requeue_directive(body: str) -> bool:
     """Whether a comment carries an EXPLICIT, STRUCTURED requeue directive — the
     only thing that bounces a DELIVERED (awaiting-merge) task back for rework, so
-    a prose sentence merely starting a line with "requeue:" no longer bounces a
-    ready branch by accident. Two accepted forms: a protocol/3
+    a prose sentence merely starting a line with "requeue:" cannot bounce a ready
+    branch by accident. Two accepted forms: a protocol/3
     `<!-- kraken {"type":"requeue"} -->` marker, or a standalone directive line
     whose only content is `requeue`/`requeue:` (case-insensitive)."""
     lines = body.split("\n")
@@ -193,8 +190,7 @@ NO_RESPONSE_PLACEHOLDER = "_No response_"
 def section_body(body: str, heading: str) -> str:
     """The trimmed content under `### HEADING` up to the next `### ` heading (or
     EOF). A hand-written issue lacking the heading yields nothing; an issue-form
-    field left blank renders as the literal `_No response_`. Mirrors the awk the
-    validate-task workflow used to carry."""
+    field left blank renders as the literal `_No response_`."""
     grab = False
     out = []
     target = "### " + heading
@@ -227,17 +223,10 @@ class Task:
     """One open kraken-task issue, as the queue walk returned it — and the only
     thing above the walk that knows what a GraphQL issue node looks like.
 
-    It was a bare `dict` passed everywhere, with a cluster of module-level
-    functions whose single argument was always that same hash: `label_names_of`,
-    `project_names_of`, `comment_nodes_of`, `depends_on_ref`, `node_state`,
-    `requeued_labels`, `expiry_count`, and the per-task half of `queue_hygiene`.
-    Seven readers in four modules, each reaching into the wire format by key.
-
-    The wire shape is decoded ONCE, here, in the constructor. That is what makes
-    the mutations honest: `reclaim` edits a label set, and `hydrate` fills a
-    comment list — neither rebuilds `{"nodes": [{"name": …}]}` to be read back by
-    the next reader, which is what folding a repair into a queue read used to
-    cost.
+    The wire shape is decoded ONCE, here, in the constructor. That is what keeps
+    the mutations honest: `reclaim` edits a label set and `hydrate` fills a
+    comment list, neither rebuilding `{"nodes": [{"name": …}]}` for the next
+    reader to decode again.
 
     Mutable on purpose, and only in the two ways a queue read actually mutates a
     task: comments arrive after the walk (`hydrate`), and an applied reconcile is
@@ -388,16 +377,10 @@ class Task:
 class Candidate:
     """One task the startable filter classified: the task, and the verdict.
 
-    It used to be a positional tuple whose LENGTH depended on a boolean flag —
-    five elements with `include_body=True`, four without — so callers read it as
-    `for number, title, _created, state, body in rows` and the filter itself
-    wrote a verdict back by magic index (`rows[idx][3] = "held"`). The `Lease` in
-    this same package got an object; the candidate had not.
-
-    It then became a dataclass that COPIED four fields off the node — which is
-    why `acquire_next` had to keep a `{number: node}` index alongside the
-    candidate list to reach the requeue derivation. Carrying the task instead
-    costs nothing and deletes that second index: `cand.task.requeued(live)`.
+    It carries the whole `Task` rather than a copy of a few of its fields, so a
+    reader that needs more than the verdict — `acquire_next` reaching the requeue
+    derivation, say — asks `cand.task` instead of keeping a second
+    `{number: node}` index beside the candidate list.
 
     `state` is None only while the classification is still waiting on the batched
     `depends-on` resolution; every candidate `Queue.candidates` returns has one."""
@@ -461,13 +444,11 @@ class QueueRead:
     """One queue read, whole: every open `Task`, the lease state of every claim
     ref, and the commit meta those leases were decoded from.
 
-    The commit meta used to be dropped on the floor — `read` answered
-    `(nodes, leases)` — and that cost far more than it saved. `status` needs it
-    to decode each holder's worker, message and heartbeat anchor, so it could
-    not use `read` at all: it re-ran the same five-step sequence by hand, with
-    five None checks and five diagnostics of its own, in another module. That is
-    the two-element tuple's classic bill — it has nowhere to grow, so the third
-    value comes back as duplicated orchestration somewhere else."""
+    The commit meta is carried rather than dropped because `status` decodes each
+    holder's worker, message and heartbeat anchor out of it. Without it on the
+    read, the console cannot use `read` at all and re-runs the same five-step
+    fetch by hand, with five None checks and five diagnostics of its own, in
+    another module."""
 
     tasks: list[Task]
     leases: dict[Issue, Lease]
@@ -484,14 +465,13 @@ class Queue:
     walk, the lease state that comes with it, comment hydration, and the
     startable filter.
 
-    Six functions took `api` first and are the two halves of one job — reading
-    the queue and deciding which of it is startable. `acquire_next` had to inject
-    two of them separately to stay testable; one collaborator replaces both.
+    One collaborator for the whole job — reading the queue and deciding which of
+    it is startable — so `acquire_next` injects a single object to stay testable.
 
     The DECISIONS made on what is read — the requeue derivation, the hungry set,
     the section parsing — stay module-level functions: they are pure, they touch
-    no transport, and they are tested as such. The decisions about ONE task moved
-    onto `Task`, which is what the walk now returns."""
+    no transport, and they are tested as such. The decisions about ONE task
+    belong to `Task`, which is what the walk returns."""
 
     def __init__(self, api: Api):
         self.api = api
@@ -508,11 +488,11 @@ class Queue:
 
         Deliberately does NOT carry comments. This walk is the hot read: every
         worker's watcher runs it once a minute, so a trailing comment window on every
-        node was the queue's first scaling wall — a 200-task queue shipped 5,000
-        comment bodies per poll, per worker, to answer a question about a handful of
-        them. Both readers that need comments (the requeue derivation and
-        `Task.expiries`) only ever ask about tasks that are HELD or LEASED, so the
-        window is fetched for exactly those — see `hydrate`."""
+        node is the queue's scaling wall — a 200-task queue would ship 5,000 comment
+        bodies per poll, per worker, to answer a question about a handful of them.
+        Both readers that need comments (the requeue derivation and `Task.expiries`)
+        only ever ask about tasks that are HELD or LEASED, so the window is fetched
+        for exactly those — see `hydrate`."""
         owner, name = self.api.repo.split("/", 1)
         tasks = []
         cursor = None
@@ -545,8 +525,8 @@ class Queue:
 
         Resolving the lease costs one extra batched call — and only when a ref
         actually exists: `resolve_commit_meta` answers `{}` for an empty ref list
-        without a request, so an idle queue reads exactly as cheaply as it did under
-        protocol/5, and a busy one pays O(1) in the number of claims, never O(N).
+        without a request, so an idle queue pays nothing for leases and a busy one
+        pays O(1) in the number of claims, never O(N).
 
         The comment hydration obeys the same rule and for the same reason: the leases
         have to be known before the hungry set can be (a live lease outranks the
@@ -620,8 +600,8 @@ class Queue:
         place, and answer the tasks back — or None on transport failure, which the
         callers propagate exactly like a failed walk.
 
-        This is the second half of the split that took the comment window off the hot
-        read (see open_tasks): the walk answers "what is in the queue" for every
+        This is the second half of the split that keeps the comment window off the
+        hot read (see open_tasks): the walk answers "what is in the queue" for every
         task, and this answers "what does the thread say" for the few whose answer
         depends on it. An idle queue hydrates nothing and pays nothing."""
         hungry = comment_hungry(tasks, leases)

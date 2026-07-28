@@ -96,8 +96,8 @@ def pr_is_merged(api: Api, pr_url: str) -> bool | None:
     """Whether a delivery PR is already merged — the orphan heuristic's only
     signal. Returns True/False; False also covers a delivery URL kraken cannot
     evaluate (not a github.com pull-request URL) — "not confirmed merged",
-    never guessed, so a legitimate non-GitHub delivery no longer bricks the
-    whole status read. None is reserved for an actual gh transport failure on a
+    never guessed, so a legitimate non-GitHub delivery cannot brick the whole
+    status read. None is reserved for an actual gh transport failure on a
     github.com PR URL it did understand — `StatusReport` still propagates that
     as the stage=read failure it actually is. The web `…/pull/N` URL recorded
     in the delivery marker maps to the REST `pulls/N` endpoint, whose
@@ -268,8 +268,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     now = time.time()
     # One queue read, the same one a drain performs: nodes, the lease state of
     # every claim ref, and the commit meta the holders are decoded from. The
-    # console used to run those four steps itself, with four None checks of its
-    # own, only because `read` threw the commit meta away.
+    # console shares it rather than re-running those steps with None checks of
+    # its own, which is why `read` carries the commit meta (see QueueRead).
     read = Queue(api).read(now=now)
     if read is None:
         print("status: gh-failure stage=list", file=sys.stderr)

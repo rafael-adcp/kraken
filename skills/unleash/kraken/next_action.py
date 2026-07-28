@@ -127,14 +127,11 @@ def task_brief(title: str, body: str) -> Json:
 class NextActionEnvelope:
     """Builds next-action's answers for ONE worker draining ONE repo.
 
-    Two things were being said twice at every call site. The repo, the worker
-    and the script path are invariant for the whole call — they were three of
-    eleven arguments, repeated at all eight places an answer is returned. And
-    every site paired its envelope with an exit code written out by hand, when
-    `NEXT_ACTION_EXIT` already maps action to code: six of the eight restated a
-    row of that table, which is a drift waiting to happen rather than a
-    difference. So the context goes in the constructor, and `answer` DERIVES the
-    code from the action instead of being told it.
+    The repo, the worker and the script path are invariant for the whole call, so
+    they live in the constructor rather than trailing every answer. And `answer`
+    DERIVES the exit code from the action through `NEXT_ACTION_EXIT` instead of
+    being told it: a hand-written code beside each envelope is a copy of a row of
+    that table, which drifts rather than differs.
 
     `action` is the verdict, `reason` a stable machine slug for it, and `detail`
     the human sentence — so a consumer branches on the slug and a human reads
@@ -285,10 +282,9 @@ class NextAction:
     """One `next-action` call: resume the claim this worker already holds, or
     acquire the next task, and answer as an envelope.
 
-    `_resume` and the acquisition were two functions taking the same six
-    arguments — api, project, worker, ttl, now, script — and each built its own
-    envelope factory from them. That repetition is the object: the six are the
-    context of one call, not parameters of two."""
+    Resuming and acquiring share the same context — api, project, worker, ttl,
+    now, script — and the same envelope factory built from it. That context is
+    what this object is: it belongs to one call, not to each half of it."""
 
     def __init__(self, api: Api, project: str, worker: Worker, *,
                  ttl: int | None = None, now: Epoch | None = None,
@@ -322,8 +318,7 @@ class NextAction:
         if verdict == "resolved":
             # The claim is over. Drop the stale scratch file so the
             # one-task-at-a-time guard stops refusing on it, and let the caller
-            # drain on. This is the self-heal that used to need an operator
-            # running `release` by hand.
+            # drain on — the self-heal that saves the operator a hand `release`.
             clear_claim_state(self.worker)
             diag(f"next-action: claim resolved issue={issue} ({detail['reason']}) "
                  "— continuing the drain")

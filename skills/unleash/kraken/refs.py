@@ -93,9 +93,9 @@ class Refs:
     """One repo's claim-ref namespace: the generation ladder, the CAS that
     arbitrates it, and the lease it carries (PROTOCOL.md §4/§5).
 
-    Twelve functions took `api` as their first argument — the largest such
-    cluster in the tree, and all of them about the same thing. That is not a
-    parameter, it is the client this gateway talks through, so it lives here.
+    `api` is not a parameter of each ladder operation, it is the client this
+    gateway talks through, so it lives on the object instead of leading a dozen
+    signatures.
 
     Cheap to construct (`Refs(api)`), on purpose: a caller that already holds an
     `api` makes one where it needs it, and nothing has to be threaded through a
@@ -308,9 +308,8 @@ class Refs:
 
         The refusal is REPORTED, not printed: a gateway that writes to stdout is a
         hidden dependency on the output channel, and `next-action` owns stdout for
-        its JSON envelope. Returning the sentence also drops the `command`
-        parameter this took only to interpolate it — information that flowed down
-        from the edge just to come back formatted.
+        its JSON envelope. Handing the sentence back also means this needs no
+        `command` parameter to interpolate — the caller already knows its own name.
 
         Ownership is the HIGHEST generation: a thief takes the lease by creating the
         one above ours, so our own ref still existing proves nothing — what proves it
