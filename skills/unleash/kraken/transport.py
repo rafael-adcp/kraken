@@ -80,8 +80,8 @@ class Api:
     isolates the one thing here that is genuinely external and genuinely
     vulnerable — the network — so the code above it depends on an argument it
     is handed rather than on a global it reaches for. And it gives `repo` a
-    home: it was the first parameter of thirty-odd functions, which is what a
-    piece of state looks like when it has nowhere to live.
+    home: it is the context every call shares, not the first parameter of each
+    of them.
 
     A test builds a stand-in and passes it in. Nothing rebinds a module
     attribute to fake a request, so no test can leak a fake into another by

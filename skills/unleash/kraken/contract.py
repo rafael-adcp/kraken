@@ -91,10 +91,10 @@ class ReconcileAction(TypedDict, total=False):
 #
 # `in-progress` is deliberately absent. It is the claim ref's projection, and a
 # projection read by a decision is a second source of truth that then has to be
-# reconciled with the first. Under protocol/7 it is WRITE-ONLY: written for the
-# human reading the issue list, never consulted by the claim guard, the startable
-# filter, the requeue derivation or the console. The lease alone says whether
-# somebody is working, so a label that lags it costs nothing but a stale badge.
+# reconciled with the first. It is WRITE-ONLY: written for the human reading the
+# issue list, never consulted by the claim guard, the startable filter, the
+# requeue derivation or the console. The lease alone says whether somebody is
+# working, so a label that lags it costs nothing but a stale badge.
 HELD_LABELS = ("needs-decision", "awaiting-merge")
 
 # A scheduling preference, not a state: a startable task carrying this label is
@@ -103,20 +103,18 @@ HELD_LABELS = ("needs-decision", "awaiting-merge")
 # falls back to pure FIFO, so honoring it needs no PROTOCOL_VERSION bump.
 PRIORITY_LABEL = "priority:high"
 
-# The wire contract this program speaks (PROTOCOL.md): protocol/4 arbitrates the
-# claim on a git-ref CAS and anchors liveness to the claim ref's commit date;
-# protocol/5 moves the reconcile of that clock onto the READER (§6), so a
-# conforming coordination repo runs no scheduled job of its own; protocol/6 gives
-# that clock an expiry — the claim ref is a LEASE, and a reader that finds one
-# older than the TTL steals it instead of treating it as held; protocol/7 makes
-# the `in-progress` label WRITE-ONLY, so the lease is the only thing any decision
-# reads and the two can no longer disagree.
+# The wire contract this program speaks (PROTOCOL.md). The claim is arbitrated by
+# a git-ref CAS, and that ref is a LEASE: its commit date is the timestamp, and a
+# reader that finds one older than the TTL steals it instead of treating it as
+# held. The READER applies that expiry (§6), so a conforming coordination repo
+# runs no scheduled job of its own. The lease is the only thing any decision
+# reads — see HELD_LABELS for why `in-progress` is not.
 PROTOCOL_VERSION = 7
 
 # Where the skill lives on disk. This file sits one level INSIDE the skill
 # directory (skills/unleash/kraken/contract.py), so the anchor is the parent of
-# the package — the same path the single-file module used to resolve to, which
-# is what keeps the bundled assets and the `then` commands byte-identical.
+# the package — the directory the bundled assets and the `then` commands are
+# resolved against.
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The executable a worker is told to run. The package is the implementation; the

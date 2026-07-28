@@ -13,16 +13,16 @@ from .contract import Issue, Json, Repo, Worker, plugin_version
 # A state-changing comment (or a claim ref's commit message) carries its machine
 # payload in ONE hidden HTML-comment marker, e.g.
 #     <!-- kraken {"type":"claim","worker":"env-1"} -->
-# Compact ASCII-only JSON: json.dumps avoids the CRLF/quoting/prefix hazards of
-# the old visible-line grammar, and ASCII keeps the reaper/requeue greps
-# locale-independent. Under protocol/4 markers are audit trail only — the CAS on
-# the claim ref arbitrates, never a marker.
+# Compact ASCII-only JSON: json.dumps avoids the CRLF/quoting/prefix hazards of a
+# visible-line grammar, and ASCII keeps the reaper/requeue greps
+# locale-independent. Markers are audit trail only — the CAS on the claim ref
+# arbitrates, never a marker.
 MARKER_PREFIX = "<!-- kraken "
 MARKER_SUFFIX = " -->"
 MARKER_RE = re.compile(r"<!--\s*kraken\s+(\{.*?\})\s*-->")
 
-# Every marker "type" this program emits — the protocol/4 vocabulary. `claim`
-# and `heartbeat` ride the claim ref's commit message; the rest head comments.
+# Every marker "type" this program emits. `claim` and `heartbeat` ride the claim
+# ref's commit message; the rest head comments.
 # `note` heads a free-form worker comment and changes no machine state — it
 # exists only so the comment is recognizable as worker-authored (§4).
 # `lease-expired` heads the steal's audit comment and is also COUNTED (§6's

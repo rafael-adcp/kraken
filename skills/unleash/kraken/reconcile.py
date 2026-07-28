@@ -23,36 +23,30 @@ from .queue import Queue, Task
 # with the worker side.
 
 # --- the reconciler (PROTOCOL.md §6) -----------------------------------------
-# The claim ref is the lease and its commit date the lease timestamp. Under
-# protocol/5 the READER reconciles it, not a cron in the coordination repo: a
-# dead worker's lease obstructs exactly one party — the next worker who wants to
-# claim — and there is no other observer of it, so the reconcile rides the claim
-# path (cmd_claim_next) on the queue read it already paid for. `reap` keeps the
-# same pass as an operator-side escape hatch; both go through the pure planner
-# below, so the two entry points can never drift.
+# The claim ref is the lease and its commit date the lease timestamp. The READER
+# reconciles it, not a cron in the coordination repo: a dead worker's lease
+# obstructs exactly one party — the next worker who wants to claim — and there is
+# no other observer of it, so the reconcile rides the claim path (cmd_claim_next)
+# on the queue read it already paid for. `reap` keeps the same pass as an
+# operator-side escape hatch; both go through the pure planner below, so the two
+# entry points can never drift.
 #
-# This pass has only ever got SMALLER. Protocol/6 dropped the expired lease from
-# it: an expired lease is not a repair, it is simply not held, and the claim
-# steals it (§5) at no write. Protocol/7 dropped the other half — the two rules
-# that existed to make the `in-progress` label and the leases agree (heal a
-# missing label, strip an orphan one). Nothing reads that label now (§3), so
-# there is nothing to agree WITH and no disagreement to repair.
-#
-# What is left is exactly the state the leases cannot fix on their own: a lock
-# over a task that has moved on, and a task that keeps expiring.
+# The pass repairs exactly what the leases cannot fix on their own: a lock over a
+# task that has moved on, and a task that keeps expiring. An expired lease is not
+# among them — it is not a repair, it is simply not held, and the claim steals it
+# (§5) at no write.
 
 # Who a stand-alone `reap` attributes its comments to when the operator names no
-# worker. A drain passes its own worker name instead: under protocol/5 the
-# reconciler's comments are posted by a worker's token, so they carry the §4
-# attribution disclaimer like every other worker comment.
+# worker. A drain passes its own worker name instead: the reconciler's comments
+# are posted by a worker's token, so they carry the §4 attribution disclaimer
+# like every other worker comment.
 RECONCILER_WORKER = "reconciler"
 
 
 def stale_claim_body(worker: Worker, reason: str) -> str:
     """The reconciler's reclaim comment: the attribution disclaimer, human prose,
     and the stale-claim marker (audit trail). The disclaimer is required because
-    a worker posts this now — under protocol/4 it was the coordination repo's own
-    Actions bot, which is why it used to carry none."""
+    a worker's token posts this, like every other worker comment (§4)."""
     prose = (
         f"Nobody is finishing this task ({reason}). Stealing the lease again "
         "would just burn another worker, so it needs a human call. To requeue, "
@@ -84,12 +78,10 @@ def reconcile_plan(
          nobody. Anything below the threshold is not the reconciler's business:
          the lease is simply not held, and the claim path steals it.
 
-    Both rules are about the LEASE. Under protocol/6 there were two more, both
-    about the in-progress LABEL: restore one a crashed claim never wrote, strip
-    one a crashed release never removed. Protocol/7 made that label write-only
-    (§3), so a wrong badge misleads nobody and misroutes nothing — it is not a
-    repair the reader owes anyone, and the next transition on the task overwrites
-    it anyway.
+    Both rules are about the LEASE, and none is about the in-progress LABEL: that
+    label is write-only (§3), so a wrong badge misleads nobody and misroutes
+    nothing — it is not a repair the reader owes anyone, and the next transition
+    on the task overwrites it anyway.
 
     `tasks` is the open-kraken-task walk (repo-wide, before any project filter),
     so rule 1 needs no per-ref issue read: a ref on an issue absent from that
@@ -176,12 +168,7 @@ def project_reconcile(plan: Sequence[ReconcileAction], tasks: list[Task],
     """Fold an APPLIED plan back into the in-memory queue read, in place, so the
     drain that just reconciled classifies the reconciled state without paying for
     a second fetch. Mirrors exactly what apply_reconcile wrote — nothing more:
-    the leases it deleted, and the one label swap a reclaim performs.
-
-    It used to re-encode that label swap as GraphQL — `{"nodes": [{"name": …}]}`
-    — because the next reader would decode it again on the way out. `Task` owns
-    the decoded set, so the fold is `task.reclaim()` and the wire shape never
-    reappears above the walk."""
+    the leases it deleted, and the one label swap a reclaim performs."""
     by_number = {task.number: task for task in tasks}
     for action in plan:
         rule, num = action["rule"], action["issue"]
@@ -223,12 +210,12 @@ def cmd_reap(args: argparse.Namespace) -> int:
     (leases included), then the plan. Exit 0 on success, 20 on any gh/transport
     failure.
 
-    Note what it will NOT do. It does not free an expired lease (protocol/6):
-    expiry is applied by whoever READS the queue, so an expired lease is already
-    unheld — running `reap` to "unstick" one is a no-op, and the drain that
-    claims next steals it. And it does not touch the in-progress label
-    (protocol/7): the label is write-only (§3), so a task wearing a stale one is
-    already startable and there is nothing to repair."""
+    Note what it will NOT do. It does not free an expired lease: expiry is
+    applied by whoever READS the queue, so an expired lease is already unheld —
+    running `reap` to "unstick" one is a no-op, and the drain that claims next
+    steals it. And it does not touch the in-progress label: the label is
+    write-only (§3), so a task wearing a stale one is already startable and there
+    is nothing to repair."""
     rc, counts = reconcile_pass(args.api, args.worker, args.ttl)
     if counts is None:
         return rc

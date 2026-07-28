@@ -29,9 +29,9 @@ def bundled_asset(name: str) -> str:
 
 
 # Each bundled asset init commits: (bundled filename, destination path in the
-# coordination repo, create commit message). Under protocol/5 the coordination
-# repo executes nothing, so this is a single file: the issue form that shapes a
-# task on the way in.
+# coordination repo, create commit message). The coordination repo executes
+# nothing, so this is a single file: the issue form that shapes a task on the
+# way in.
 INIT_ASSETS = (
     ("task-template.yml", ".github/ISSUE_TEMPLATE/task.yml",
      "chore: add kraken task template"),
@@ -76,9 +76,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     """Stand up (or repair) a coordination repo: verify-or-create it private,
     install the bundled assets, prune the retired ones, and upsert the canonical
     labels. Create-only: an asset that already exists is left exactly as it is,
-    hand edits included — nothing in the coordination repo is executed any more
-    (protocol/5), so a file that differs from the bundled copy is the operator's
-    business, not a hazard to police. Re-running init on an older coordination
+    hand edits included — nothing in the coordination repo is executed, so a file
+    that differs from the bundled copy is the operator's business, not a hazard
+    to police. Re-running init on an older coordination
     repo is also its MIGRATION: assets this protocol revision retired are deleted
     (OBSOLETE_ASSETS). Idempotent; touches no issues. Exit 0 on success, 20 on
     any gh/transport failure."""

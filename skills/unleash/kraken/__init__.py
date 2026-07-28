@@ -39,7 +39,7 @@ Exit codes are the contract between this program and whatever drives it:
     64  usage
 
 Everything below re-exports the package's public surface, so `import kraken`
-gives the same names the single-file module did.
+reaches every public name without knowing which module owns it.
 """
 from __future__ import annotations
 

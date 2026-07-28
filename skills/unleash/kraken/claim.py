@@ -68,11 +68,11 @@ class ClaimAttempt:
     identically every time (PROTOCOL.md §5). Shared by `claim` and `claim-next`
     so the two can never drift.
 
-    The three phases were one 124-line function taking seven arguments, which is
-    what state looks like when it has nowhere to live: they are not really
-    parameters of a call, they are what an attempt IS. Each phase is a method
-    that answers an exit code to stop with, or None to carry on; `run` sequences
-    them and owns the one success path.
+    The constructor arguments below are not really parameters of a call — they
+    are what an attempt IS, which is why they live on the object rather than
+    threading through the phases. Each phase is a method that answers an exit
+    code to stop with, or None to carry on; `run` sequences them and owns the one
+    success path.
 
     Constructor arguments:
 
@@ -124,9 +124,8 @@ class ClaimAttempt:
         """Refuse early and for free: a held task is skipped with zero writes.
 
         The guard reads two labels, not three: `in-progress` is write-only (§3),
-        so the lease below decides everything it used to. That collapses what was
-        this sequence's hardest branch — a label that held only conditionally,
-        probed mid-guard — into the plain rule the lock already stated."""
+        so the lease below is what decides whether somebody is working. No label
+        holds conditionally here, and none is probed mid-guard."""
         label_names = self.api.issue_label_names(self.issue)
         if label_names is None:
             diag(f"claim: gh-failure issue={self.issue} stage=guard")
@@ -151,11 +150,9 @@ class ClaimAttempt:
         # the lock is the whole of "somebody is working on this" (§5), including
         # in the crash window where no label has landed yet, and including when
         # the badge says otherwise. This is a LOST claim, not an unclear one:
-        # somebody owns the task. Under protocol/5 the same case surfaced by
-        # attempting the CAS and reading its 422; the generation ladder makes
-        # that attempt worse than useless — creating the next generation would
-        # SUCCEED and take a live lease — so the read answers it instead, with
-        # the same verdict.
+        # somebody owns the task. The READ has to answer it, because the CAS
+        # cannot: creating the generation above a live lease would SUCCEED and
+        # take the task out from under its holder, so there is no 422 to read.
         if self.lease.held_by_other(self.worker):
             diag(f"claim: lost-cas issue={self.issue} — another worker holds the claim ref")
             return EXIT_LOST
@@ -291,9 +288,8 @@ def acquire_next(api: Api, project: str, worker: Worker,
     `queue` and `claim_step` default to the real thing and exist so the
     ITERATION — skip-on-held, skip-on-lost, forward-only, stop-on-transport — can
     be tested against a scripted queue and scripted claim outcomes. Reading the
-    queue and filtering it used to be two separate injections; they are one
-    collaborator now, which is what `Queue` is for. Both have their own tests; a
-    caller in production passes neither."""
+    queue and filtering it are one collaborator, which is what `Queue` is for.
+    Both have their own tests; a caller in production passes neither."""
     queue = queue or Queue(api)
     claim_step = claim_step or _claim_once
     refused = refuse_second_claim(worker)
@@ -446,14 +442,10 @@ class TerminalTransition:
     is an orphan lock the reaper deletes; a freed task with nothing on its
     timeline is a task two workers can deliver.
 
-    That ordering rule is the reason this is an object. It used to be stated
-    three times, once per subcommand, and kept honest by a comment inside
-    `deliver` that named `escalate` as the authority — a protocol invariant with
-    no home. Changing the order is now one edit, and the three cannot drift.
-
-    The three also had no collaborator, only a recipe for fabricating one:
-    `Refs(api)` was rebuilt at each step of each transition. Here the gateway is
-    `self.refs`, made once.
+    That ordering rule is the reason this is an object: it is a protocol
+    invariant, stated once here rather than once per subcommand, so changing the
+    order is one edit and the three cannot drift. The ref gateway is `self.refs`,
+    made once, rather than rebuilt at each step of each transition.
 
     Diagnostics go through `diag`, so a caller that owns stdout for a machine
     payload can route them without this knowing."""
