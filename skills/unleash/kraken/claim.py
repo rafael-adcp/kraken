@@ -9,7 +9,6 @@ import dataclasses
 import json
 import os
 import sys
-import time
 from typing import Any, Callable, Sequence
 
 from .contract import (
@@ -59,8 +58,12 @@ def probe_lease_state(api: Api, issue: Issue, ttl: int) -> Lease:
     construction — the CAS that follows competes by CREATING the generation above
     the one this saw, so a holder that renewed in the meantime already took that
     generation and the challenger simply loses. This read decides whether to
-    *try*, never who wins."""
-    return Refs(api).head(issue).aged_at(time.time(), ttl)
+    *try*, never who wins.
+
+    The clock is the SERVER's (§5.1), asked for after the ref read so it is
+    anchored to the same machine that stamped the commit date it ages."""
+    head = Refs(api).head(issue)
+    return head.aged_at(api.server_now(), ttl)
 
 
 class ClaimAttempt:

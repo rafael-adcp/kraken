@@ -112,6 +112,28 @@ class KrakenConformanceTest(unittest.TestCase):
         # reads or writes the real ~/.kraken (the one-task-at-a-time guard reads
         # it). Tests may reassign self.kraken_state_dir before a run.
         self.kraken_state_dir = os.path.join(self.state, "kraken")
+        # How far the stub server's clock sits from this machine's. Zero for
+        # every test but the skew ones; see `set_server_clock`.
+        self.server_clock_offset = 0
+
+    # --- the server's clock --------------------------------------------------
+
+    def set_server_clock(self, offset_seconds):
+        """Move the stub server's clock `offset_seconds` away from this
+        machine's — positive for a server ahead of the worker, negative for one
+        behind. Every timestamp the server stamps or reports moves with it, and
+        so does every age seeded through `mk_claim_ref`, because a lease's age
+        is defined against the server's clock (PROTOCOL.md §5.1)."""
+        self.server_clock_offset = offset_seconds
+        self.knobs.set_clock_offset(offset_seconds)
+
+    def server_ago_iso(self, hours=0, seconds=0):
+        """ISO timestamp `hours`/`seconds` before the SERVER's now — the anchor
+        every seeded lease age is measured from, so a test that skews the clock
+        seeds the age it means rather than the age this machine would compute."""
+        return iso(utcnow()
+                   + timedelta(seconds=self.server_clock_offset)
+                   - timedelta(hours=hours, seconds=seconds))
 
     # --- environment ---------------------------------------------------------
 
@@ -271,8 +293,8 @@ class KrakenConformanceTest(unittest.TestCase):
         if not orphan_commit:
             self._write(os.path.join(self.state, "objects", sha + ".json"),
                         json.dumps({"message": make_marker(payload),
-                                    "committedDate": ago_iso(age_hours,
-                                                             age_seconds)}))
+                                    "committedDate": self.server_ago_iso(
+                                        age_hours, age_seconds)}))
         name = str(n) if int(gen) == 0 else "%d-%d" % (int(n), int(gen))
         self._write(os.path.join(self.state, "refs", name), sha + "\n")
         return sha

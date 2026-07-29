@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import time
 
 from .contract import (
     ClaimRecord, ENTRYPOINT, EXIT_LOST, EXIT_NONE, EXIT_NOT_CLEAR, EXIT_OK,
@@ -293,8 +292,20 @@ class NextAction:
         self.project = project
         self.worker = worker
         self.ttl = lease_ttl_seconds(ttl)
-        self.now = time.time() if now is None else now
+        self._now = now
         self.envelope = NextActionEnvelope(api.repo, worker, script)
+
+    @property
+    def now(self) -> Epoch:
+        """The clock every number in the `lease` block is computed against: the
+        SERVER's (§5.1), so `seconds_remaining` is time the holder actually has
+        rather than time minus this machine's skew.
+
+        Resolved at use, not in the constructor: `server_now` only knows the
+        server's clock once a response has been seen, and nothing has been
+        requested yet when this object is built. A test that passes an explicit
+        `now` still pins it."""
+        return self.api.server_now() if self._now is None else self._now
 
     def run(self) -> tuple[int, Envelope]:
         """Resume what is held, else acquire. Returns `(exit_code, envelope)`."""

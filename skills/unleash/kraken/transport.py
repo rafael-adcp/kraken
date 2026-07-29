@@ -4,14 +4,17 @@ Part of the kraken protocol package; see __init__.py."""
 from __future__ import annotations
 
 import base64
+import datetime
+import email.utils
 import json
 import os
 import re
 import subprocess
+import time
 import urllib.request
 from typing import Any
 
-from .contract import CommentRecord, Issue, Json, Repo, Sha
+from .contract import CommentRecord, Epoch, Issue, Json, Repo, Sha
 
 # --- transport ---------------------------------------------------------------
 # Direct HTTP over stdlib urllib, behind ONE object. `Api.request` is the single
@@ -73,6 +76,24 @@ def quote_path(segment: str) -> str:
     return urllib.parse.quote(segment, safe="")
 
 
+def parse_http_date(value: str) -> Epoch | None:
+    """An HTTP `Date` header to epoch seconds, or None when it is missing or
+    unparseable. RFC 9110 allows three spellings and `parsedate_to_datetime`
+    reads all three; a value that carries no zone is read as UTC, which is what
+    the only legal spelling ("...GMT") means anyway."""
+    if not value:
+        return None
+    try:
+        dt = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
+
+
 class Api:
     """Every GitHub call this program makes, against one coordination repo.
 
@@ -90,6 +111,9 @@ class Api:
 
     def __init__(self, repo: Repo = ""):
         self.repo = repo
+        # How far this machine's clock is from the server's, in seconds, or None
+        # until a response has been seen. See `server_now`.
+        self._clock_offset: float | None = None
 
     # --- the boundary --------------------------------------------------------
 
@@ -111,8 +135,12 @@ class Api:
             req.add_header("Authorization", "Bearer " + token)
         try:
             with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+                self._note_server_clock(resp.headers)
                 return resp.getcode(), resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
+            # An error answer is still an answer, and its Date is as good as a
+            # 2xx's — a run whose every call 404s still gets the server's clock.
+            self._note_server_clock(exc.headers)
             try:
                 text = exc.read().decode("utf-8", "replace")
             except OSError:
@@ -120,6 +148,35 @@ class Api:
             return exc.code, text
         except (urllib.error.URLError, OSError, ValueError):
             return STATUS_NETWORK_FAILURE, ""
+
+    # --- the server's clock --------------------------------------------------
+
+    def _note_server_clock(self, headers) -> None:
+        """Record the offset between this machine's clock and the server's, from
+        the `Date` header every HTTP response carries. An absent or unparseable
+        Date leaves the last known offset alone — one header GitHub omitted must
+        not throw away a reading a hundred earlier ones agreed on."""
+        epoch = parse_http_date(headers.get("Date") or "") if headers else None
+        if epoch is not None:
+            self._clock_offset = epoch - time.time()
+
+    def server_now(self) -> Epoch:
+        """Now, on the SERVER's clock — the `now` every lease expiry is decided
+        against (PROTOCOL.md §5.1).
+
+        The lease timestamp is a commit date GitHub stamped, so comparing it to
+        `time.time()` compares two clocks and calls the difference age: a worker
+        running five minutes fast steals live leases, one running five minutes
+        slow keeps dead ones alive. Reading it costs no request — the answer
+        rides the `Date` header of every response the process already made.
+
+        It is stored as an OFFSET rather than as an instant, because a driver
+        that supervises a task for an hour asks this repeatedly and a frozen
+        epoch would answer the same second forever. Local time still ticks; this
+        only corrects where it starts. Before the first response — and against a
+        server that sends no Date — the offset is unknown and this is plain
+        `time.time()`, which is exactly the behaviour that predates it."""
+        return time.time() + (self._clock_offset or 0.0)
 
     def json(self, method: str, path: str,
              body: Json | None = None) -> Any | None:
