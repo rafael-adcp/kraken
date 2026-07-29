@@ -16,7 +16,7 @@ from .contract import (
 from .transport import Api
 from .lease import (
     Lease, UNREADABLE_LEASE, clear_claim_state, format_iso,
-    lease_renew_seconds, lease_ttl_seconds, open_claim_record
+    lease_renew_seconds, lease_ttl_seconds, open_claim_record, write_claim_state
 )
 from .refs import Refs
 from .queue import is_empty_section, section_body
@@ -316,9 +316,10 @@ class NextAction:
         issue = record["issue"]
 
         if verdict == "resolved":
-            # The claim is over. Drop the stale scratch file so the
-            # one-task-at-a-time guard stops refusing on it, and let the caller
-            # drain on — the self-heal that saves the operator a hand `release`.
+            # The claim is over. Drop the stale scratch file so the lifecycle
+            # hooks stop hinting at a claim that no longer exists, and let the
+            # caller drain on — the self-heal that saves the operator a hand
+            # `release`.
             clear_claim_state(self.worker)
             diag(f"next-action: claim resolved issue={issue} ({detail['reason']}) "
                  "— continuing the drain")
@@ -372,6 +373,10 @@ class NextAction:
 
     def _resumed(self, issue: Issue, detail: Json,
                  issue_obj: Json) -> tuple[int, Envelope]:
+        # Re-stamp the scratch file: a resume proves the claim is open, and the
+        # lifecycle hooks read the file, so a hint lost with its machine is
+        # restored the moment the claim is picked back up.
+        write_claim_state(self.api.repo, issue, self.worker)
         epoch = detail["epoch"]
         # An unreadable clock is an expired lease (§5.1) — fail open, toward
         # renewing immediately, never toward assuming time is left.
@@ -408,23 +413,34 @@ class NextAction:
                        "worker would filter every task out; fix the label, never "
                        "drain unscoped")
         if rc == EXIT_NOT_CLEAR:
-            return self._blocked_by_a_late_claim()
+            return self._resume_discovered(won)
         return self.envelope.answer(
             "retry", reason="transport",
             detail="the queue read or a claim write did not land — re-check the "
                    "task's real state before retrying")
 
-    def _blocked_by_a_late_claim(self) -> tuple[int, Envelope]:
-        """A claim appeared between the resume check and the acquisition. Re-read
-        the record so this envelope, like the other `blocked`, names the claim to
-        resolve and carries the commands that resolve it."""
-        late = open_claim_record(self.worker)
+    def _resume_discovered(self, payload: Json | None) -> tuple[int, Envelope]:
+        """The acquisition's §5 guard found a claim ref of ours the local record
+        did not name — a scratch file lost with its machine, or a claim that
+        landed between the resume check and the read. The ladder is the truth,
+        so resume THAT task rather than report a dead end; `resume` re-proves
+        the lease before anything is written."""
+        held = (payload or {}).get("issue")
+        if held is None:
+            return self.envelope.answer(
+                "retry", reason="claim-open",
+                detail="the queue read says this worker holds a claim it could "
+                       "not name — re-check before retrying")
+        rc, env = self.resume({"repo": self.api.repo, "issue": str(held),
+                               "worker": self.worker})
+        if env is not None:
+            return (rc, env)
+        # Resolved between the guard and this read — the drain continues on the
+        # next invocation rather than looping inside this one.
         return self.envelope.answer(
-            "blocked", reason="claim-open",
-            detail="this worker already holds an open claim — resolve it "
-                   "(deliver / escalate / release) first",
-            holding=({"repo": late["repo"] or self.api.repo,
-                      "issue": late["issue"]} if late else None))
+            "retry", reason="claim-just-resolved",
+            detail=f"the claim on #{held} resolved between the guard and the "
+                   "re-read — invoke next-action again")
 
 
 def next_action(api: Api, project: str, worker: Worker,

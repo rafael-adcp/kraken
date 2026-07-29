@@ -10,8 +10,8 @@ import json
 import os
 
 from .contract import (
-    ClaimRecord, CommitMeta, EXIT_NOT_CLEAR, Epoch, Gen, Issue,
-    LEGACY_CLAIM_GEN, Repo, Sha, Worker, diag
+    ClaimRecord, CommitMeta, Epoch, Gen, Issue,
+    LEGACY_CLAIM_GEN, Repo, Sha, Worker
 )
 from .comments import parse_marker
 
@@ -259,15 +259,17 @@ def clear_claim_state(worker: Worker) -> None:
 def open_claim_record(worker: Worker) -> ClaimRecord | None:
     """The whole claim-<worker>.json record — `{"repo", "issue", "worker"}` with
     `issue` normalized to a string — or None when this worker holds no open
-    claim. The file's *presence* is the signal that a claim is unresolved: every
-    terminal transition (deliver / escalate / release) removes it, so a resolved
-    claim leaves nothing behind. A missing, unreadable, or malformed file is
-    treated as no open claim — the guards it feeds must never fail a claim over
-    an unparseable scratch file (the lease backs us up regardless).
+    claim. Every terminal transition (deliver / escalate / release) removes the
+    file, so a resolved claim leaves nothing behind.
 
-    `next-action` reads the record rather than the bare issue number, because
-    resuming a claim means proving the lease on the repo the claim was made in,
-    not on whichever repo this invocation happens to name."""
+    The file is a HINT, never the arbiter: the §5 one-task-at-a-time guard is
+    derived from the claim refs themselves (`claim.refuse_second_claim`), so a
+    missing, unreadable, or malformed file just means no hint — it can neither
+    brick this worker nor let it take a second task. What still reads it: the
+    SessionEnd/StopFailure hooks and the loop's release-on-exit (which must work
+    without another queue read), and `next-action`'s resume path — the record
+    names the repo the claim was made in, because resuming a claim means proving
+    the lease there, not on whichever repo this invocation happens to name."""
     try:
         with open(claim_state_path(worker), encoding="utf-8") as fh:
             data = json.load(fh)
@@ -283,38 +285,6 @@ def open_claim_record(worker: Worker) -> ClaimRecord | None:
         "issue": str(issue),
         "worker": str(data.get("worker") or worker),
     }
-
-
-def open_claim(worker: Worker) -> str | None:
-    """The issue number (as a string) of an open claim this worker still holds,
-    or None when there is none — the one field the one-task-at-a-time guard
-    needs, read off open_claim_record so there is a single parse of the file."""
-    record = open_claim_record(worker)
-    return None if record is None else record["issue"]
-
-
-def refuse_second_claim(
-    worker: Worker, issue: Issue | None = None,
-) -> int | None:
-    """PROTOCOL.md §5: a worker MUST work one task at a time and MUST NOT claim a
-    second task while it holds a claim. If a claim-<worker>.json state file marks
-    an open claim, refuse — writing nothing — and return EXIT_NOT_CLEAR; return
-    None when the worker is clear to claim.
-
-    A recorded claim on the *same* `issue` is a permitted re-claim, not a second
-    task: it is exactly the §5 network-failure caveat ("or while a claim of its
-    own is in an unknown state after a network failure — re-check first"), so a
-    retry of the ambiguous claim is allowed. `issue=None` (claim-next, always
-    taking a *new* task) refuses on any open claim."""
-    held = open_claim(worker)
-    if held is None or (issue is not None and held == str(issue)):
-        return None
-    diag(
-        f"claim: refused worker={worker} holds={held} — one task at a time "
-        f"(PROTOCOL.md §5); resolve the open claim first "
-        f"(deliver / escalate / release)"
-    )
-    return EXIT_NOT_CLEAR
 
 
 def wake_retry_flag_path() -> str:
