@@ -64,8 +64,8 @@ from .lease import (
     LEASE_DEFAULT_TTL_SECONDS, LEASE_EXPIRY_ESCALATE, LEASE_RENEW_DIVISOR,
     Lease, NO_LEASE, UNREADABLE_LEASE, claim_state_path, clear_claim_state,
     format_age, format_iso, holder_shas, lease_renew_seconds, lease_state,
-    lease_ttl_seconds, live_leases, open_claim, open_claim_record, parse_iso,
-    refuse_second_claim, state_dir, wake_retry_flag_path, wake_retry_mtime,
+    lease_ttl_seconds, live_leases, open_claim_record, parse_iso,
+    state_dir, wake_retry_flag_path, wake_retry_mtime,
     write_claim_state
 )
 from .refs import (
@@ -88,7 +88,7 @@ from .claim import (
     ClaimAttempt, DELIVER, ESCALATE, RELEASE, Terminal, TerminalTransition,
     acquire_next, cmd_claim, cmd_claim_next, cmd_deliver, cmd_escalate,
     cmd_heartbeat, cmd_note, cmd_release, lease_expired_body,
-    probe_lease_state, read_body_file
+    probe_lease_state, read_body_file, refuse_second_claim
 )
 from .next_action import (
     NEXT_ACTIONS, NEXT_ACTION_EXIT, NextAction, NextActionEnvelope,

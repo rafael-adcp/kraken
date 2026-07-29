@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """PROTOCOL.md §5: a worker MUST work one task at a time and MUST NOT claim a
-second task while it holds a claim. kraken.py claim reads the claim-<worker>.json
-state file and refuses (exit 11, writing nothing) when it already marks an open
-claim — for `claim` on a different issue and for `claim-next` on any open claim.
-A recorded claim on the same issue is a permitted re-claim."""
+second task while it holds a lease. The guard is derived from the claim refs
+themselves — the claim-<worker>.json state file is a lifecycle-hook hint, never
+the arbiter — and refuses (exit 11, writing nothing) for `claim` on a different
+issue and for `claim-next` on any open claim, even when the local state file is
+gone. A held claim on the same issue is a permitted re-claim."""
 import os
 import unittest
 
@@ -46,6 +47,16 @@ class ClaimOneAtATimeTests(KrakenConformanceTest):
         r = self.kraken("claim", "OWNER/tasks", 7, "w1")
         self.assertEqual(r.rc, 0, "re-claiming the same held issue is permitted")
         self.assertNotIn("refused", r.out, "re-claiming the same issue must not be refused as a second claim")
+
+        # --- the guard is the ladder, not the scratch file ------------------
+        # A state file lost with its machine must not hand the worker a second
+        # task: the claim ref still stands, and the ref is what refuses.
+        os.remove(state_file)
+        r = self.kraken("claim", "OWNER/tasks", 8, "w1")
+        self.assertEqual(r.rc, 11, "claim must refuse on the claim ref alone, without the state file")
+        self.assertIn("holds=7", r.out, "ref-derived refusal should still name the held claim (got: %s)" % r.out)
+        r = self.kraken("claim-next", "OWNER/tasks", "app", "w1")
+        self.assertEqual(r.rc, 11, "claim-next must refuse on the claim ref alone, without the state file")
 
         # --- resolving the claim clears the guard ---------------------------
         r = self.kraken("release", "OWNER/tasks", 7, "w1", "backing out")

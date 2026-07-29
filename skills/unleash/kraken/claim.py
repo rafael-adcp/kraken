@@ -20,10 +20,10 @@ from .comments import compose_comment, compose_note
 from .transport import Api
 from .lease import (
     Lease, NO_LEASE, clear_claim_state, format_age, lease_ttl_seconds,
-    live_leases, refuse_second_claim, write_claim_state
+    live_leases, write_claim_state
 )
 from .refs import Refs
-from .queue import Queue
+from .queue import Queue, QueueRead
 from .reconcile import apply_reconcile, project_reconcile, reconcile_plan
 
 # --- subcommand: claim -------------------------------------------------------
@@ -92,11 +92,18 @@ class ClaimAttempt:
     drain reads every lease with the queue, a `claim <issue>` has read nothing,
     so it looks the lease up itself — but only once the cheap label guard has
     already let the task through, so a task held by `needs-decision` or
-    `awaiting-merge` still costs exactly one read to refuse."""
+    `awaiting-merge` still costs exactly one read to refuse.
+
+    `ensure_clear` is the caller's §5 one-task-at-a-time observation, on the
+    same principle: `claim-next` derived it from the queue read it already
+    holds, so it passes nothing; a named claim reads a queue of its own through
+    this callback — sequenced after the label guard for the same reason the
+    probe is, so a held task refuses without a queue read."""
 
     def __init__(self, api: Api, issue: Issue, worker: Worker, *,
                  allow_held: Sequence[str] = (), lease: Lease = NO_LEASE,
-                 ttl: int | None = None, probe_lease: bool = False):
+                 ttl: int | None = None, probe_lease: bool = False,
+                 ensure_clear: Callable[[], int | None] | None = None):
         self.api = api
         self.refs = Refs(api)
         self.issue = issue
@@ -105,6 +112,7 @@ class ClaimAttempt:
         self.lease = lease
         self.ttl = lease_ttl_seconds(ttl)
         self.probe_lease = probe_lease
+        self.ensure_clear = ensure_clear or (lambda: None)
         # Decided by the guard, consumed by the projection: whose expired lease
         # this is taking, and which requeued labels are still on the issue.
         self.steal = NO_LEASE
@@ -134,6 +142,9 @@ class ClaimAttempt:
             if held in label_names and held not in self.allow_held:
                 diag(f"claim: held issue={self.issue} label={held}")
                 return EXIT_NOT_CLEAR
+        code = self.ensure_clear()
+        if code is not None:
+            return code
         if self.probe_lease and not self.lease.present:
             # Labels say nothing about who is working — that is the lease's job,
             # and this path has not read one yet. It answers both questions at
@@ -229,20 +240,71 @@ class ClaimAttempt:
 
 def _claim_once(api: Api, issue: Issue, worker: Worker,
                 allow_held: Sequence[str] = (), lease: Lease = NO_LEASE,
-                ttl: int | None = None, probe_lease: bool = False) -> int:
+                ttl: int | None = None, probe_lease: bool = False,
+                ensure_clear: Callable[[], int | None] | None = None) -> int:
     """The claim sequence as a call. Kept because `acquire_next` injects it as
     `claim_step` and both subcommands reach it through here."""
     return ClaimAttempt(api, issue, worker, allow_held=allow_held, lease=lease,
-                        ttl=ttl, probe_lease=probe_lease).run()
+                        ttl=ttl, probe_lease=probe_lease,
+                        ensure_clear=ensure_clear).run()
+
+
+def refuse_second_claim(read: QueueRead, worker: Worker,
+                        issue: Issue | str | None = None) -> Issue | None:
+    """PROTOCOL.md §5: a worker MUST work one task at a time and MUST NOT claim
+    a second task while it holds a lease. Derived from the queue read itself —
+    the ladder is the truth, so a lost or stale claim-<worker>.json can neither
+    brick this worker nor let it take a second task. Returns the held issue when
+    refusing (the caller answers EXIT_NOT_CLEAR, writing nothing), None when the
+    worker is clear.
+
+    Presence decides, never the TTL: an expired-but-ours lease may still finish
+    its transition (§5.3), so it is an unresolved claim, not a free worker. A
+    ref on a task that already left the queue — closed (absent from the open
+    walk) or held by a terminal label — is a moot ref awaiting collection, not
+    an open claim, exactly the cases `resume_verdict` calls resolved.
+
+    A held ref on the *same* `issue` is a permitted re-claim, not a second task:
+    it is exactly the §5 network-failure caveat ("or while a claim of its own is
+    in an unknown state after a network failure — re-check first"). `issue=None`
+    (claim-next, always taking a *new* task) refuses on any open claim."""
+    tasks = read.by_number()
+    for held, lease in sorted(read.leases.items()):
+        if not lease.held_by(worker):
+            continue
+        task = tasks.get(held)
+        if task is None or task.labels & set(HELD_LABELS):
+            continue
+        if issue is not None and str(held) == str(issue):
+            continue
+        diag(
+            f"claim: refused worker={worker} holds={held} — one task at a time "
+            f"(PROTOCOL.md §5); resolve the open claim first "
+            f"(deliver / escalate / release)"
+        )
+        return held
+    return None
 
 
 def cmd_claim(args: argparse.Namespace) -> int:
-    refused = refuse_second_claim(args.worker, args.issue)
-    if refused is not None:
-        return refused
-    # A named claim has read no queue, so it looks the lease up itself: an
-    # expired one does not hold the task, it gets stolen (§5).
-    return _claim_once(args.api, args.issue, args.worker, probe_lease=True)
+    def ensure_clear() -> int | None:
+        # The §5 guard, derived from the claim refs rather than the local
+        # scratch file. A named claim has read no queue, so it reads one here —
+        # the attempt calls this only once the free label guard has let the
+        # task through, so a held task still refuses without touching the
+        # git-data API.
+        read = Queue(args.api).read()
+        if read is None:
+            diag("claim: gh-failure stage=list")
+            return EXIT_TRANSPORT
+        if refuse_second_claim(read, args.worker, args.issue) is not None:
+            return EXIT_NOT_CLEAR
+        return None
+
+    # The target's lease is probed by the attempt itself: an expired one does
+    # not hold the task, it gets stolen (§5).
+    return _claim_once(args.api, args.issue, args.worker, probe_lease=True,
+                       ensure_clear=ensure_clear)
 
 
 # --- subcommand: claim-next --------------------------------------------------
@@ -275,10 +337,12 @@ def acquire_next(api: Api, project: str, worker: Worker,
                  queue: Queue | None = None,
                  claim_step: Callable[..., Any] | None = None,
                  ) -> tuple[int, Json | None]:
-    """The whole acquisition — one-task-at-a-time guard, project preflight, queue
-    read, §6 reconcile, then guard + CAS down the candidate list — as DATA rather
+    """The whole acquisition — project preflight, queue read, the §5
+    one-task-at-a-time guard, §6 reconcile, then guard + CAS down the candidate
+    list — as DATA rather
     than as printed output: returns `(exit_code, won)` where `won` is
-    `{"issue", "title", "body"}` on EXIT_OK and None on every other outcome.
+    `{"issue", "title", "body"}` on EXIT_OK, `{"issue"}` naming the already-held
+    claim on EXIT_NOT_CLEAR, and None on every other outcome.
 
     `claim-next` and `next-action` are both thin renderings of this, which is
     what keeps the deterministic claim loop from drifting between them: there is
@@ -292,9 +356,6 @@ def acquire_next(api: Api, project: str, worker: Worker,
     Both have their own tests; a caller in production passes neither."""
     queue = queue or Queue(api)
     claim_step = claim_step or _claim_once
-    refused = refuse_second_claim(worker)
-    if refused is not None:
-        return (refused, None)
 
     # Project preflight: before the queue is read and before any write,
     # because a worker scoped to a project label the repo does not carry is deaf,
@@ -313,6 +374,14 @@ def acquire_next(api: Api, project: str, worker: Worker,
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)
     leases = read.leases
+
+    # One task at a time (§5), decided by the read that just landed — before the
+    # reconcile below can touch anything, so a refusal writes nothing. The held
+    # issue rides back with the exit code so `next-action` can resume the claim
+    # this worker provably holds instead of reporting a dead end.
+    held = refuse_second_claim(read, worker)
+    if held is not None:
+        return (EXIT_NOT_CLEAR, {"issue": held})
 
     # Reconcile before classifying (PROTOCOL.md §6). A dead worker's lease
     # obstructs exactly one party — the next worker who wants to claim — and that
