@@ -58,7 +58,7 @@ from .comments import (
 )
 from .transport import (
     Api, DEFAULT_API_URL, HTTP_TIMEOUT_SECONDS, PER_PAGE,
-    STATUS_NETWORK_FAILURE, api_base, github_token, quote_path
+    STATUS_NETWORK_FAILURE, api_base, github_token, parse_http_date, quote_path
 )
 from .lease import (
     LEASE_DEFAULT_TTL_SECONDS, LEASE_EXPIRY_ESCALATE, LEASE_RENEW_DIVISOR,

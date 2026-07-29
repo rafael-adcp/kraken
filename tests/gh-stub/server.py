@@ -44,6 +44,11 @@ test process, so they are shared attributes, not env vars):
                  N callers arrive, then every caller reads one pre-race label
                  snapshot — the deterministic worst-case interleaving the claim
                  race test needs.
+  knobs.clock_offset
+                 seconds the SERVER's clock sits away from this machine's. It
+                 moves the `Date` header and every `committedDate` this server
+                 stamps together, which is how a test puts a worker's clock out
+                 of step with the one that dates the leases (PROTOCOL.md §5.1).
 """
 import base64
 import hashlib
@@ -56,8 +61,9 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-def _iso_now():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _iso_at(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
 
 
 def _blob_sha(data):
@@ -73,6 +79,7 @@ class Knobs:
     def __init__(self):
         self.lock = threading.RLock()   # serializes state mutations (the CAS)
         self.fail = None                # injected-failure ERE, or None
+        self.clock_offset = 0           # how far the server's clock is from ours
         self._barrier_n = 0
         self._barrier = None
         self._snapshot = None
@@ -80,6 +87,21 @@ class Knobs:
 
     def set_fail(self, regex):
         self.fail = regex
+
+    def set_clock_offset(self, seconds):
+        """Move the SERVER's clock `seconds` away from this machine's.
+
+        Everything the server stamps moves together — the `Date` header of every
+        response and the `committedDate` of every commit it creates — because
+        that is what one clock means. It is the seam for PROTOCOL.md §5.1: a
+        lease's age is the server's now minus a server-stamped date, so a
+        reader that subtracts the LOCAL clock instead reaches a different
+        verdict the moment this is non-zero."""
+        self.clock_offset = float(seconds or 0)
+
+    def server_time(self):
+        """Now, on the server's clock."""
+        return time.time() + self.clock_offset
 
     def set_barrier(self, n):
         n = int(n or 0)
@@ -312,8 +334,12 @@ class StubState:
             ("%s\n%d\n%d" % (message, time.time_ns(), os.getpid())).encode("utf-8")
         ).hexdigest()
         with self.knobs.lock:
+            # Stamped on the SERVER's clock, like the Date header — a lease this
+            # server hands out must be fresh by the clock this server reports.
             self._write(self.path("objects", sha + ".json"),
-                        json.dumps({"message": message, "committedDate": _iso_now()}))
+                        json.dumps({"message": message,
+                                    "committedDate": _iso_at(
+                                        self.knobs.server_time())}))
         return sha
 
     def single_ref(self, n):
@@ -487,7 +513,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, status, obj=None):
         payload = b"" if obj is None else json.dumps(obj).encode("utf-8")
-        self.send_response(status)
+        # send_response_only + an explicit Date, rather than send_response, so
+        # the header carries the SERVER's clock (Knobs.clock_offset) instead of
+        # this machine's. kraken anchors every lease expiry on it (§5.1).
+        self.send_response_only(status)
+        self.send_header("Server", self.version_string())
+        self.send_header("Date", self.date_time_string(self.knobs.server_time()))
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()

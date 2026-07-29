@@ -7,7 +7,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import re
-import time
 from typing import Iterable, Sequence
 
 from .contract import (
@@ -541,8 +540,11 @@ class Queue:
         commit_meta = refs.commit_meta(holder_shas(claim_refs))
         if commit_meta is None:
             return None
+        # The server's clock, not this machine's (§5.1): the lease timestamps
+        # about to be aged are commit dates GitHub stamped, and the walk above
+        # has already been told what time GitHub thinks it is.
         leases = lease_state(claim_refs, commit_meta,
-                             time.time() if now is None else now,
+                             self.api.server_now() if now is None else now,
                              lease_ttl_seconds(ttl))
         if self.hydrate(tasks, leases) is None:
             return None

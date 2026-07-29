@@ -283,6 +283,15 @@ That ref is a **lease**, not a lock held forever. Its terms:
 - **The clock is the ref's commit date.** The server stamps it, so the timestamp
   is not something a worker can get wrong, and reading it costs nothing extra —
   it comes with the queue read (§6).
+- **Both ends of the comparison are the server's clock.** A lease's age is the
+  server's *now* minus that server-stamped date; a reader **MUST NOT** subtract
+  it from its own wall clock. Coordination is between machines whose clocks
+  disagree, and the disagreement lands entirely in the age: a worker running
+  fast steals leases that are still alive, one running slow keeps dead ones
+  alive past their TTL. Where the reader gets the server's *now* is an
+  implementation detail and costs no request — every HTTP response carries a
+  `Date`. A reader that has no reading of it at all MAY fall back to its own
+  clock; it MUST NOT prefer it.
 - **The TTL is a duration in minutes**, configurable, and it is the worst case
   for how long a dead worker's task stays unavailable. The reference
   implementation defaults to **1800 seconds (30 minutes)** and exposes it as

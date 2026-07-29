@@ -8,7 +8,6 @@ import datetime
 import json
 import re
 import sys
-import time
 from typing import Callable, Sequence
 
 from .contract import (
@@ -265,15 +264,19 @@ class StatusReport:
 
 def cmd_status(args: argparse.Namespace) -> int:
     api, project = args.api, args.project
-    now = time.time()
     # One queue read, the same one a drain performs: nodes, the lease state of
     # every claim ref, and the commit meta the holders are decoded from. The
     # console shares it rather than re-running those steps with None checks of
     # its own, which is why `read` carries the commit meta (see QueueRead).
-    read = Queue(api).read(now=now)
+    #
+    # The read comes FIRST and ages its own leases against the server's clock
+    # (§5.1); `generated_at` is then stamped from that same clock, which is only
+    # knowable once a response has been seen.
+    read = Queue(api).read()
     if read is None:
         print("status: gh-failure stage=list", file=sys.stderr)
         return EXIT_TRANSPORT
+    now = api.server_now()
 
     report = StatusReport(api, project, now).of(read)
     if report is None:
