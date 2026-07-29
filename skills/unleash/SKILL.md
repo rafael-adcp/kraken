@@ -51,23 +51,32 @@ python3 "<skill>/kraken.py" next-action OWNER/tasks <project> <worker-name>
 ```
 
 Pass `<project>` bare — the script prepends the `project:` prefix itself. It prints one
-JSON envelope on stdout (diagnostics go to stderr) whose `action` field is your
-instruction:
+JSON envelope on stdout (diagnostics go to stderr). Its `action` is the verdict, `detail`
+is that verdict in a sentence, and `then` carries the exact command line for every write
+that is legal next.
 
-| `action` | exit | What it means | What you do |
-| --- | --- | --- | --- |
-| `execute` | `0` | You hold this task. `resumed` says whether you just claimed it or are picking it back up. | Work it — the next section. Then run one of `then.deliver` / `then.escalate` / `then.release`. |
-| `idle` | `3` | Nothing startable in your project. | The drain is done — go to **Staying in ambush**. |
-| `abandon` | `10` | A task you were holding is no longer yours: your lease expired and another worker took it. | **Write nothing to it.** Say so, then run the loop again. Your branch and PR stay; whoever holds the task inherits them. |
-| `blocked` | `11` | You already hold an open claim that has to be resolved first — `holding` names it (`repo` + `issue`), and it may be in a **different** repo than the one you are draining. | Resolve that claim with this envelope's own `then.deliver` / `then.escalate` / `then.release` — they are built for `holding`, not for the repo you asked about — then re-run. |
-| `stop` | `13` | The repo carries no `project:<name>` label, so this worker would filter every task out and read as an empty queue forever. | Stop and tell me. Fix the spelling, or create the label with `/kraken:init`. Never fall back to draining unscoped. |
-| `retry` | `20` | A read or a write did not land — the state is unknown. | Do not write on a guess. Re-check the task's real state, then re-run. |
+**Do what the envelope says.** For four of the six verdicts that is the whole story:
+`execute` hands you a task (the next section), while `blocked`, `stop` and `retry` each
+carry a `detail` that names the problem *and* what resolves it. A `blocked` envelope's
+`then` is built for the claim under `holding`, which may live in a **different** repo
+than the one you are draining — so run those commands, not ones aimed at this repo.
+
+Two verdicts need something no envelope can carry, because they are about what you do
+next rather than about the task:
+
+- `idle` — the drain is over. Report the summary, then go to **Staying in ambush**.
+- `abandon` — the task stopped being yours. **Write nothing to it**, say so, and run the
+  loop again. Your branch and PR stay; whoever holds the task inherits them.
 
 An `execute` envelope carries everything you need, so you never fetch the task again:
 
 - **`brief`** — `title`, `goal`, `acceptance`, `notes`, and the raw `body`.
 - **`lease`** — `expires_at`, `seconds_remaining`, `renew_every_seconds` and
-  `renew_now`. See **Renewing your lease**.
+  `renew_now`. Your claim is a lease, not a lock you hold forever: stop renewing and the
+  next worker takes the task over. Run `then.renew` with a one-line progress note at
+  least every `renew_every_seconds`, immediately on `renew_now: true`, and — the part
+  the numbers cannot tell you — **before anything that will keep you silent for a
+  while**: a long build, a full test suite, a big refactor pass.
 - **`then`** — the exact command line for every write that is legal next, with the
   script path, repo, issue and worker name already filled in. **Run them as given**;
   substitute only the bracketed placeholders (a file you wrote, a PR URL, a progress
@@ -118,29 +127,10 @@ Inside an `execute`:
    push. **"Done" means delivered for review, never closed** — the task closes when the
    work truly lands.
 
-Two exit codes matter on the `then.*` writes themselves:
-
-- **`10`** — your lease was taken while you were quiet. **Nothing was written**, the task
-  belongs to another worker now, and your branch and PR are still there for whoever holds
-  it. Stop working it, say so, and run the loop again.
-- **`20`** — transport failure, and the write **may have half-landed**. Do not retry
-  blindly and do not move on while a claim of yours is ambiguous: re-check the issue's
-  real state first. Running `next-action` again is the cheapest way to do that — it
-  re-reads the lease and tells you where you actually stand.
-
-## Renewing your lease
-
-Your claim is a **lease** with a TTL, not a lock you hold forever. Stop renewing and the
-next worker to read the queue takes the task over — that is how a dead worker's task is
-recovered in minutes with nothing installed.
-
-The envelope's `lease` block gives you the numbers rather than asking you to remember
-them. Run `then.renew` with a one-line progress note **before anything that will keep
-you silent for a while** — a long build, a full test suite, a big refactor pass — and at
-least every `renew_every_seconds`. It posts no comment: the progress rides the claim ref
-and `status` surfaces it from there. If it exits `10` you have already been stolen from:
-stop, and run the loop again. If an envelope ever arrives with `renew_now: true`, renew
-before you do anything else.
+**When a `then.*` write fails, do not guess and do not retry blindly** — a failure means
+either the task stopped being yours or the write may have half-landed, and both are
+answered the same way: run the loop again. It re-reads the lease and tells you where you
+actually stand.
 
 ## Staying in ambush
 
