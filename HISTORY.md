@@ -17,6 +17,52 @@ gets an entry; clarifications and strictly additive rules amend
 
 ---
 
+**What changed in `kraken-protocol/8`.** The **requeue derivation became
+symmetric**. Through protocol/7 the two held states were asymmetric: a bare
+operator comment requeued `needs-decision`, but `awaiting-merge` was already
+*delivered* and stayed held unless the reply carried an explicit directive — a
+standalone `requeue:` line, or a pasted `requeue` marker. The asymmetry was
+protecting one real case: a comment that is not a work request ("nice, thanks",
+"merging tomorrow", "cc @someone") would bounce a ready branch back to a worker
+that then finds a thread asking for nothing.
+
+It was the wrong trade, and the failure mode is worse than the one it prevented.
+A review comment asking for follow-up work is *read, matched against a directive
+that is not there, and discarded* — silently. Nothing in the GitHub UI says a
+comment was considered and dropped; the task simply sits in `awaiting-merge`
+looking queued while every worker in ambush is idle and correct. The operator is
+the one who eats that silence, and the only way out is to remember a line shape
+the queue never asked for. Meanwhile the cost the asymmetry was avoiding is one
+wasted drain.
+
+protocol/8 collapses the rule to the one §6 already applied to
+`needs-decision`: an operator comment newer than the newest worker comment
+requeues, whatever held label the task wears. Everything else in §6 is unchanged
+— the live-lease-outranks-the-thread rule, the marker-based worker/operator
+discriminator, the read-not-mutation property, the bounded comment window. Both
+existing operator paths keep working for free: removing the label by hand still
+requeues (the label is what is read), and a standalone `requeue:` line still
+requeues (it is a comment — now an ordinary one, with no special form). If a
+branch is ready and there is nothing to ask for, the gesture is **merge it**, not
+comment on it.
+
+The trade is accepted deliberately rather than avoided, and it is bounded by a
+new **SHOULD** in §6: a worker that claims a task requeued this way and finds no
+actionable request escalates (§7) instead of guessing at rework. That turns the
+worst case from wasted rework into a question on the thread, which makes the
+change strictly better than protocol/7 — where the same comment produced nothing
+at all.
+
+This is a backward-incompatible change — a protocol/7 reader and a protocol/8
+reader return different verdicts for the same thread (delivered task, bare reply:
+held vs. queued), so mixed-version workers on one repo disagree about whether a
+task is claimable — hence the integer bump. It needs **no migration**, but the
+fleet **should be upgraded together**: a protocol/7 worker left running against a
+protocol/8 queue is not wrong, only deaf to exactly these tasks. Retired: the
+`awaiting-merge` requeue directive in every form — the standalone `requeue:`
+line as a *special* shape, the `requeue` marker type (§4), and the
+`has_requeue_directive` reader that recognized both.
+
 **What changed in `kraken-protocol/7`.** The `in-progress` label became
 **write-only**. Through protocol/6 it was the claim ref's *projection* and it was
 **read in decisions**: it made a task `held`, so the claim guard had to refuse on

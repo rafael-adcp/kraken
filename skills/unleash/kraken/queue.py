@@ -58,6 +58,16 @@ COMMENT_HYDRATE_CHUNK = 50
 # for the held/leased handful rather than carried by the queue walk (see
 # `Queue.hydrate`): free on an idle queue, and O(held) rather than O(queue) on a
 # busy one.
+#
+# The rule is the SAME for both held labels (protocol/8). Through protocol/7
+# `awaiting-merge` was the exception — delivered work stayed held unless the reply
+# carried a standalone `requeue:` line — and the exception cost more than it
+# protected: a review comment asking for follow-up work was read, counted, and
+# discarded, leaving the operator watching a queue that never moved while every
+# worker was behaving correctly. A comment on the thread means something needs
+# doing. What the operator does when they have nothing to ask for is MERGE, not
+# comment, so optimizing for the congratulatory comment at the cost of swallowing
+# the real ones was backwards.
 
 # The labels a reply can lift are exactly the labels that hold (HELD_LABELS):
 # both are operator-facing states, and answering one is what ends it. There is no
@@ -91,24 +101,6 @@ def is_worker_comment(body: str) -> bool:
     prefix = DISCLAIMER.split("{worker}")[0]  # "> 🐙 **Kraken worker `"
     first_line = body.split("\n", 1)[0].rstrip("\r")
     return first_line.startswith(prefix)
-
-
-def has_requeue_directive(body: str) -> bool:
-    """Whether a comment carries an EXPLICIT, STRUCTURED requeue directive — the
-    only thing that bounces a DELIVERED (awaiting-merge) task back for rework, so
-    a prose sentence merely starting a line with "requeue:" cannot bounce a ready
-    branch by accident. Two accepted forms: a protocol/3
-    `<!-- kraken {"type":"requeue"} -->` marker, or a standalone directive line
-    whose only content is `requeue`/`requeue:` (case-insensitive)."""
-    lines = body.split("\n")
-    for raw in lines:
-        marker = parse_marker(raw)
-        if marker and marker.get("type") == "requeue":
-            return True
-    for raw in lines:
-        if re.match(r"^\s*requeue:?\s*$", raw, re.IGNORECASE):
-            return True
-    return False
 
 
 def comment_hungry(
@@ -147,17 +139,16 @@ def comment_hungry(
 
 
 
-def requeue_verdict(held: str, comments: Sequence[Json]) -> bool:
-    """Whether an operator reply has requeued a task held by `held` labels — a
-    PURE read of the thread (PROTOCOL.md §6), so it is decided identically by
-    every reader and needs no write to become true.
+def requeue_verdict(comments: Sequence[Json]) -> bool:
+    """Whether an operator reply has requeued a held task — a PURE read of the
+    thread (PROTOCOL.md §6), so it is decided identically by every reader and
+    needs no write to become true.
 
-    The rule: an operator comment (one carrying no kraken marker) newer than the
-    newest worker comment. The two held states stay asymmetric — a bare reply
-    requeues `needs-decision` (a human comment is almost always the answer), but
-    `awaiting-merge` is already *delivered* and stays held unless a reply carries
-    an explicit requeue directive, so a `requeue:` buried in prose cannot bounce a
-    ready branch.
+    The rule, and the whole of it: an operator comment (one carrying no kraken
+    marker) newer than the newest worker comment. It is the SAME rule for both
+    held states, which is why this takes no label — a comment on the thread means
+    something needs doing, and which badge the task happens to wear does not
+    change what the operator meant by writing it.
 
     Ordering is the comment list's own (GitHub returns a thread oldest-first);
     nothing here reads a timestamp, so a re-posted comment cannot reorder the
@@ -166,13 +157,8 @@ def requeue_verdict(held: str, comments: Sequence[Json]) -> bool:
     for i, rec in enumerate(comments):
         if is_worker_comment(rec.get("body") or ""):
             worker_at = i
-    replies = [rec for i, rec in enumerate(comments)
-               if i > worker_at and not is_worker_comment(rec.get("body") or "")]
-    if not replies:
-        return False
-    if "awaiting-merge" in held:
-        return any(has_requeue_directive(rec.get("body") or "") for rec in replies)
-    return True
+    return any(not is_worker_comment(rec.get("body") or "")
+               for rec in comments[worker_at + 1:])
 
 
 
@@ -284,7 +270,7 @@ class Task:
         held = self.held
         if not held:
             return ()
-        return held if requeue_verdict(held, self.comments) else ()
+        return held if requeue_verdict(self.comments) else ()
 
     @property
     def expiries(self) -> int:

@@ -168,7 +168,7 @@ flowchart LR
     P -->|blocking question| D[needs-decision]
     P -->|lease expires — the next reader steals it| Q
     D -->|you reply — the next reader requeues it| Q
-    M -->|review asks changes + remove the label| Q
+    M -->|you reply — the next reader requeues it| Q
     M -->|PR merges — the task closes| E(((closed)))
 ```
 
@@ -180,7 +180,7 @@ bouncing) a PR. The tentacles drive everything else.
 
 The coordination contract — task shape, state machine, the machine marker,
 the claim algorithm — is normatively specified in
-[`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/7`); it is agent-agnostic, so any
+[`PROTOCOL.md`](PROTOCOL.md) (`kraken-protocol/8`); it is agent-agnostic, so any
 tool that follows it can be a tentacle on the same queue. How a worker executes it
 lives in [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md) — a loop around
 `kraken.py next-action`, which answers "what do I do now" with a JSON envelope so
@@ -202,7 +202,7 @@ reuses it through [`AGENTS.md`](AGENTS.md) with **no deltas at all**.
    <details>
    <summary>Not running the plugin? The same setup by hand</summary>
 
-   **One file.** Under `kraken-protocol/7` the coordination repo runs nothing —
+   **One file.** Under `kraken-protocol/8` the coordination repo runs nothing —
    no workflows, and no vendored copy of the transition program for them to
    exec. Stale claims, an answered task's requeue and queue-entry validation are
    all derived by the reader, on the queue read a worker or `status` performs
@@ -341,7 +341,7 @@ everything else:
 | Chain tasks                  | `gh -R OWNER/tasks issue edit <n> --add-blocked-by <m>`                         | ✅ web — Relationships sidebar    |
 | See the queues               | `/kraken:status OWNER/tasks`                                                    | ✅ filter issues by label         |
 | Answer a decision            | **Reply on the issue** — the next worker to read the queue picks it up again   | ✅ web + mobile                   |
-| Send work back after review  | Comment the feedback, then **remove `awaiting-merge`** (or start a line `requeue:`) | ✅ web + mobile                   |
+| Send work back after review  | **Comment the feedback** — the next worker to read the queue picks it up again  | ✅ web + mobile                   |
 | Land the work                | Merge the draft PR — its `Closes` line closes the task and unblocks dependents  | ✅ web + mobile                   |
 | Cancel a task                | Close the issue                                                                 | ✅ web + mobile                   |
 | Add capacity                 | Launch one more worker into one more prepared environment                       | ❌ a worker is a terminal session |
@@ -369,7 +369,7 @@ delivered, the result with the acceptance check executed, and the close:
 | **GitHub Copilot coding agent** | Issue assignment (native GitHub) | Hosted sandbox; nothing beyond GitHub Actions | No | Code is on GitHub and the task needs nothing the platform doesn't already give it |
 | **Claude Code cloud / scheduled agents** | A schedule waking a managed sandbox | Zero — the sandbox is managed for you | No | You want scheduled runs with no environment to keep and the sandbox suits the work |
 | **`claude-code-action` in CI** | An event trigger (push / PR / label) | Ephemeral, disposable CI runner | No | Automation is CI-shaped and a fresh runner is the correct environment |
-| **Kraken** | An issue queue drained via [`kraken-protocol/7`](PROTOCOL.md) | Your prepared, long-lived environment | Yes | The environment is the point — work must run where your services, data, and credentials already live, with named, audited workers |
+| **Kraken** | An issue queue drained via [`kraken-protocol/8`](PROTOCOL.md) | Your prepared, long-lived environment | Yes | The environment is the point — work must run where your services, data, and credentials already live, with named, audited workers |
 
 By 2026 the obvious reflex is "doesn't this already exist?" — assigning an issue
 to an agent is native GitHub, Claude Code runs scheduled agents in the cloud, and
@@ -406,7 +406,7 @@ a fresh, ephemeral runner is exactly the clean context you want; nothing here
 beats that, so wire it up. Kraken is for the other case: a queue you drain
 unattended against long-lived services and a toolchain that would cost minutes
 to rebuild on every runner. And because a tentacle speaks the agent-agnostic
-[`kraken-protocol/7`](PROTOCOL.md), the queue isn't wed to one vendor's action —
+[`kraken-protocol/8`](PROTOCOL.md), the queue isn't wed to one vendor's action —
 any tool that follows the protocol can drain it. **Prefer `claude-code-action`
 when** your automation is CI-shaped and a disposable runner is the correct
 environment; prefer Kraken when the environment is the point and you want no
@@ -439,12 +439,17 @@ worker claims it and swaps it off; nothing reads it in the meantime. The old
 <details>
 <summary><b>A review asked for changes — how does the task go back?</b></summary>
 
-Comment the feedback and **remove `awaiting-merge`**. Unlike `needs-decision`, a
-bare comment does **not** auto-requeue a delivered task — bouncing an
-already-ready branch back on an "I'll merge tomorrow" would be worse than
-leaving it. To requeue by comment alone, start a line with `requeue:`; otherwise
-remove the label. The next claim continues on the existing branch with the whole
-discussion in hand.
+Just **reply on the issue** — exactly the same gesture as answering a decision.
+A comment newer than the task's last 🐙 comment *is* the requeue, in **both** held
+states (PROTOCOL.md §6), so the task rejoins the queue and the next claim
+continues on the existing branch with the whole discussion in hand. Removing
+`awaiting-merge` by hand still works if you prefer.
+
+The flip side, on purpose: a comment that is *not* a work request ("nice, thanks")
+also requeues. If the branch is ready and you have nothing to ask for, the gesture
+is **merge it**, not comment on it — and a worker that picks the task back up and
+finds nothing actionable in your comment escalates instead of guessing, so the
+worst case is a question on the thread rather than a silent bounce.
 
 </details>
 
@@ -555,7 +560,7 @@ GitHub Actions) is open work —
 <details>
 <summary><b>Is the Copilot CLI worker as self-healing as the Claude Code one?</b></summary>
 
-Yes — and under `kraken-protocol/7` that includes recovery **latency**, which is
+Yes — and under `kraken-protocol/8` that includes recovery **latency**, which is
 the part that used to differ. A claim is a **lease** that expires 30 minutes
 after its last renewal, and expiry is applied by whoever reads the queue. So a
 worker that dies in any harness, in any way, frees its task within one TTL with

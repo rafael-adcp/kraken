@@ -74,37 +74,75 @@ class RequeueByDerivationTests(KrakenConformanceTest):
         self.assertIn(5, self.startable(),
                       "an operator reply quoting the disclaimer was misread as a worker's")
 
-    # --- awaiting-merge: delivered work needs an explicit directive -----------
+    # --- awaiting-merge: the SAME rule, the same gesture (protocol/8) ---------
 
-    def test_awaiting_merge_stays_held_on_a_bare_comment(self):
+    def test_awaiting_merge_requeues_on_a_bare_comment(self):
+        """protocol/8's load-bearing case, and the one that motivated it: a review
+        comment asking for follow-up work put the task back in the queue. Through
+        protocol/7 this thread stayed held — the ask was read, matched against a
+        directive that was not there, and discarded, leaving the operator watching
+        a queue that never moved."""
         self.mk_issue(6, "delivered", "kraken-task", "project:app", "awaiting-merge")
         self.worker_comment(6, mtype="delivered")
-        self.mk_comment(6, "I'll merge this tomorrow, looks good")
-        self.assertNotIn(6, self.startable(),
-                         "a bare comment bounced delivered work back to a worker")
+        self.mk_comment(6, "please also commit it to config/app.yml")
+        self.assertIn(6, self.startable(),
+                      "a review comment did not bring delivered work back")
 
-    def test_awaiting_merge_requeues_on_a_standalone_directive(self):
+    def test_a_standalone_requeue_line_still_requeues(self):
+        """The retired directive keeps working — not as a special shape any more,
+        just as an ordinary comment. An operator who learned the old gesture is
+        never punished for it."""
         self.mk_issue(7, "delivered, bounced", "kraken-task", "project:app",
                       "awaiting-merge")
         self.worker_comment(7, mtype="delivered")
         self.mk_comment(7, "requeue:\nplease fix the typo in the README first")
-        self.assertIn(7, self.startable(), "an explicit requeue directive was ignored")
+        self.assertIn(7, self.startable(), "the legacy requeue gesture stopped working")
 
-    def test_a_prose_requeue_does_not_bounce_a_ready_branch(self):
+    def test_a_prose_requeue_bounces_it_too(self):
+        """The inverse of the protocol/7 pin, and deliberately so: nothing matches
+        a directive any more, so this requeues because it is a COMMENT. The
+        accepted trade — a spurious requeue costs one drain, a swallowed work
+        request costs a debugging session (HISTORY.md, protocol/8)."""
         self.mk_issue(8, "delivered", "kraken-task", "project:app", "awaiting-merge")
         self.worker_comment(8, mtype="delivered")
         self.mk_comment(8, "requeue: is something I considered, but hold off")
-        self.assertNotIn(8, self.startable(),
-                         "a prose 'requeue:' sentence bounced delivered work")
+        self.assertIn(8, self.startable())
 
-    def test_a_pasted_marker_reads_as_a_worker_comment(self):
-        """Accepted edge (§4): any hidden marker reads as worker-authored, so a
-        pasted requeue marker does not bounce delivered work. The standalone line
-        — or removing the label by hand — is the operator's path."""
+    def test_a_pasted_marker_still_reads_as_a_worker_comment(self):
+        """Accepted edge (§4), unchanged by protocol/8: any hidden marker reads as
+        worker-authored, so an operator who pastes one is not heard. Removing the
+        label by hand is the escape hatch."""
         self.mk_issue(9, "delivered", "kraken-task", "project:app", "awaiting-merge")
         self.worker_comment(9, mtype="delivered")
         self.mk_comment(9, 'bounce it\n\n<!-- kraken {"type":"requeue"} -->')
         self.assertNotIn(9, self.startable())
+
+    def test_an_unreviewed_delivery_stays_held(self):
+        """The floor the symmetry must not break: no operator comment, no
+        requeue. A delivered task sits in the review queue until somebody says
+        something."""
+        self.mk_issue(15, "delivered, untouched", "kraken-task", "project:app",
+                      "awaiting-merge")
+        self.worker_comment(15, mtype="delivered")
+        self.assertNotIn(15, self.startable(),
+                         "delivered work rejoined the queue with nothing said about it")
+
+    def test_a_requeued_delivery_is_actually_claimable(self):
+        """End to end on the other held label: the filter offers it, the guard
+        accepts the label the derivation lifted, and the claim swaps it for
+        in-progress — the same path `needs-decision` takes."""
+        self.mk_issue(16, "delivered, reviewed", "kraken-task", "project:app",
+                      "awaiting-merge")
+        self.worker_comment(16, mtype="delivered")
+        self.mk_comment(16, "almost — rename the flag and re-push")
+
+        r = self.kraken("claim-next", "OWNER/tasks", "app", "w3")
+        self.assertEqual(r.rc, 0, "claim-next on a reviewed delivery: %s%s"
+                         % (r.out, r.err))
+        self.assertIn("claim-next: claimed issue=16 worker=w3", r.out.split("\n"))
+        self.assertTrue(self.has_label(16, "in-progress"), "in-progress not projected")
+        self.assertFalse(self.has_label(16, "awaiting-merge"),
+                         "the lifted label was not swapped off at claim time")
 
     # --- the derivation and the claim agree ----------------------------------
 

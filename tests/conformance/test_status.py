@@ -112,9 +112,14 @@ class StatusTests(KrakenConformanceTest):
         self.mk_comment(1, '> d\n\n<!-- kraken {"type":"delivered","worker":"w1","pr":"https://github.com/OWNER/work/pull/5"} -->\n\nlanded')
         self.mk_pr(5, "OPEN")
         self.mk_pr(999, "MERGED", now_iso())
-        # #2: a legacy thread — prose only, no marker carrying `pr`.
+        # #2: a legacy thread — delivered before the marker carried `pr`, so the
+        # URL is only in the prose. It is still a WORKER comment (it carries the
+        # marker, just without the field); a delivery comment that carried
+        # neither marker nor disclaimer was never a conforming one, and under
+        # protocol/8 it would read as an operator reply and requeue the task.
         self.mk_issue(2, "legacy delivery", "kraken-task", "project:app", "awaiting-merge")
-        self.mk_comment(2, "delivered in https://github.com/OWNER/work/pull/6")
+        self.mk_comment(2, '> d\n\ndelivered in https://github.com/OWNER/work/pull/6'
+                           '\n\n<!-- kraken {"type":"delivered","worker":"w1"} -->')
         self.mk_pr(6, "OPEN")
         # #3: delivered with no PR recorded at all — must not break the read.
         self.mk_issue(3, "no pr", "kraken-task", "project:app", "awaiting-merge")
