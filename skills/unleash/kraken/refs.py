@@ -139,24 +139,25 @@ class Refs:
                              if i == int(issue)))
 
     def commit_meta(self, shas: Sequence[Sha]) -> CommitMeta | None:
-        """Resolve each claim commit's {committedDate, message} in one batched
-        GraphQL call (one aliased `object(oid:)` field per distinct SHA), never one
-        call per ref — the resolve_depends_on pattern. Returns
+        """Resolve each claim commit's {committedDate, message} through the
+        batched fan-out (one aliased `object(oid:)` field per distinct SHA),
+        never one call per ref. Returns
         {sha: {"committedDate": ..., "message": ...}}, or None on transport
-        failure."""
-        if not shas:
-            return {}
-        owner, name = self.api.repo.split("/", 1)
+        failure — including a queue with more claims than one query may carry,
+        which `Api.aliased` splits into a call per chunk.
+
+        The alias is the SHA's INDEX in the sorted set rather than the SHA
+        itself, because a GraphQL alias must be a name and a SHA may start with
+        a digit. The numbering runs across the whole ask, not per chunk, so no
+        two chunks answer to the same `c0` when they are merged."""
         ordered = sorted(set(shas))
-        fields = " ".join(
+        fields = [
             f'c{i}: object(oid: "{sha}") {{ ... on Commit {{ committedDate message }} }}'
             for i, sha in enumerate(ordered)
-        )
-        resp = self.api.graphql(
-            f'{{ repository(owner: "{owner}", name: "{name}") {{ {fields} }} }}')
-        if resp is None:
+        ]
+        repo_obj = self.api.aliased(fields)
+        if repo_obj is None:
             return None
-        repo_obj = resp["data"]["repository"]
         meta = {}
         for i, sha in enumerate(ordered):
             obj = repo_obj.get(f"c{i}") or {}

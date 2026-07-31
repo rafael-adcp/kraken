@@ -56,13 +56,18 @@ OBSOLETE_ASSETS = (
 # IS kraken's dashboard, so colors trace the flow left to right: blue queued ->
 # yellow working -> red needs-you / green ready-to-land. The authoritative home
 # for PROTOCOL.md §3's SHOULD colors; init upserts with --force.
+#
+# A description names the STATE, never the delivery form. §8 puts the `pr` field
+# on the delivered marker "when there is one" — a work repo that takes no push
+# is delivered as a diff on the thread instead — so a label promising a draft PR
+# would make a delivery the protocol supports read as one that went wrong.
 CANONICAL_LABELS = (
     ("kraken-task", "1D76DB", "A unit of work for a kraken worker — the queue"),
     ("in-progress", "FBCA04", "Claimed by a worker and being executed"),
     ("needs-decision", "D93F0B",
      "Blocked on your decision — answer, then remove the label to requeue"),
     ("awaiting-merge", "0E8A16",
-     "Delivered as a draft PR — waiting for your review and merge"),
+     "Delivered — waiting for your review and merge"),
     ("priority:high", "B60205",
      "Claimed ahead of normal tasks — a scheduling preference, not a state"),
 )

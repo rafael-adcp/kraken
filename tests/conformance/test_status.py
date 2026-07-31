@@ -135,7 +135,12 @@ class StatusTests(KrakenConformanceTest):
                          "#1 was flagged an orphan off someone else's merged PR")
         self.assertRegex(r.out, r"#2 .*pull/6.*legacy",
                          "#2's free-text link must be marked legacy")
-        self.assertRegex(r.out, r"#3 .*no PR link recorded")
+        # #3 delivered the diff on the thread — §8's "when there is one". The
+        # line must point the operator AT the issue, not report a missing PR:
+        # nothing here needs chasing.
+        self.assertRegex(r.out, r"#3 .*review on the thread \(no PR\)")
+        self.assertNotIn("no PR link recorded", r.out,
+                         "a supported delivery must not read as a defect")
 
         js = json.loads(self.kraken("status", "OWNER/tasks", "--project", "app",
                                     "--json").out)

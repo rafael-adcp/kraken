@@ -62,6 +62,7 @@ orchestration left to do by hand.
      📋 Review queue (awaiting-merge) — N waiting for your merge
         #88  <title> → PR/MR link
         #91  <title> → PR/MR link  (legacy: read from free text, no delivered marker)
+        #94  <title> → review on the thread (no PR)
 
      ❓ Decision queue (needs-decision) — N waiting for your call
         #97  <title>  (options in thread)
@@ -123,7 +124,9 @@ A stable object for downstream tooling:
 `heartbeat_age_seconds` / `heartbeat_anchor` / `heartbeat_msg` are `null` when there is
 no readable claim ref (an orphan projection, or a claim commit that could not be read);
 `stale` is `true` when the lease no longer holds — expired, or with no readable clock
-behind it; `pr_url` is `null` when no PR was recorded. `pr_source` says where that
+behind it; `pr_url` is `null` when the delivery carried no PR — §8 records the field
+"when there is one", so the diff is on the thread and the issue IS the review target,
+not a delivery to go chase. `pr_source` says where that
 link came from: `"marker"` is the delivery's own `pr` field, the source of truth
 (PROTOCOL.md §8); `"legacy-free-text"` means no `delivered` marker carried a `pr` and
 the link was read off the thread's prose — a legacy guess, not a recorded delivery.

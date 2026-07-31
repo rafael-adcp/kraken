@@ -35,9 +35,10 @@ from .refs import Refs
 # payload, not correctness.
 QUEUE_COMMENT_WINDOW = 25
 
-# How many issues one hydration call asks about. The window is per issue, so the
-# chunk bounds the node count of a single query rather than the number of queries
-# — 50 × 25 keeps a hydration page about the size of a queue page.
+# How many issues one hydration call asks about — a tighter ceiling than the
+# general GRAPHQL_ALIAS_CHUNK because each alias here drags a whole window behind
+# it. The chunk bounds the node count of a single query rather than the number of
+# queries: 50 × 25 keeps a hydration page about the size of a queue page.
 COMMENT_HYDRATE_CHUNK = 50
 
 
@@ -509,9 +510,9 @@ class Queue:
         `QueueRead`, or None on transport failure.
 
         Resolving the lease costs one extra batched call — and only when a ref
-        actually exists: `resolve_commit_meta` answers `{}` for an empty ref list
+        actually exists: `Refs.commit_meta` answers `{}` for an empty ref list
         without a request, so an idle queue pays nothing for leases and a busy one
-        pays O(1) in the number of claims, never O(N).
+        pays a call per GRAPHQL_ALIAS_CHUNK claims, never one per claim.
 
         The comment hydration obeys the same rule and for the same reason: the leases
         have to be known before the hungry set can be (a live lease outranks the
@@ -519,6 +520,31 @@ class Queue:
         tasks = self.open_tasks()
         if tasks is None:
             return None
+        got = self.lease_view(now, ttl)
+        if got is None:
+            return None
+        leases, commit_meta = got
+        if self.hydrate(tasks, leases) is None:
+            return None
+        return QueueRead(tasks, leases, commit_meta)
+
+    def lease_view(self, now: Epoch | None = None, ttl: int | None = None,
+                   ) -> tuple[dict[Issue, Lease], CommitMeta] | None:
+        """The ladder half of `read`: every claim ref's lease, aged against the
+        server's clock, and the commit meta it was decoded from — WITHOUT the
+        issue walk. Returns `(leases, commit_meta)`, or None on transport failure.
+
+        Two batched reads, and the second only when a ref actually exists:
+        `commit_meta` answers `{}` for an empty ref list without a request, so an
+        unclaimed queue pays one call and a busy one pays a call per
+        GRAPHQL_ALIAS_CHUNK claims, never one per claim and never one query the
+        server may reject for its size.
+
+        Separate from `read` because one question genuinely does not need the
+        queue: "does this worker already hold a claim?" (§5) is answered by the
+        LADDER, and the ladder is what arbitrates it. A caller that asks only
+        that should not pay for a paginated issue walk and a comment hydration
+        to find out — see `claim.open_claim_of`."""
         refs = Refs(self.api)
         claim_refs = refs.all()
         if claim_refs is None:
@@ -527,14 +553,12 @@ class Queue:
         if commit_meta is None:
             return None
         # The server's clock, not this machine's (§5.1): the lease timestamps
-        # about to be aged are commit dates GitHub stamped, and the walk above
-        # has already been told what time GitHub thinks it is.
+        # about to be aged are commit dates GitHub stamped, and the reads above
+        # have already been told what time GitHub thinks it is.
         leases = lease_state(claim_refs, commit_meta,
                              self.api.server_now() if now is None else now,
                              lease_ttl_seconds(ttl))
-        if self.hydrate(tasks, leases) is None:
-            return None
-        return QueueRead(tasks, leases, commit_meta)
+        return (leases, commit_meta)
 
     def candidates(self, project: str, read: QueueRead | None = None,
                    ) -> list[Candidate] | None:
@@ -604,34 +628,27 @@ class Queue:
 
     def comment_windows(self,
                         numbers: Iterable[Issue]) -> dict[Issue, list[Json]] | None:
-        """The trailing comment window of the named issues, `{number: [nodes]}`, in
-        batched aliased GraphQL calls (`iN: issue(number: N) { comments(last: …) }`)
-        — the same shape `resolve_depends_on` uses, for the same reason: a fan-out
-        the queue walk no longer pays for on every task must not become one request
+        """The trailing comment window of the named issues, `{number: [nodes]}`,
+        through the batched fan-out (`iN: issue(number: N) { comments(last: …) }`)
+        — the same shape `_depends_on` uses, for the same reason: a fan-out the
+        queue walk no longer pays for on every task must not become one request
         per task either. Returns None on transport failure.
 
         Cost is O(len(numbers) / COMMENT_HYDRATE_CHUNK) calls, and O(1) — no call at
         all — for the overwhelmingly common empty ask."""
-        if not numbers:
-            return {}
-        owner, name = self.api.repo.split("/", 1)
         numbers = sorted(numbers)
-        out = {}
-        for start in range(0, len(numbers), COMMENT_HYDRATE_CHUNK):
-            chunk = numbers[start:start + COMMENT_HYDRATE_CHUNK]
-            fields = " ".join(
-                f"i{n}: issue(number: {n}) {{ comments(last: {QUEUE_COMMENT_WINDOW}) "
-                f"{{ nodes {{ body createdAt }} }} }}"
-                for n in chunk
-            )
-            resp = self.api.graphql(f'{{ repository(owner: "{owner}", name: "{name}") {{ {fields} }} }}')
-            if resp is None:
-                return None
-            repo_obj = resp["data"]["repository"]
-            for n in chunk:
-                obj = repo_obj.get(f"i{n}") or {}
-                out[n] = ((obj.get("comments") or {}).get("nodes")) or []
-        return out
+        fields = [
+            f"i{n}: issue(number: {n}) {{ comments(last: {QUEUE_COMMENT_WINDOW}) "
+            f"{{ nodes {{ body createdAt }} }} }}"
+            for n in numbers
+        ]
+        repo_obj = self.api.aliased(fields, COMMENT_HYDRATE_CHUNK)
+        if repo_obj is None:
+            return None
+        return {
+            n: ((repo_obj.get(f"i{n}") or {}).get("comments") or {}).get("nodes") or []
+            for n in numbers
+        }
 
     # --- routing: which projects this repo actually carries -------------------
 
@@ -678,19 +695,20 @@ class Queue:
     # --- internals ------------------------------------------------------------
 
     def _depends_on(self,
-                    targets: Iterable[Issue]) -> dict[Issue, str] | None:
-        """Resolve every `depends-on: #N` fallback target's open/closed state in
-        one batched GraphQL call (one aliased `iN: issue(number: N) { state }`
+                    targets: Iterable[Issue]) -> dict[Issue, bool] | None:
+        """Resolve every `depends-on: #N` fallback target's open/closed state
+        through the batched fan-out (one aliased `iN: issue(number: N) { state }`
         field per distinct target), never one call per candidate. Returns
-        {number: is_open}, or None on transport failure."""
-        if not targets:
-            return {}
-        owner, name = self.api.repo.split("/", 1)
-        fields = " ".join(f"i{n}: issue(number: {n}) {{ state }}" for n in targets)
-        resp = self.api.graphql(f'{{ repository(owner: "{owner}", name: "{name}") {{ {fields} }} }}')
-        if resp is None:
+        {number: is_open}, or None on transport failure.
+
+        The targets are materialized because they are read twice — once to build
+        the fields, once to read the answers back — and a caller is entitled to
+        hand this a generator."""
+        targets = list(targets)
+        fields = [f"i{n}: issue(number: {n}) {{ state }}" for n in targets]
+        repo_obj = self.api.aliased(fields)
+        if repo_obj is None:
             return None
-        repo_obj = resp["data"]["repository"]
         return {
             n: str((repo_obj.get(f"i{n}") or {}).get("state", "")).upper() == "OPEN"
             for n in targets

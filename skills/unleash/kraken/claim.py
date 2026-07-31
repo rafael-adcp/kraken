@@ -276,33 +276,91 @@ def refuse_second_claim(read: QueueRead, worker: Worker,
         if not lease.held_by(worker):
             continue
         task = tasks.get(held)
-        if task is None or task.labels & set(HELD_LABELS):
+        if claim_is_moot(task is not None, task.labels if task else set()):
             continue
         if issue is not None and str(held) == str(issue):
             continue
-        diag(
-            f"claim: refused worker={worker} holds={held} — one task at a time "
-            f"(PROTOCOL.md §5); resolve the open claim first "
-            f"(deliver / escalate / release)"
-        )
+        diag(refused_line(worker, held))
         return held
     return None
 
 
+def claim_is_moot(is_open_task: bool, labels: set[str]) -> bool:
+    """Whether a claim ref of ours is a moot ref awaiting collection rather than
+    an open claim: its task has left the queue (closed, or no longer a
+    kraken-task) or already wears a terminal label — exactly the cases
+    `resume_verdict` calls resolved.
+
+    One predicate, because the same rule is now decided from two different
+    observations: the drain reads it off the queue walk it already has, and a
+    named claim reads it off one issue fetch (`open_claim_of`). A rule with two
+    copies is a rule with two answers."""
+    return (not is_open_task) or bool(labels & set(HELD_LABELS))
+
+
+def refused_line(worker: Worker, held: Issue) -> str:
+    """The §5 refusal, worded once — both guards print the identical sentence."""
+    return (f"claim: refused worker={worker} holds={held} — one task at a time "
+            f"(PROTOCOL.md §5); resolve the open claim first "
+            f"(deliver / escalate / release)")
+
+
+def open_claim_of(api: Api, worker: Worker, issue: Issue | str | None = None,
+                  ttl: int | None = None) -> tuple[bool, Issue | None]:
+    """The §5 one-task-at-a-time guard for a caller that holds no queue read —
+    the same rule and the same verdict as `refuse_second_claim`, decided from the
+    claim-ref LADDER instead of the issue walk. Returns `(ok, held)`; `ok` is
+    False only on transport failure, and only then, so "this worker is clear" is
+    never confused with "the read did not land".
+
+    The ladder is what arbitrates ownership (§5), so it is also what can answer
+    this — and answering it from the queue instead was costing a named `claim` a
+    paginated issue walk plus a comment hydration to learn something no issue
+    body was ever going to say. Here it is two batched calls, plus one issue
+    fetch per claim actually found, which in practice is zero or one.
+
+    The alternative considered and rejected was a server-side per-worker index
+    ref. It could only ever be best-effort — a failed index write must not fail a
+    won claim — so a missing entry would be indistinguishable from a clear
+    worker, which turns a MUST into a hint. The ladder cannot lie about this."""
+    got = Queue(api).lease_view(ttl=ttl)
+    if got is None:
+        return (False, None)
+    leases, _commit_meta = got
+
+    for held, lease in sorted(leases.items()):
+        if not lease.held_by(worker):
+            continue
+        # A re-claim of the SAME issue is permitted (§5's network-failure
+        # caveat), and deciding it needs no fetch — so it is decided first.
+        if issue is not None and str(held) == str(issue):
+            continue
+        obj = api.issue_detail(held)
+        if obj is None:
+            return (False, None)
+        labels = {lbl.get("name", "") for lbl in obj.get("labels", [])}
+        is_open_task = (str(obj.get("state", "")).upper() == "OPEN"
+                        and "kraken-task" in labels)
+        if claim_is_moot(is_open_task, labels):
+            continue
+        diag(refused_line(worker, held))
+        return (True, held)
+    return (True, None)
+
+
 def cmd_claim(args: argparse.Namespace) -> int:
     def ensure_clear() -> int | None:
-        # The §5 guard, derived from the claim refs rather than the local
-        # scratch file. A named claim has read no queue, so it reads one here —
-        # the attempt calls this only once the free label guard has let the
-        # task through, so a held task still refuses without touching the
-        # git-data API.
-        read = Queue(args.api).read()
-        if read is None:
-            diag("claim: gh-failure stage=list")
+        # The §5 guard, derived from the claim refs rather than the local scratch
+        # file — and from the LADDER alone, not a whole queue read: a named claim
+        # is asking who holds what, which is the one question the refs answer by
+        # themselves. The attempt calls this only once the free label guard has
+        # let the task through, so a held task still refuses without touching the
+        # git-data API at all.
+        ok, held = open_claim_of(args.api, args.worker, args.issue)
+        if not ok:
+            diag("claim: gh-failure stage=lease")
             return EXIT_TRANSPORT
-        if refuse_second_claim(read, args.worker, args.issue) is not None:
-            return EXIT_NOT_CLEAR
-        return None
+        return EXIT_NOT_CLEAR if held is not None else None
 
     # The target's lease is probed by the attempt itself: an expired one does
     # not hold the task, it gets stolen (§5).

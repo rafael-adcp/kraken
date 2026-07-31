@@ -320,6 +320,29 @@ class RefCasTests(unittest.TestCase):
             "graphql must not be called for []"))
         self.assertEqual(kraken.Refs(api).commit_meta([]), {})
 
+    def test_resolve_commit_meta_chunks_and_keeps_its_aliases_unique(self):
+        # More claims than one query may carry. The alias is the SHA's index, so
+        # numbering that restarted per chunk would collapse two `c0`s in the
+        # merge — and a lease read back under the wrong SHA names the wrong
+        # worker and the wrong timestamp.
+        queries = []
+
+        def fake(q):
+            queries.append(q)
+            return {"data": {"repository": {
+                alias: {"committedDate": "2026-07-01T00:00:00Z",
+                        "message": clm("w-" + alias)}
+                for alias in re.findall(r"(c[0-9]+): object", q)}}}
+
+        total = kraken.GRAPHQL_ALIAS_CHUNK * 2 + 1
+        shas = ["%040x" % i for i in range(total)]
+        meta = kraken.Refs(FakeApi("o/t", graphql=fake)).commit_meta(shas)
+        self.assertEqual(len(queries), 3, "chunked, not one query per claim")
+        self.assertEqual(len(meta), total)
+        for i, sha in enumerate(sorted(shas)):
+            self.assertEqual(meta[sha]["message"], clm("w-c%d" % i),
+                             "each SHA must carry back its OWN commit")
+
     def test_claim_meta_of_decodes_worker_msg_and_anchor(self):
         cm = {"s1": {"committedDate": "2026-07-01T00:00:00Z",
                      "message": hb("w1", "building the thing")}}
@@ -617,6 +640,64 @@ class CommentRecordsPaginationTests(unittest.TestCase):
     def test_transport_failure_returns_none(self):
         api = FakeApi(request=lambda m, p, body=None: (500, ""))
         self.assertIsNone(api.comment_records("42"))
+
+
+class BatchedAliasTests(unittest.TestCase):
+    """`Api.aliased`: the one fan-out shape, and its ceiling.
+
+    Batching is what stops a fan-out becoming a request per item; the CHUNK is
+    what stops it becoming a single query that grows without limit. An
+    over-large GraphQL query is not slow, it is rejected — so an uncapped batch
+    fails every item in it at once, on exactly the busy queue that needed it to
+    work."""
+
+    def _recorder(self, node=None):
+        """A FakeApi that records every query and answers each alias it sees."""
+        self.queries = []
+
+        def fake(q):
+            self.queries.append(q)
+            return {"data": {"repository": {
+                alias: (node if node is not None else {"seen": alias})
+                for alias in re.findall(r"(a[0-9]+): x", q)}}}
+        return FakeApi("o/t", graphql=fake)
+
+    def test_an_empty_ask_is_no_call(self):
+        api = FakeApi("o/t", graphql=lambda q: self.fail(
+            "graphql must not be called for []"))
+        self.assertEqual(api.aliased([]), {})
+
+    def test_fields_within_the_chunk_are_one_call(self):
+        api = self._recorder()
+        got = api.aliased([f"a{i}: x" for i in range(kraken.GRAPHQL_ALIAS_CHUNK)])
+        self.assertEqual(len(self.queries), 1)
+        self.assertEqual(len(got), kraken.GRAPHQL_ALIAS_CHUNK)
+        self.assertIn('repository(owner: "o", name: "t")', self.queries[0])
+
+    def test_beyond_the_chunk_splits_and_merges(self):
+        api = self._recorder()
+        total = kraken.GRAPHQL_ALIAS_CHUNK * 2 + 1
+        got = api.aliased([f"a{i}: x" for i in range(total)])
+        self.assertEqual(len(self.queries), 3, "chunked, not one call per field")
+        # Every alias survives the merge — a chunk boundary must not eat one.
+        self.assertEqual(sorted(got), sorted(f"a{i}" for i in range(total)))
+
+    def test_a_failed_chunk_takes_the_whole_read_down(self):
+        # Half a dict is worse than none: the caller cannot tell an item the
+        # server omitted from one it never asked about.
+        calls = []
+
+        def fake(q):
+            calls.append(q)
+            return None if len(calls) > 1 else {"data": {"repository": {"a0": {}}}}
+
+        api = FakeApi("o/t", graphql=fake)
+        self.assertIsNone(
+            api.aliased([f"a{i}: x" for i in range(kraken.GRAPHQL_ALIAS_CHUNK + 1)]))
+
+    def test_a_null_repository_is_an_empty_answer_not_a_crash(self):
+        api = FakeApi("o/t", graphql=lambda q: {"data": {"repository": None}})
+        self.assertEqual(api.aliased(["a0: x"]), {})
 
 
 class ClaimNextIterationTests(unittest.TestCase):
@@ -1484,6 +1565,57 @@ class CommentHydrationTests(unittest.TestCase):
         held = _task_node(1, ["kraken-task", "needs-decision"])
         api = FakeApi("o/t", graphql=lambda q: None)
         self.assertIsNone(kraken.Queue(api).hydrate([held], {}))
+
+
+class DependsOnBatchTests(unittest.TestCase):
+    """The `depends-on: #N` fallback resolve. One field per distinct target in
+    one query, chunked — the whole point of the fallback is that a queue full of
+    text dependencies costs round trips in the number of CALLS, not targets."""
+
+    def _recorder(self, open_numbers=()):
+        self.queries = []
+
+        def fake(q):
+            self.queries.append(q)
+            return {"data": {"repository": {
+                "i" + n: {"state": "OPEN" if int(n) in open_numbers else "CLOSED"}
+                for n in re.findall(r"i([0-9]+): issue", q)}}}
+        return FakeApi("o/t", graphql=fake)
+
+    def test_an_empty_ask_is_no_call(self):
+        api = FakeApi("o/t", graphql=lambda q: self.fail(
+            "graphql must not be called for []"))
+        self.assertEqual(kraken.Queue(api)._depends_on([]), {})
+
+    def test_targets_within_the_chunk_are_one_call(self):
+        api = self._recorder(open_numbers={2})
+        got = kraken.Queue(api)._depends_on([1, 2, 3])
+        self.assertEqual(len(self.queries), 1, "three targets must cost ONE call")
+        self.assertEqual(got, {1: False, 2: True, 3: False})
+
+    def test_chunks_beyond_the_ceiling(self):
+        total = kraken.GRAPHQL_ALIAS_CHUNK * 2 + 1
+        api = self._recorder(open_numbers=set(range(1, total + 1)))
+        got = kraken.Queue(api)._depends_on(range(1, total + 1))
+        self.assertEqual(len(self.queries), 3, "chunked, not one call per target")
+        self.assertEqual(len(got), total)
+        self.assertTrue(all(got.values()))
+
+    def test_a_generator_survives_being_read_twice(self):
+        # The targets are read once to build the fields and once to read the
+        # answers back. Consuming them on the first pass answers {} for every
+        # target — every dependency silently "closed", every task startable.
+        api = self._recorder(open_numbers={7})
+        self.assertEqual(kraken.Queue(api)._depends_on(n for n in (7, 8)),
+                         {7: True, 8: False})
+
+    def test_an_issue_the_reply_omits_is_not_open(self):
+        api = FakeApi("o/t", graphql=lambda q: {"data": {"repository": {}}})
+        self.assertEqual(kraken.Queue(api)._depends_on([5]), {5: False})
+
+    def test_transport_failure_propagates_as_none(self):
+        api = FakeApi("o/t", graphql=lambda q: None)
+        self.assertIsNone(kraken.Queue(api)._depends_on([1]))
 
 
 class ExpiryCountTests(unittest.TestCase):

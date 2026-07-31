@@ -1,21 +1,27 @@
-# The Kraken Coordination Protocol — revision history
+# The Kraken Coordination Protocol — revision history and rationale
 
-The normative specification is [`PROTOCOL.md`](PROTOCOL.md). This file is the
-**record of how it got there**: one entry per revision, each stating what
-changed, why the previous design made it necessary, whether it breaks
-compatibility, and what it retired.
+The normative specification is [`PROTOCOL.md`](PROTOCOL.md). This file is
+everything that is **not** a rule but is worth keeping, in two parts:
+
+1. the **revision history** — one entry per revision, each stating what changed,
+   why the previous design made it necessary, whether it breaks compatibility,
+   and what it retired;
+2. the **standing rationale** ([below](#design-rationale)) — why the rules that
+   are *currently* in force are shaped the way they are.
 
 Nothing here is normative. A worker is conforming if it satisfies
 [`PROTOCOL.md`](PROTOCOL.md) as written — reading this file is never required to
-implement one. It exists because the *reasoning* behind a retired mechanism is
-what stops it from being reinvented, and because a reader who meets the spec as
-a finished object deserves to know which problems each rule was paid for.
+implement one. It exists because the *reasoning* behind a design is what stops a
+retired one from being reinvented, and because a reader who meets the spec as a
+finished object deserves to know which problems each rule was paid for.
 
-Entries are newest first. A backward-incompatible change bumps the integer and
-gets an entry; clarifications and strictly additive rules amend
+Revision entries are newest first. A backward-incompatible change bumps the
+integer and gets an entry; clarifications and strictly additive rules amend
 [`PROTOCOL.md`](PROTOCOL.md) in place and do not.
 
 ---
+
+## Revision history
 
 **What changed in `kraken-protocol/8`.** The **requeue derivation became
 symmetric**. Through protocol/7 the two held states were asymmetric: a bare
@@ -172,3 +178,117 @@ visible line grammar of protocol/1 (`^<keyword>: <value>` scanned per line) to
 a structured **hidden marker** — an HTML comment carrying JSON (§4). The visible
 prose in a marker-carrying comment is a human-facing courtesy and MUST NOT be
 machine-parsed.
+
+---
+
+## Design rationale
+
+Why the rules *currently* in force are shaped the way they are. These paragraphs
+lived inside [`PROTOCOL.md`](PROTOCOL.md) until the spec was split into rules and
+reasoning; they legislate nothing, and each is keyed to the section it explains.
+
+### §4 — why the marker, and not the disclaimer, is the discriminator
+
+Markers are audit trail. The claim is decided by the ref CAS (§5), so the `claim`
+and `heartbeat` markers on the ref carry worker identity and progress for a
+console to render, and the comment markers are the human-facing record of a
+transition plus the `pr`/`reason` fields tooling reads. The `note` marker records
+nothing at all — it changes no label and no claim ref, and exists only so a
+free-form note is recognizable as worker-authored.
+
+The disclaimer remains required as the human-facing attribution, but it stopped
+being **load-bearing** for machine semantics in protocol/5: because *every*
+kraken-authored comment now wears a marker — including the validator's and the
+reconciler's — marker presence alone tells a worker comment from an operator
+reply. That is what retired protocol/4's `user.type == Bot` gate, and it is why
+the derivation needs no author metadata in its query. The disclaimer's first-line
+form survives only as a fallback for legacy or marker-less threads.
+
+Keeping the disclaimer agent-agnostic is what lets a second implementation drain
+the same queue without diverging the human-vs-tentacle discriminator: every
+conforming worker, whatever agent drives it, emits the identical line, so the
+timeline reads uniformly.
+
+### §5.1 — why both ends of the lease clock are the server's
+
+The lease timestamp is a commit date GitHub stamped. Comparing it to local
+`time.time()` compares two clocks and calls the difference age: a worker running
+five minutes fast steals leases that are still alive, one running five minutes
+slow keeps dead ones alive past their TTL. Coordination happens between machines
+whose clocks disagree, and the whole disagreement lands in that subtraction.
+
+Reading the server's *now* costs no request — every HTTP response carries a
+`Date` header — which is why the rule can be a MUST rather than a nicety. Reading
+the lease itself costs nothing extra either: the ref's commit date comes with the
+queue read a worker is already performing.
+
+### §5.2 — why a steal is not a special case
+
+Stealing an expired lease is the same algorithm from a different starting rung: a
+first claim creates generation 1, a steal creates the generation above the expired
+holder's, and a renewal creates the generation above its own. All three are the
+identical conflict-failing `create` on the identical ref name.
+
+That is where the uniqueness guarantee comes from, and it holds without
+qualification:
+
+- **N thieves racing one expired lease** all try to create generation `G+1`. The
+  server accepts one. Every other gets 422 and writes nothing.
+- **A thief racing the holder's renewal** is the same race: the renewal is also a
+  `create` of `G+1`, so either the holder keeps the lease and the thief is told it
+  lost, or the thief takes it and the *holder* is told — immediately, by its own
+  renewal failing, not later by some reconciliation.
+- **Nothing is deleted to make room.** There is no instant at which the task is
+  observably unheld, no ordering in which one worker's write erases another's, and
+  no need for a post-CAS confirmation: winning the create *is* holding the lease,
+  because a later generation can only be created by someone who has already
+  observed this one.
+
+A reader's observation of `G` may be stale — it costs a lost CAS, never a lost
+lease. There is no claim window and no reset events; the constructs that existed
+only to compensate for writes that could not fail on conflict stay retired.
+
+### §5.3 — why proving the lease is what makes a short TTL safe
+
+A worker that stalled long enough to be stolen from — a suspended machine, a
+rate-limit wait, an hour-long build — is indistinguishable from a live one until
+it tries to write. A result written onto a task another worker is now executing is
+worse than no result: it lies to the review queue, and a release would delete the
+live holder's lease.
+
+Nothing is lost by refusing. The branch and PR still exist, and re-claiming the
+task delivers them honestly. Without this check the TTL would have to be long
+enough to cover the worst silent step any worker might take, which is the same
+thing as not having a lease at all.
+
+### §6 — why the reader reconciles, and why only two rules survive
+
+Reconciliation is not delegated to the coordination repo because a stale claim
+obstructs exactly one party — the next worker that wants to claim — and no other
+observer of it exists. The party that cares is the party that repairs, and it does
+so over a queue read it was performing anyway, so the pass costs nothing and
+happens at read time rather than up to a scheduling interval later. That is what
+let protocol/5 retire the scheduled job, and with it the requirement that a
+private queue repo run CI at all.
+
+Two things are explicitly *not* the reconcile's job. An **expired lease** is not:
+expiry is applied on the read (§5.1) and the next claim steals it, so a reconciler
+that "repaired" one would only escalate a task the next drain was about to pick
+up. A **stray `in-progress` label** is not either, in neither direction: the label
+is write-only (§3), so it holds nothing, hides nothing and misroutes nothing, and
+the next transition overwrites it. protocol/6 had a rule for each of those two
+label cases; protocol/7 retired both.
+
+The repeat-expiry guard exists because a short TTL solves the abandoned task and
+creates a new one. An abandoned task returns to the queue on its own — but a task
+that *kills whatever worker touches it* would circulate forever, burning a drain
+each round and telling nobody. Past the threshold it stops being stolen and
+becomes the operator's call.
+
+### §8 — why the delivery URL is a field and not a link in the prose
+
+A link found in prose is not a delivery. It can be a PR a human mentioned in
+passing, another task's PR, or a `/pull/N` in an unrelated repo — and a reader
+that greps for one reports the wrong PR with exactly the same confidence as the
+right one. Making the URL a structured field is the §4 marker-only reading rule
+applied to the last place where free text was still read as data.
