@@ -105,7 +105,7 @@ the GitHub UI is the dashboard and the issue timeline is the log.
 | `kraken-task` | queued (when no other state label is present) | `1D76DB` blue |
 | `in-progress` | claimed by a worker and being executed | `FBCA04` yellow |
 | `needs-decision` | blocked on the operator's decision | `D93F0B` red |
-| `awaiting-merge` | delivered as a draft PR, waiting for review + merge | `0E8A16` green |
+| `awaiting-merge` | delivered, waiting for review + merge | `0E8A16` green |
 
 `project:<name>` (suggested `5319E7` purple) is routing identity, not state.
 `priority:high` (suggested `B60205` red) is a scheduling preference, not state: a

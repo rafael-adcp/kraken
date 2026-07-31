@@ -60,14 +60,19 @@ def render_status(report: Json) -> str:
 
 
 def _review_lines(review: list[Json]) -> list[str]:
-    """The awaiting-merge queue: what is waiting on the operator's merge, with
-    the delivery link and how much the link can be trusted."""
+    """The awaiting-merge queue: what is waiting on the operator's merge, where
+    the delivery is, and how much that pointer can be trusted."""
     lines = [f"  📋 Review queue (awaiting-merge) — "
              f"{len(review) or 'nothing'} waiting for your merge"
              if review else
              "  📋 Review queue (awaiting-merge) — nothing waiting"]
     for item in review:
-        link = f" → {item['pr_url']}" if item["pr_url"] else " → (no PR link recorded)"
+        # No link is not a missing link. §8 carries the `pr` field "when there is
+        # one", so a work repo that takes no push delivers the diff on the thread
+        # — a supported delivery, and the review target IS the issue. Saying
+        # "recorded" sent the operator looking for a PR nobody ever opened.
+        link = (f" → {item['pr_url']}" if item["pr_url"]
+                else " → review on the thread (no PR)")
         # A link the delivery never recorded is a guess off the thread's prose —
         # say so, so the operator knows which links the worker stands behind.
         if item["pr_url"] and item.get("pr_source") == "legacy-free-text":
