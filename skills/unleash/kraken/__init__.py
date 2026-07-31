@@ -74,8 +74,8 @@ from .refs import (
 from .queue import (
     COMMENT_HYDRATE_CHUNK, DEPENDS_ON_RE, NO_RESPONSE_PLACEHOLDER,
     QUEUE_COMMENT_WINDOW, Candidate, Queue, QueueRead, Task, claim_meta_of,
-    cmd_list_startable, comment_hungry, has_requeue_directive,
-    is_empty_section, is_worker_comment, requeue_verdict, section_body
+    cmd_list_startable, comment_hungry, is_empty_section, is_worker_comment,
+    requeue_verdict, section_body
 )
 from .render import (
     render_init, render_next_action, render_status

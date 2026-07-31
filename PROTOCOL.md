@@ -1,6 +1,6 @@
 # The Kraken Coordination Protocol
 
-**Version: `kraken-protocol/7`**
+**Version: `kraken-protocol/8`**
 
 This document is the normative specification of the coordination contract
 between a task queue built on GitHub Issues and the workers that drain it. It
@@ -20,7 +20,7 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY**
 are to be interpreted as described in RFC 2119.
 
 **Versioning.** Backward-incompatible changes to this contract bump the
-integer (`kraken-protocol/7` and onward); clarifications and strictly additive
+integer (`kraken-protocol/8` and onward); clarifications and strictly additive
 rules amend this document in place by PR. An implementation states the protocol
 version it targets (this plugin: in `.claude-plugin/plugin.json`), and the
 `Kraken-Task:` commit trailer's `kraken@<version>` maps any delivered commit
@@ -155,7 +155,8 @@ Legal transitions and who performs them:
 | `in-progress` → queued | worker | release (§9) |
 | `needs-decision` → queued | operator | reply on the thread — every reader derives the requeue from it (§6); or remove the label by hand |
 | `needs-decision` → queued | claiming worker | the label is swapped for `in-progress` when the derived-requeued task is claimed (§5) |
-| `awaiting-merge` → queued | operator | review feedback on the thread, then remove the label (a bare comment does NOT requeue — see §6) |
+| `awaiting-merge` → queued | operator | reply on the thread — the same gesture and the same derivation as `needs-decision` (§6); or remove the label by hand |
+| `awaiting-merge` → queued | claiming worker | the label is swapped for `in-progress` when the derived-requeued task is claimed (§5) |
 | `awaiting-merge` → closed | merge | the PR's `Closes` reference (§8), or a manual close |
 
 Workers MUST NOT close task issues: "done" for a worker means *delivered for
@@ -198,7 +199,6 @@ the surrounding prose is a pure human courtesy. **Grammar** (normative):
 | `lease-expired` | `worker`, `previous_worker`, `age_seconds`? | comment | claim (steal) | an expired lease was taken over; **counted** by §6's repeat-expiry guard |
 | `stale-claim` | `reason`? | comment | reconciler | a stale/orphaned claim was reclaimed (§6) |
 | `note` | `worker` | comment | note | free-form worker comment (assumptions/progress); carries **no** machine state — inert to reap/requeue/validate |
-| `requeue` | — | comment | operator | bounce a delivered (`awaiting-merge`) task back for rework (§6) |
 | `validation` | — | comment | validator | task fails the queue-entry gate; the comment lists what to fix (§2.1) |
 
 **Markers are audit trail and directives, never the arbiter.** Under protocol/4
@@ -508,16 +508,17 @@ task within one TTL.
   for its worker, never a requeue. An **expired** lease outranks nothing — it
   holds no task (§5.1), so it cannot suppress a requeue either.
 
-  The two held states are asymmetric: a bare operator comment requeues
-  **`needs-decision`** (a human comment is almost always the answer; a "let me
-  think" self-corrects via re-escalation), but **`awaiting-merge`** is already
-  *delivered* and stays held unless a reply carries an explicit **requeue
-  directive** — a standalone `requeue:` line (a line whose only content is
-  `requeue`/`requeue:`). A `requeue:` buried in a prose sentence **MUST NOT**
-  bounce a ready branch back to a worker. (Because any comment bearing a hidden
-  marker reads as worker-authored, a pasted `<!-- kraken {"type":"requeue"} -->`
-  marker is subsumed by the §4 accepted edge — the standalone line, or removing
-  the label by hand, is the operator's path.)
+  The rule is the **same for both held states**. A bare operator comment requeues
+  `needs-decision` and `awaiting-merge` alike: a comment on the thread means
+  something needs doing, and which label the task happens to wear does not change
+  what the operator meant by writing it. There is no directive to remember and no
+  line shape to get right — the gesture is *reply*, everywhere. (Removing the
+  label by hand still requeues too: the label is what is being read.)
+
+  A worker that claims a task requeued this way and finds **no actionable request**
+  in the newest operator comment **SHOULD** escalate (§7) rather than guess at
+  rework. Delivered work stays delivered — the branch and PR are untouched — and a
+  question on the thread is the honest answer to a comment nobody can act on.
 
   The derivation ranges over the two held labels only. `in-progress` is not one
   of them and never needs lifting: it holds nothing (§3), so a task wearing a

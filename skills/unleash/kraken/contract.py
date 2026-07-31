@@ -109,7 +109,7 @@ PRIORITY_LABEL = "priority:high"
 # held. The READER applies that expiry (§6), so a conforming coordination repo
 # runs no scheduled job of its own. The lease is the only thing any decision
 # reads — see HELD_LABELS for why `in-progress` is not.
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 8
 
 # Where the skill lives on disk. This file sits one level INSIDE the skill
 # directory (skills/unleash/kraken/contract.py), so the anchor is the parent of

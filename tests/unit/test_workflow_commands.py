@@ -91,41 +91,6 @@ class WorkerCommentTests(unittest.TestCase):
         self.assertTrue(kraken.is_worker_comment(body))
 
 
-# --- requeue-directive detection ---------------------------------------------
-
-class RequeueDirectiveTests(unittest.TestCase):
-    """awaiting-merge (delivered work) rejoins the queue ONLY on an explicit,
-    structured requeue directive: a protocol/3 requeue marker or a standalone
-    requeue/requeue: line. A prose sentence must never bounce a ready branch."""
-
-    def test_structured_marker_is_a_directive(self):
-        body = "bounce it\n\n" + kraken.make_marker({"type": "requeue"})
-        self.assertTrue(kraken.has_requeue_directive(body))
-
-    def test_standalone_requeue_line(self):
-        self.assertTrue(kraken.has_requeue_directive("requeue"))
-        self.assertTrue(kraken.has_requeue_directive("requeue:"))
-
-    def test_standalone_requeue_line_among_others(self):
-        self.assertTrue(kraken.has_requeue_directive("requeue:\nfix the typo first"))
-
-    def test_case_insensitive_standalone_line(self):
-        self.assertTrue(kraken.has_requeue_directive("REQUEUE"))
-        self.assertTrue(kraken.has_requeue_directive("  Requeue:  "))
-
-    def test_prose_starting_with_requeue_is_not_a_directive(self):
-        # THE accidental-collision fix.
-        self.assertFalse(kraken.has_requeue_directive(
-            "requeue: is something I considered, but hold off until Monday"))
-
-    def test_absent_directive(self):
-        self.assertFalse(kraken.has_requeue_directive("looks good, merging tomorrow"))
-
-    def test_non_requeue_marker_is_not_a_directive(self):
-        body = kraken.make_marker({"type": "heartbeat", "worker": "w1"})
-        self.assertFalse(kraken.has_requeue_directive(body))
-
-
 # --- section validation ------------------------------------------------------
 
 class SectionParsingTests(unittest.TestCase):
@@ -378,24 +343,27 @@ class RequeueVerdictTests(unittest.TestCase):
     reply MUTATED the label via a workflow; now the same fact — an operator
     comment newer than the last worker comment — is DERIVED on the read. No
     network is involved, which is the point: the verdict is a property of the
-    thread, identical for every reader."""
+    thread, identical for every reader.
 
-    def test_bare_reply_requeues_needs_decision(self):
+    protocol/8 made the verdict SYMMETRIC: it takes no label, because a comment
+    on the thread means something needs doing whichever held badge the task
+    happens to wear."""
+
+    def test_bare_reply_requeues(self):
         comments = [_worker_cmt(), _cmt("go with option B")]
-        self.assertTrue(kraken.requeue_verdict(("needs-decision",), comments))
+        self.assertTrue(kraken.requeue_verdict(comments))
 
     def test_no_reply_stays_held(self):
-        self.assertFalse(kraken.requeue_verdict(("needs-decision",),
-                                                [_worker_cmt()]))
+        self.assertFalse(kraken.requeue_verdict([_worker_cmt()]))
 
     def test_empty_thread_stays_held(self):
-        self.assertFalse(kraken.requeue_verdict(("needs-decision",), []))
+        self.assertFalse(kraken.requeue_verdict([]))
 
     def test_a_worker_comment_after_the_reply_re_holds(self):
         # The operator answered, a worker picked it up and escalated AGAIN: the
         # newest worker comment outranks the older reply, so it is held again.
         comments = [_worker_cmt(), _cmt("go with option B"), _worker_cmt()]
-        self.assertFalse(kraken.requeue_verdict(("needs-decision",), comments))
+        self.assertFalse(kraken.requeue_verdict(comments))
 
     def test_worker_comments_never_requeue(self):
         # Every kraken-authored comment carries a marker — including the
@@ -407,34 +375,40 @@ class RequeueVerdictTests(unittest.TestCase):
                      kraken.compose_note("w1", "still working")):
             comments = [_worker_cmt(), _cmt(body)]
             self.assertFalse(
-                kraken.requeue_verdict(("needs-decision",), comments),
+                kraken.requeue_verdict(comments),
                 "a kraken-authored comment requeued the task: %s" % body[:60])
 
-    def test_awaiting_merge_needs_an_explicit_directive(self):
+    def test_a_bare_comment_requeues_delivered_work(self):
+        # protocol/8's whole point, and the pin that keeps it from regressing:
+        # a delivered task takes the SAME bare reply a needs-decision one does.
+        # Through protocol/7 this thread stayed held and the ask was swallowed.
         delivered = [_worker_cmt(mtype="delivered")]
-        self.assertFalse(kraken.requeue_verdict(
-            ("awaiting-merge",), delivered + [_cmt("nice, thanks")]))
         self.assertTrue(kraken.requeue_verdict(
-            ("awaiting-merge",), delivered + [_cmt("please fix the naming\nrequeue")]))
+            delivered + [_cmt("please also commit it to config/app.yml")]))
 
-    def test_a_prose_requeue_does_not_bounce_a_ready_branch(self):
+    def test_a_prose_requeue_bounces_a_ready_branch_like_any_comment(self):
+        # The inverse of the protocol/7 pin. There is no directive to match any
+        # more, so a sentence merely CONTAINING "requeue:" requeues exactly
+        # because it is a comment — not because of its shape. This is the
+        # accepted trade (HISTORY.md, protocol/8): a spurious requeue costs one
+        # drain, a swallowed work request costs a debugging session.
         delivered = [_worker_cmt(mtype="delivered")]
-        self.assertFalse(kraken.requeue_verdict(
-            ("awaiting-merge",),
+        self.assertTrue(kraken.requeue_verdict(
             delivered + [_cmt("requeue: only if CI is red, otherwise merge it")]))
 
-    def test_the_directive_may_arrive_in_a_later_reply(self):
+    def test_a_congratulatory_comment_requeues_too(self):
+        # The cost side of the trade, pinned so it is a decision and not a
+        # surprise: the worker that picks this up escalates rather than invents
+        # rework (PROTOCOL.md §6, skills/unleash/SKILL.md).
         delivered = [_worker_cmt(mtype="delivered")]
-        self.assertTrue(kraken.requeue_verdict(
-            ("awaiting-merge",),
-            delivered + [_cmt("hmm"), _cmt("requeue")]))
+        self.assertTrue(kraken.requeue_verdict(delivered + [_cmt("nice, thanks")]))
 
     def test_a_truncated_window_cannot_mislead(self):
         # A window holding NO worker comment means the last one is older than the
         # window — so every operator comment in it is newer, which is the correct
         # verdict. This is why a fixed comment window is safe.
         self.assertTrue(kraken.requeue_verdict(
-            ("needs-decision",), [_cmt("reply %d" % i) for i in range(25)]))
+            [_cmt("reply %d" % i) for i in range(25)]))
 
 
 class RequeuedLabelsTests(unittest.TestCase):
@@ -479,6 +453,15 @@ class RequeuedLabelsTests(unittest.TestCase):
         task = self._node(1, ["kraken-task", "in-progress", "needs-decision"],
                           [_worker_cmt(), _cmt("do option B")])
         self.assertEqual(task.requeued({}), ("needs-decision",))
+
+    def test_a_reviewed_awaiting_merge_is_lifted_by_a_bare_comment(self):
+        # The same derivation, the same gesture, the other held label (protocol/8).
+        # Pinned at the Task level too: the classifier and the claim both read
+        # this, so a regression here is a queue that silently stops moving.
+        task = self._node(1, ["kraken-task", "awaiting-merge"],
+                          [_worker_cmt(mtype="delivered"),
+                           _cmt("also commit it to config/app.yml")])
+        self.assertEqual(task.requeued({}), ("awaiting-merge",))
 
     def test_an_unheld_task_lifts_nothing(self):
         task = self._node(1, ["kraken-task"], [_cmt("just chatter")])

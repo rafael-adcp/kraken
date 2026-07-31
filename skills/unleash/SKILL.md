@@ -19,7 +19,7 @@ the blocking question, report the real result.
 The coordination contract — task shape, the `kraken-task` / `in-progress` /
 `needs-decision` / `awaiting-merge` state machine, the claim algorithm, the machine
 marker, authorization boundaries — is normatively specified in
-[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/7`). If this file and the spec ever
+[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/8`). If this file and the spec ever
 disagree, the spec wins.
 
 ## Invocation
@@ -105,7 +105,16 @@ that leaves the claim ref standing and the task reads as held until the lease ex
 
 ## What is yours: the judgment
 
-Inside an `execute`:
+**First, check whether this task is coming *back* to you.** Any comment I leave puts a
+held task back in the queue — from `awaiting-merge` exactly as from `needs-decision`
+(PROTOCOL.md §6) — so a task you are handed may already have been delivered once. Read
+the thread before the Goal (`gh -R OWNER/tasks issue view <n> --comments`): if its newest
+comment is mine, **that comment is the ask** and the Goal is only background. If it asks
+for nothing actionable ("nice, thanks", "merging tomorrow"), do **not** invent rework —
+run `then.escalate` saying the delivery still stands and you cannot tell what I want
+changed. A question on the thread is the honest answer to a comment nobody can act on.
+
+Then, inside an `execute`:
 
 1. **Restate and assume.** Restate the goal and post your **Assumptions** as a comment
    — write them to a file and run `then.note`. If an assumption is unverifiable in the
@@ -125,7 +134,11 @@ Inside an `execute`:
    and run `then.deliver` with the PR URL. Delivery conventions (branch naming,
    trailers, draft PR, `Closes`) are in [`DELIVERY.md`](DELIVERY.md); read it before you
    push. **"Done" means delivered for review, never closed** — the task closes when the
-   work truly lands.
+   work truly lands. Report what *you* did; never promise what the *queue* will do. A
+   comment telling me "reply and it'll be requeued" is a copy of the protocol that rots
+   the moment the protocol moves — and when it rots, I am the one who sits watching a
+   queue that never moves. The contract is documented where it belongs; your comment
+   states the result.
 
 **When a `then.*` write fails, do not guess and do not retry blindly** — a failure means
 either the task stopped being yours or the write may have half-landed, and both are
