@@ -73,10 +73,6 @@ def _review_lines(review: list[Json]) -> list[str]:
         # "recorded" sent the operator looking for a PR nobody ever opened.
         link = (f" → {item['pr_url']}" if item["pr_url"]
                 else " → review on the thread (no PR)")
-        # A link the delivery never recorded is a guess off the thread's prose —
-        # say so, so the operator knows which links the worker stands behind.
-        if item["pr_url"] and item.get("pr_source") == "legacy-free-text":
-            link += "  (legacy: read from free text, no delivered marker)"
         if item["orphan"]:
             flag = "  ⚠️  PR looks merged — close it?"
         elif item.get("merge_state_unknown"):

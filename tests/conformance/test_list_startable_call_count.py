@@ -47,15 +47,13 @@ class ListStartableCallCountTests(KrakenConformanceTest):
                              "expected O(1) gh calls for a 30-candidate depends-on fan-out, got %d: %s"
                              % (calls, self.log_text()))
 
-    def worker_comment(self, n):
-        self.mk_comment(n, "%s\n\nwhich option?\n\n%s" % (
-            self.disclaimer_line("w1"),
-            '<!-- kraken {"type":"needs-decision","worker":"w1"} -->'))
-
-    def test_comment_windows_are_fetched_for_the_held_few_in_one_call(self):
-        """The queue walk carries no comment threads: a 60-task queue with a
-        thread on every task must not ship 60 threads to decide the 20 that are
-        actually held, and must not pay one call per held task either."""
+    def test_twenty_held_tasks_cost_no_more_than_an_empty_queue(self):
+        """The protocol/9 cost claim. A 60-task queue with a long thread on every
+        task decides the 20 that are held from the state records — which arrive on
+        the SAME matching-refs read as the claim refs, and resolve through the SAME
+        batched commit read. Through protocol/8 this cost a comment-hydration call
+        on top; through protocol/7 it would have shipped 60 comment threads on the
+        walk."""
         for n in range(1, 41):
             self.mk_issue(n, "free %d" % n, "kraken-task", "project:app")
         for n in range(41, 61):
@@ -64,7 +62,9 @@ class ListStartableCallCountTests(KrakenConformanceTest):
         for n in range(1, 61):
             for c in range(5):
                 self.mk_comment(n, "operator chatter %d" % c)
-            self.worker_comment(n)  # newest comment: nothing is requeued
+        for n in range(41, 61):
+            # Recorded AFTER the chatter, so nothing has been said since.
+            self.mk_state_record(n, "needs-decision", worker="w1")
 
         self.truncate_log()
         r = self.kraken("list-startable", "OWNER/tasks", "app", "--snapshot")
@@ -75,18 +75,20 @@ class ListStartableCallCountTests(KrakenConformanceTest):
         self.assertEqual(sum(1 for l in lines if l.endswith(":held")), 20,
                          "the 20 unanswered escalations must stay held")
 
-        # Listing page + claim-refs read + ONE batched comment hydration. Pinned
-        # EXACTLY: an upper bound would also be met by putting the threads back on
-        # the walk, which is the thing this test exists to forbid.
+        # Listing page + the one refs read + ONE batched commit read for all 20
+        # records. Pinned EXACTLY: an upper bound would also be met by fetching
+        # comment threads again, which is what this test exists to forbid.
         calls = len(self.log_lines())
         self.assertEqual(calls, 3,
-                         "expected walk + refs + one batched hydration for 20 held "
-                         "tasks, got %d: %s" % (calls, self.log_text()))
+                         "expected walk + refs + one batched record read for 20 "
+                         "held tasks, got %d: %s" % (calls, self.log_text()))
+        self.assertEqual([l for l in self.log_lines() if "/comments" in l], [],
+                         "the classification read a comment thread")
 
-    def test_a_queue_with_nothing_held_hydrates_nothing(self):
-        """The common case. Every task has a thread and none of them is held, so
-        the poll must not fetch a single comment — the whole point of taking the
-        window off the walk."""
+    def test_a_queue_with_nothing_held_reads_nothing_extra(self):
+        """The common case, and the hot one: every task has a thread, none of
+        them is held, and no record exists — so the poll costs exactly what an
+        empty queue costs."""
         for n in range(1, 31):
             self.mk_issue(n, "free %d" % n, "kraken-task", "project:app")
             self.mk_comment(n, "some chatter on the thread")
@@ -97,10 +99,11 @@ class ListStartableCallCountTests(KrakenConformanceTest):
         self.assertEqual(sum(1 for l in r.out.split("\n") if l.endswith(":startable")),
                          30)
 
-        # Listing page + claim-refs read, and nothing else: no hydration call.
+        # Listing page + the refs read, and nothing else: no commit read, because
+        # there is no ref to resolve, and no comment read at all.
         calls = len(self.log_lines())
         self.assertEqual(calls, 2,
-                         "an idle queue must cost no comment fetch at all, got %d: %s"
+                         "an idle queue must cost two calls, got %d: %s"
                          % (calls, self.log_text()))
 
 

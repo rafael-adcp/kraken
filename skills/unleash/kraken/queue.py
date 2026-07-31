@@ -1,5 +1,5 @@
-"""Reading the queue: the batched walk, comment hydration, the requeue
-derivation, and the startable filter.
+"""Reading the queue: the batched walk, the state records it is classified
+against, the requeue derivation, and the startable filter.
 
 Part of the kraken protocol package; see __init__.py."""
 from __future__ import annotations
@@ -7,18 +7,21 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import re
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from .contract import (
     CommitMeta, EXIT_OK, EXIT_TRANSPORT, Epoch, HELD_LABELS, Issue, Json,
     Node, PRIORITY_LABEL, Sha, Worker
 )
-from .comments import DISCLAIMER, parse_marker
+from .comments import parse_marker
 from .transport import Api
 from .lease import (
     Lease, holder_shas, lease_state, lease_ttl_seconds, live_leases
 )
-from .refs import Refs
+from .refs import Refs, kraken_ref_items
+from .state import (
+    NO_RECORD, States, TaskState, holding_state, state_view
+)
 
 # --- subcommand: list-startable ---------------------------------------------
 #
@@ -27,142 +30,24 @@ from .refs import Refs
 # `issues(labels: [...])` is a UNION (unlike REST's AND), so we filter server-side
 # on the single "kraken-task" label and match the project label client-side.
 
-# How many trailing comments a HYDRATED task carries. The requeue derivation (§6)
-# only ever needs the NEWEST comment of two classes — the last worker comment and
-# any operator reply after it — so a window cannot mislead it: a window holding no
-# worker comment means the last one is older than the window, which makes every
-# operator comment inside it newer, the correct verdict. 25 is therefore about
-# payload, not correctness.
-QUEUE_COMMENT_WINDOW = 25
-
-# How many issues one hydration call asks about — a tighter ceiling than the
-# general GRAPHQL_ALIAS_CHUNK because each alias here drags a whole window behind
-# it. The chunk bounds the node count of a single query rather than the number of
-# queries: 50 × 25 keeps a hydration page about the size of a queue page.
-COMMENT_HYDRATE_CHUNK = 50
-
-
-
-
-
-
 
 
 # --- the requeue derivation (PROTOCOL.md §6) ---------------------------------
-# When the operator answers a held task, the task rejoins the queue. "An operator
-# replied after the last worker comment" is a property of the thread, readable at
-# any time, so it is DERIVED on the read rather than mutated onto the task. No
-# workflow, no label write, and no window where the queue disagrees with the
-# thread.
+# When anything is said on a held task's thread, the task rejoins the queue. That
+# is a property of the record and the comment count, readable at any time, so it
+# is DERIVED on the read rather than mutated onto the task: no workflow, no label
+# write, and no window where the queue disagrees with the thread.
 #
-# The derivation reads a trailing comment window (QUEUE_COMMENT_WINDOW), hydrated
-# for the held/leased handful rather than carried by the queue walk (see
-# `Queue.hydrate`): free on an idle queue, and O(held) rather than O(queue) on a
-# busy one.
+# The whole derivation is `total > record.comments` (§3.1, `TaskState.requeued`).
+# The transition wrote down what the thread carried when it put the task down,
+# and the walk brings back what it carries now. One integer against another: no
+# comment is fetched, no author classified, no body opened. Through protocol/8
+# this was a trailing comment window, hydrated per held task, classified
+# marker-by-marker into worker and operator — a hydration pass, a discriminator,
+# and a window that could scroll past what it was counting.
 #
-# The rule is the SAME for both held labels (protocol/8). Through protocol/7
-# `awaiting-merge` was the exception — delivered work stayed held unless the reply
-# carried a standalone `requeue:` line — and the exception cost more than it
-# protected: a review comment asking for follow-up work was read, counted, and
-# discarded, leaving the operator watching a queue that never moved while every
-# worker was behaving correctly. A comment on the thread means something needs
-# doing. What the operator does when they have nothing to ask for is MERGE, not
-# comment, so optimizing for the congratulatory comment at the cost of swallowing
-# the real ones was backwards.
-
-# The labels a reply can lift are exactly the labels that hold (HELD_LABELS):
-# both are operator-facing states, and answering one is what ends it. There is no
-# third, narrower set — `in-progress` is write-only (§3) and holds nothing, so
-# one name is enough.
-
-
-def is_worker_comment(body: str) -> bool:
-    """Whether a comment was posted by a worker — the requeue derivation's
-    discriminator (PROTOCOL.md §4). **Structural**: a worker comment is one that
-    carries a hidden kraken marker on ANY line. Every worker-posted comment wears
-    one (the transition markers for state changes, the `note` marker for a
-    free-form note), so marker presence — not the presentation text — is the
-    arbiter, closing the fragility class kraken-protocol removed everywhere else.
-    It also subsumes the coordination repo's own bot comments (the validator's
-    carry a `validation` marker), which is why the derivation needs no author
-    metadata in the query at all.
-
-    A comment whose FIRST line opens with the attribution disclaimer also counts,
-    as a back-compat fallback for legacy threads and any comment written before
-    `note` gained its marker (the prefix is derived from the DISCLAIMER constant,
-    never a second copy). The disclaimer stays the human-facing attribution; the
-    marker, not the disclaimer, is what requeue leans on.
-
-    Accepted edge (§4): an operator who pastes a raw kraken marker into a reply is
-    read as a worker and will not requeue — the same class of edge as an operator
-    quoting the disclaimer on the first line; removing the held label by hand is
-    the escape hatch."""
-    if any(parse_marker(line) is not None for line in body.split("\n")):
-        return True
-    prefix = DISCLAIMER.split("{worker}")[0]  # "> 🐙 **Kraken worker `"
-    first_line = body.split("\n", 1)[0].rstrip("\r")
-    return first_line.startswith(prefix)
-
-
-def comment_hungry(
-    tasks: Sequence[Task], leases: dict[Issue, Lease],
-) -> set[Issue]:
-    """The issue numbers whose comment window a read of this queue actually needs
-    — the set `Queue.hydrate` fetches, as a pure function so the fetch's scope is
-    testable without transport.
-
-    Exactly two readers consume comments, and each names its own tasks:
-
-      1. the requeue derivation (§6) — a task wearing a HELD label. A live lease
-         outranks the thread (`Task.requeued` returns early), so a locked task
-         is not hungry however it is labelled;
-      2. `Task.expiries` (§6 rule 2) — a task whose lease EXPIRED, which the
-         reconciler counts steals on before escalating. A live lease is not
-         reconciled at all, and a ref on an issue outside the walk is an orphan
-         lock deleted without ever reading a comment.
-
-    Everything else in the queue — the startable tasks, which is nearly all of it
-    — is decided from labels, blocked-by and body alone."""
-    live = live_leases(leases)
-    held_labels = set(HELD_LABELS)
-    hungry = set()
-    for task in tasks:
-        if task.number in live:
-            continue
-        if task.labels & held_labels:
-            hungry.add(task.number)
-    walked = {task.number for task in tasks}
-    for number, lease in leases.items():
-        if lease.expired and number in walked:
-            hungry.add(number)
-    return hungry
-
-
-
-
-def requeue_verdict(comments: Sequence[Json]) -> bool:
-    """Whether an operator reply has requeued a held task — a PURE read of the
-    thread (PROTOCOL.md §6), so it is decided identically by every reader and
-    needs no write to become true.
-
-    The rule, and the whole of it: an operator comment (one carrying no kraken
-    marker) newer than the newest worker comment. It is the SAME rule for both
-    held states, which is why this takes no label — a comment on the thread means
-    something needs doing, and which badge the task happens to wear does not
-    change what the operator meant by writing it.
-
-    Ordering is the comment list's own (GitHub returns a thread oldest-first);
-    nothing here reads a timestamp, so a re-posted comment cannot reorder the
-    verdict."""
-    worker_at = -1
-    for i, rec in enumerate(comments):
-        if is_worker_comment(rec.get("body") or ""):
-            worker_at = i
-    return any(not is_worker_comment(rec.get("body") or "")
-               for rec in comments[worker_at + 1:])
-
-
-
+# The rule is the SAME for both held states, as it has been since protocol/8, and
+# the counter makes it symmetric for free: neither state has anything to read.
 
 # --- the issue-form body -----------------------------------------------------
 # Pure string readers, kept free of `Task`: the same two are applied to a body
@@ -205,18 +90,30 @@ def is_empty_section(content: str) -> bool:
 DEPENDS_ON_RE = re.compile(r"^depends-on: *#([0-9]+)", re.MULTILINE)
 
 
+def _comment_total(node: Node) -> int:
+    """`comments { totalCount }` off a queue-walk node, floored at 0.
+
+    A node that did not select the field reads as 0, which is the fail-open
+    answer: 0 makes every held record look requeued, so a walk that lost the
+    field offers tasks a worker will then find nothing to do on and escalate
+    (§6) — never one where a delivery is silently buried."""
+    value = (node.get("comments") or {}).get("totalCount")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
 class Task:
     """One open kraken-task issue, as the queue walk returned it — and the only
     thing above the walk that knows what a GraphQL issue node looks like.
 
     The wire shape is decoded ONCE, here, in the constructor. That is what keeps
-    the mutations honest: `reclaim` edits a label set and `hydrate` fills a
-    comment list, neither rebuilding `{"nodes": [{"name": …}]}` for the next
-    reader to decode again.
+    the one mutation honest: `reclaim` edits a label set rather than rebuilding
+    `{"nodes": [{"name": …}]}` for the next reader to decode again.
 
-    Mutable on purpose, and only in the two ways a queue read actually mutates a
-    task: comments arrive after the walk (`hydrate`), and an applied reconcile is
-    folded back in (`reclaim`). Everything else is a query."""
+    Mutable on purpose, and only in the one way a queue read actually mutates a
+    task: an applied reconcile is folded back in (`reclaim`). Everything else is
+    a query."""
 
     def __init__(self, node: Node):
         self.number: Issue = node["number"]
@@ -227,13 +124,12 @@ class Task:
             lbl.get("name", "")
             for lbl in (node.get("labels") or {}).get("nodes") or []
         }
-        # The trailing comment window, oldest-first — empty until `hydrate`
-        # fills it, and empty forever for a task neither comment reader visits.
-        # That empty answer is not a guess: `Queue.hydrate` fills exactly the
-        # tasks `comment_hungry` names, which is exactly the tasks `requeued`
-        # and `expiries` can be called on.
-        self.comments: list[Json] = list(
-            (node.get("comments") or {}).get("nodes") or [])
+        # How many comments the thread carries RIGHT NOW. The requeue derivation
+        # compares it against the count the state record froze at the last
+        # transition (§3.1), and that is the entire use: no body, no author, no
+        # window. One scalar the walk brings back for every task, which is why
+        # the derivation costs no call of its own.
+        self.comment_total: int = _comment_total(node)
         self._blockers: list[Json] = list(
             (node.get("blockedBy") or {}).get("nodes") or [])
 
@@ -250,44 +146,37 @@ class Task:
 
     @property
     def held(self) -> tuple[str, ...]:
-        """The HELD labels this task wears, in HELD_LABELS order."""
+        """The HELD labels this task wears, in HELD_LABELS order. A projection
+        (§3), and read in exactly one decision: `holding`, for a task that has no
+        state record to answer with."""
         return tuple(h for h in HELD_LABELS if h in self.labels)
 
-    # --- what the thread says -------------------------------------------------
+    # --- what the record says -------------------------------------------------
 
-    def requeued(self, live: dict[Issue, Sha]) -> tuple[str, ...]:
-        """The held labels an operator reply has already lifted — a tuple, empty
-        when the task is genuinely held. Pure, so the classification and the
-        claim that follows it reach the same verdict without a second read.
+    def record(self, states: Mapping[Issue, TaskState]) -> TaskState:
+        """This task's state record, or `NO_RECORD` when it has none (§3.1)."""
+        return states.get(self.number, NO_RECORD)
 
-        A **live lease** outranks any reading of the timeline: the lock is the
-        truth (§5), and a comment on a claimed task is context for its worker,
-        not a requeue. An EXPIRED lease outranks nothing — it holds no task (§6),
-        so `live` is the live-lease view, never the raw ref list. The lease is
-        the ONLY thing that outranks the thread here: `in-progress` is write-only
-        (§3), so a stale badge cannot suppress a requeue the operator earned."""
-        if self.number in live:
-            return ()
-        held = self.held
-        if not held:
-            return ()
-        return held if requeue_verdict(self.comments) else ()
+    def holding(self, states: Mapping[Issue, TaskState]) -> str | None:
+        """The state that is holding this task — `needs-decision`,
+        `awaiting-merge`, or None when nothing is. The one question the startable
+        filter, the claim guard and the console all ask, answered in one place so
+        the three cannot drift.
 
-    @property
-    def expiries(self) -> int:
-        """How many times this task's lease has already expired and been stolen —
-        counted from the `lease-expired` markers each steal leaves (§5). Only
-        read for a task whose lease EXPIRED, which is exactly what makes it one
-        the hydration pass filled, so the count reads a window already in hand; a
-        window that has scrolled past the oldest steals undercounts, which errs
-        toward giving the task another worker rather than escalating early."""
-        total = 0
-        for rec in self.comments:
-            for line in (rec.get("body") or "").split("\n"):
-                payload = parse_marker(line)
-                if payload and payload.get("type") == "lease-expired":
-                    total += 1
-        return total
+        Where a record exists it decides, and the held LABELS are not consulted
+        at all: the record names the state and its `comments` anchor says whether
+        the thread has moved on since (§6). Where none exists the label is
+        honored — that is the protocol/9 fallback that makes a queue written by
+        an older revision safe to read, and it derives no requeue, because there
+        is no count to compare against. §6's rule 3 turns such a task into a
+        record on the first reconcile, and the requeue works from then on.
+
+        The LEASE is not this question. A live lease holds a task whatever its
+        record says, and `Task.state` asks that separately — keeping them apart
+        is what lets a claimed task's record go on saying `awaiting-merge` from
+        the delivery that was bounced back, without the console counting it
+        twice."""
+        return holding_state(self.record(states), self.comment_total, self.labels)
 
     # --- what the body says ---------------------------------------------------
 
@@ -321,24 +210,25 @@ class Task:
 
     # --- the startable verdict ------------------------------------------------
 
-    def state(self, live: dict[Issue, Sha]) -> str | None:
-        """This task's startable/held verdict against the live-lease view — or
-        None when the answer depends on the `depends-on` target's state, which
-        the caller resolves for the whole page in one batched call.
+    def state(self, live: dict[Issue, Sha],
+              states: Mapping[Issue, TaskState]) -> str | None:
+        """This task's startable/held verdict against the live-lease view and the
+        state records — or None when the answer depends on the `depends-on`
+        target's state, which the caller resolves for the whole page in one
+        batched call.
 
-        Held means: a held label (needs-decision / awaiting-merge — an
-        operator-facing state) OR a **live lease** (the lock). Those are the only
-        two kinds of hold there are, and they do not overlap: `in-progress` is
-        write-only (§3), so the lease answers for it and a task wearing a stale
-        badge with no live lease is offered like any other. An EXPIRED lease
-        holds nothing either (§5): the task is offered, and the claim that
+        Held means: a **record** naming an operator-facing state the thread has
+        not moved past (`holding`) OR a **live lease** (the lock). Those are the
+        only two kinds of hold there are, and they do not overlap: `in-progress`
+        is write-only (§3), so the lease answers for it and a task wearing a
+        stale badge with no live lease is offered like any other. An EXPIRED
+        lease holds nothing either (§5): the task is offered, and the claim that
         follows steals the lease.
 
-        A held LABEL is not the last word: a task whose operator has already
-        replied is requeued by derivation (§6, `requeued`) and rejoins the
-        candidates — it still has to clear its dependencies like any other."""
-        still_held = set(HELD_LABELS) - set(self.requeued(live))
-        if self.labels & still_held or self.number in live:
+        A held record is not the last word: a task with a comment newer than the
+        record is requeued by derivation (§6) and rejoins the candidates — it
+        still has to clear its dependencies like any other."""
+        if self.holding(states) is not None or self.number in live:
             return "held"
         if self._blockers:
             blocked = any(str(b.get("state", "")).upper() == "OPEN"
@@ -346,11 +236,7 @@ class Task:
             return "held" if blocked else "startable"
         return None if self.depends_on is not None else "startable"
 
-    # --- the two mutations a queue read performs ------------------------------
-
-    def hydrate(self, window: list[Json]) -> None:
-        """Attach the trailing comment window the hydration pass fetched."""
-        self.comments = list(window)
+    # --- the one mutation a queue read performs -------------------------------
 
     def reclaim(self) -> None:
         """Fold an APPLIED reclaim back in: the label swap `apply_reconcile` just
@@ -428,22 +314,35 @@ def claim_meta_of(
 @dataclasses.dataclass(frozen=True)
 class QueueRead:
     """One queue read, whole: every open `Task`, the lease state of every claim
-    ref, and the commit meta those leases were decoded from.
+    ref, the state record of every task that has one, and the commit meta both
+    were decoded from.
 
     The commit meta is carried rather than dropped because `status` decodes each
     holder's worker, message and heartbeat anchor out of it. Without it on the
     read, the console cannot use `read` at all and re-runs the same five-step
     fetch by hand, with five None checks and five diagnostics of its own, in
-    another module."""
+    another module.
+
+    Leases and records sit side by side because they answer different halves of
+    "what is this task": the lease says whether somebody is executing it right
+    now, the record says what it is between workers (§3.1). Neither is derivable
+    from the other, and every reader here needs both."""
 
     tasks: list[Task]
     leases: dict[Issue, Lease]
     commit_meta: CommitMeta
+    states: dict[Issue, TaskState] = dataclasses.field(default_factory=dict)
 
     def by_number(self) -> dict[Issue, Task]:
         """The tasks indexed by issue number — how the reconciler and the claim
         loop reach the task behind a lease or a candidate."""
         return {task.number: task for task in self.tasks}
+
+    def record(self, issue: Issue) -> TaskState:
+        """One task's record, or `NO_RECORD` — the reconciler's and the claim
+        path's way in, so neither spells the `.get(..., NO_RECORD)` default and
+        gets the absent case wrong."""
+        return self.states.get(issue, NO_RECORD)
 
 
 class Queue:
@@ -472,13 +371,13 @@ class Queue:
         above it asks the `Task`, so a change to the query below is a change to
         the constructor beside it and to nothing else.
 
-        Deliberately does NOT carry comments. This walk is the hot read: every
-        worker's watcher runs it once a minute, so a trailing comment window on every
-        node is the queue's scaling wall — a 200-task queue would ship 5,000 comment
-        bodies per poll, per worker, to answer a question about a handful of them.
-        Both readers that need comments (the requeue derivation and `Task.expiries`)
-        only ever ask about tasks that are HELD or LEASED, so the window is fetched
-        for exactly those — see `hydrate`."""
+        Carries the comment COUNT and not one comment body. This walk is the hot
+        read — every worker's watcher runs it once a minute — so a trailing comment
+        window on every node was the queue's scaling wall: a 200-task queue would
+        ship 5,000 comment bodies per poll, per worker, to answer a question about a
+        handful of them. `totalCount` is one integer per node, it is all the requeue
+        derivation needs against the record's anchor (§6), and it retires the
+        hydration pass that used to fetch those windows for the held few."""
         owner, name = self.api.repo.split("/", 1)
         tasks = []
         cursor = None
@@ -489,6 +388,7 @@ class Queue:
                 f'issues(states: OPEN, labels: ["kraken-task"], first: 100{after}) {{ '
                 f'pageInfo {{ hasNextPage endCursor }} '
                 f'nodes {{ number title createdAt body '
+                f'comments {{ totalCount }} '
                 f'labels(first: 20) {{ nodes {{ name }} }} '
                 f'blockedBy(first: 50) {{ nodes {{ number state }} }} }} }} }} }}'
             )
@@ -504,52 +404,73 @@ class Queue:
     def read(self, now: Epoch | None = None, ttl: int | None = None,
              ) -> QueueRead | None:
         """One queue read: every open kraken-task node (repo-wide, BEFORE any project
-        filter) plus the LEASE state of every claim ref. The single fetch the
-        reconciler (§6), the startable classification, the claim path and the console
-        all consume, so a reader that does several pays for it once. Returns a
-        `QueueRead`, or None on transport failure.
+        filter), the LEASE state of every claim ref, and the STATE RECORD of every
+        task that has one. The single fetch the reconciler (§6), the startable
+        classification, the claim path and the console all consume, so a reader that
+        does several pays for it once. Returns a `QueueRead`, or None on transport
+        failure.
 
-        Resolving the lease costs one extra batched call — and only when a ref
-        actually exists: `Refs.commit_meta` answers `{}` for an empty ref list
-        without a request, so an idle queue pays nothing for leases and a busy one
-        pays a call per GRAPHQL_ALIAS_CHUNK claims, never one per claim.
-
-        The comment hydration obeys the same rule and for the same reason: the leases
-        have to be known before the hungry set can be (a live lease outranks the
-        thread), so it runs last, and it asks for nothing when nothing is held."""
+        Three calls, and the third only when a ref actually exists: the issue walk,
+        one paginated read of the whole `refs/kraken/` namespace (claims AND
+        records — see `kraken_ref_items`), and one batched commit read resolving
+        both families at once. `Refs.commit_meta` answers `{}` for an empty ref list
+        without a request, so an idle queue still pays exactly two calls, the same
+        as it did before records existed. What this no longer pays for at all is the
+        comment hydration protocol/8 needed, and the paginated comment read the
+        console needed per delivered task."""
         tasks = self.open_tasks()
         if tasks is None:
             return None
-        got = self.lease_view(now, ttl)
+        got = self._ref_view(now, ttl, with_states=True)
         if got is None:
             return None
-        leases, commit_meta = got
-        if self.hydrate(tasks, leases) is None:
-            return None
-        return QueueRead(tasks, leases, commit_meta)
+        leases, commit_meta, states = got
+        return QueueRead(tasks, leases, commit_meta, states)
 
     def lease_view(self, now: Epoch | None = None, ttl: int | None = None,
                    ) -> tuple[dict[Issue, Lease], CommitMeta] | None:
         """The ladder half of `read`: every claim ref's lease, aged against the
         server's clock, and the commit meta it was decoded from — WITHOUT the
-        issue walk. Returns `(leases, commit_meta)`, or None on transport failure.
+        issue walk and WITHOUT resolving the state records.
 
-        Two batched reads, and the second only when a ref actually exists:
-        `commit_meta` answers `{}` for an empty ref list without a request, so an
-        unclaimed queue pays one call and a busy one pays a call per
-        GRAPHQL_ALIAS_CHUNK claims, never one per claim and never one query the
-        server may reject for its size.
+        Returns `(leases, commit_meta)`, or None on transport failure.
 
         Separate from `read` because one question genuinely does not need the
         queue: "does this worker already hold a claim?" (§5) is answered by the
         LADDER, and the ladder is what arbitrates it. A caller that asks only
-        that should not pay for a paginated issue walk and a comment hydration
-        to find out — see `claim.open_claim_of`."""
+        that should not pay for a paginated issue walk to find out — see
+        `claim.open_claim_of`. It skips the records for the same reason: a worker
+        holding nothing has no record to read, so resolving the namespace's other
+        half would put a commit read on the one path that had none."""
+        got = self._ref_view(now, ttl, with_states=False)
+        if got is None:
+            return None
+        leases, commit_meta, _states = got
+        return (leases, commit_meta)
+
+    def _ref_view(self, now: Epoch | None, ttl: int | None, *,
+                  with_states: bool,
+                  ) -> tuple[dict[Issue, Lease], CommitMeta,
+                             dict[Issue, TaskState]] | None:
+        """The `refs/kraken/` namespace, decoded: leases, the commit meta behind
+        them, and — when asked for — the state records. None on transport failure.
+
+        One matching-refs read serves both families, and ONE batched commit read
+        resolves every sha either of them named, so adding records to a queue read
+        costs no extra round trip: the aliases just get longer, and `Api.aliased`
+        already chunks them."""
         refs = Refs(self.api)
-        claim_refs = refs.all()
+        items = kraken_ref_items(self.api)
+        if items is None:
+            return None
+        claim_refs = refs.all(items)
         if claim_refs is None:
             return None
-        commit_meta = refs.commit_meta(holder_shas(claim_refs))
+        state_shas = States(self.api).all(items) if with_states else {}
+        if state_shas is None:
+            return None
+        commit_meta = refs.commit_meta(
+            holder_shas(claim_refs) + sorted(state_shas.values()))
         if commit_meta is None:
             return None
         # The server's clock, not this machine's (§5.1): the lease timestamps
@@ -558,7 +479,7 @@ class Queue:
         leases = lease_state(claim_refs, commit_meta,
                              self.api.server_now() if now is None else now,
                              lease_ttl_seconds(ttl))
-        return (leases, commit_meta)
+        return (leases, commit_meta, state_view(state_shas, commit_meta))
 
     def candidates(self, project: str, read: QueueRead | None = None,
                    ) -> list[Candidate] | None:
@@ -590,7 +511,7 @@ class Queue:
         # preference layered on top of pure FIFO (see PRIORITY_LABEL).
         tasks.sort(key=lambda t: (PRIORITY_LABEL not in t.labels, t.created))
 
-        rows = [Candidate(task, task.state(live)) for task in tasks]
+        rows = [Candidate(task, task.state(live, read.states)) for task in tasks]
         # The undecided ones, resolved in ONE batched call rather than a request
         # per candidate: a `depends-on: #N` target's open/closed state is the only
         # thing `Task.state` cannot answer from the task in front of it.
@@ -605,50 +526,6 @@ class Queue:
                     rows[i],
                     state="held" if dep_open.get(dep, False) else "startable")
         return rows
-
-    def hydrate(self, tasks: list[Task],
-                leases: dict[Issue, Lease]) -> list[Task] | None:
-        """Attach the trailing comment window to the tasks that need one, in
-        place, and answer the tasks back — or None on transport failure, which the
-        callers propagate exactly like a failed walk.
-
-        This is the second half of the split that keeps the comment window off the
-        hot read (see open_tasks): the walk answers "what is in the queue" for every
-        task, and this answers "what does the thread say" for the few whose answer
-        depends on it. An idle queue hydrates nothing and pays nothing."""
-        hungry = comment_hungry(tasks, leases)
-        windows = self.comment_windows(hungry)
-        if windows is None:
-            return None
-        for task in tasks:
-            window = windows.get(task.number)
-            if window is not None:
-                task.hydrate(window)
-        return tasks
-
-    def comment_windows(self,
-                        numbers: Iterable[Issue]) -> dict[Issue, list[Json]] | None:
-        """The trailing comment window of the named issues, `{number: [nodes]}`,
-        through the batched fan-out (`iN: issue(number: N) { comments(last: …) }`)
-        — the same shape `_depends_on` uses, for the same reason: a fan-out the
-        queue walk no longer pays for on every task must not become one request
-        per task either. Returns None on transport failure.
-
-        Cost is O(len(numbers) / COMMENT_HYDRATE_CHUNK) calls, and O(1) — no call at
-        all — for the overwhelmingly common empty ask."""
-        numbers = sorted(numbers)
-        fields = [
-            f"i{n}: issue(number: {n}) {{ comments(last: {QUEUE_COMMENT_WINDOW}) "
-            f"{{ nodes {{ body createdAt }} }} }}"
-            for n in numbers
-        ]
-        repo_obj = self.api.aliased(fields, COMMENT_HYDRATE_CHUNK)
-        if repo_obj is None:
-            return None
-        return {
-            n: ((repo_obj.get(f"i{n}") or {}).get("comments") or {}).get("nodes") or []
-            for n in numbers
-        }
 
     # --- routing: which projects this repo actually carries -------------------
 

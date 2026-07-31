@@ -19,7 +19,7 @@ the blocking question, report the real result.
 The coordination contract — task shape, the `kraken-task` / `in-progress` /
 `needs-decision` / `awaiting-merge` state machine, the claim algorithm, the machine
 marker, authorization boundaries — is normatively specified in
-[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/8`). If this file and the spec ever
+[`PROTOCOL.md`](../../PROTOCOL.md) (`kraken-protocol/9`). If this file and the spec ever
 disagree, the spec wins.
 
 ## Invocation

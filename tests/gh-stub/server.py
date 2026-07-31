@@ -263,7 +263,7 @@ class StubState:
         return [{"body": c["body"], "createdAt": c["created_at"]}
                 for c in self.comments(n)[-last:]]
 
-    def issue_node(self, n, comment_window=0):
+    def issue_node(self, n, comment_window=0, comment_total=False):
         d = self.issue_dir(n)
         node = {
             "number": int(n),
@@ -273,11 +273,14 @@ class StubState:
             "labels": {"nodes": [{"name": x} for x in self.issue_labels(n)]},
             "blockedBy": {"nodes": self.blocked_by_nodes(n, upper=True)},
         }
-        # A field the query did not select comes back ABSENT, not empty — the
-        # queue walk no longer asks for comments, and a stub that volunteered an
-        # empty window would hide a missing hydration behind the same [] the
-        # readers treat as "no comments".
-        if comment_window:
+        # A field the query did not select comes back ABSENT, not empty. The
+        # queue walk asks for `comments { totalCount }` — one integer, the anchor
+        # the requeue derivation compares the state record against (§6) — and a
+        # stub that volunteered it unasked would hide a walk that stopped
+        # selecting it behind a count that happened to be right.
+        if comment_total:
+            node["comments"] = {"totalCount": len(self.comments(n))}
+        elif comment_window:
             node["comments"] = {"nodes": self.comment_window(n, comment_window)}
         return node
 
@@ -307,25 +310,35 @@ class StubState:
             self._write(self.path("labels-meta", name),
                         "color=%s\ndescription=%s\n" % (color, desc))
 
-    # --- claim refs / git data ---
+    # --- claim refs / state records / git data ---
     def ref_path(self, n, gen=0):
         # Flat filenames keep the state dir simple: generation 0 is the bare
         # protocol/5 name, anything else is "<issue>-<gen>".
         name = str(n) if int(gen) == 0 else "%d-%d" % (int(n), int(gen))
         return self.path("refs", name)
 
+    def state_ref_path(self, n):
+        """The state record of issue N (PROTOCOL.md §3.1) — one ref per task, no
+        generation ladder, so one flat filename."""
+        return self.path("refs", "state-%d" % int(n))
+
     @staticmethod
     def parse_ref_file(name):
-        """(issue, generation) for a refs/ filename, or None."""
+        """(kind, issue, generation) for a refs/ filename, or None. `kind` is
+        "claim" or "state"; a state record has no generation."""
         if name.isdigit():
-            return (int(name), 0)
+            return ("claim", int(name), 0)
+        if name.startswith("state-") and name[len("state-"):].isdigit():
+            return ("state", int(name[len("state-"):]), 0)
         issue, _, gen = name.partition("-")
         if issue.isdigit() and gen.isdigit():
-            return (int(issue), int(gen))
+            return ("claim", int(issue), int(gen))
         return None
 
     @staticmethod
-    def ref_name(n, gen):
+    def ref_name(kind, n, gen):
+        if kind == "state":
+            return "refs/kraken/state/%d" % n
         return ("refs/kraken/claims/%d" % n if gen == 0
                 else "refs/kraken/claims/%d/%d" % (n, gen))
 
@@ -347,13 +360,14 @@ class StubState:
         if not os.path.isfile(f):
             return None
         sha = self._read(f).rstrip("\n")
-        return {"ref": self.ref_name(int(n), 0), "object": {"sha": sha}}
+        return {"ref": self.ref_name("claim", int(n), 0), "object": {"sha": sha}}
 
     def matching_refs(self, prefix=""):
         """GitHub's matching-refs semantics: every ref whose NAME starts with
         "refs/<prefix>" — a plain string prefix, so asking for
-        kraken/claims/12 also returns kraken/claims/120/1. The client is
-        expected to filter; the stub must not do it for them."""
+        kraken/claims/12 also returns kraken/claims/120/1, and asking for
+        kraken/ returns the claim ladder AND the state records together. The
+        client is expected to filter; the stub must not do it for them."""
         rdir = self.path("refs")
         out = []
         if os.path.isdir(rdir):
@@ -361,9 +375,9 @@ class StubState:
             for e in os.listdir(rdir):
                 parsed = self.parse_ref_file(e)
                 if parsed is not None:
-                    entries.append((parsed[0], parsed[1], e))
-            for n, gen, e in sorted(entries):
-                name = self.ref_name(n, gen)
+                    entries.append((parsed[0], parsed[1], parsed[2], e))
+            for kind, n, gen, e in sorted(entries):
+                name = self.ref_name(kind, n, gen)
                 if not name.startswith("refs/" + prefix):
                     continue
                 sha = self._read(os.path.join(rdir, e)).rstrip("\n")
@@ -412,6 +426,7 @@ def graphql_list_issues(state, q):
     first = int(fm.group(1)) if fm else 100
     cm = re.search(r"comments\(last: ([0-9]+)\)", q)
     window = int(cm.group(1)) if cm else 0
+    total = re.search(r"comments \{ totalCount \}", q) is not None
     am = re.search(r'after: "([^"]*)"', q)
     after = am.group(1) if am else ""
 
@@ -423,7 +438,8 @@ def graphql_list_issues(state, q):
         present = state.issue_labels(n)
         if not all(l in present for l in labels):
             continue
-        nodes.append(state.issue_node(n, comment_window=window))
+        nodes.append(state.issue_node(n, comment_window=window,
+                                      comment_total=total))
     nodes.sort(key=lambda x: (x["createdAt"], x["number"]))
     if after != "":
         after_n = int(after)
@@ -611,6 +627,28 @@ class Handler(BaseHTTPRequestHandler):
                 self._delete_ref(n, gen)
                 return
 
+        # --- state records (§3.1): force-update and delete, no ladder ---
+        m = re.match(r"^/repos/[^/]+/[^/]+/git/refs/kraken/state/([0-9]+)$", path)
+        if m:
+            n = int(m.group(1))
+            f = s.state_ref_path(n)
+            if method == "PATCH":
+                sha = body.get("sha", "")
+                if not os.path.isfile(f):
+                    self._send(422, {"message": "Reference does not exist"})
+                    return
+                s._write(f, sha + "\n")
+                self._send(200, {"ref": s.ref_name("state", n, 0),
+                                 "object": {"sha": sha}})
+                return
+            if method == "DELETE":
+                if os.path.isfile(f):
+                    os.remove(f)
+                    self._send(204)
+                else:
+                    self._send(422, {"message": "Reference does not exist"})
+                return
+
         m = re.match(r"^/repos/[^/]+/[^/]+/git/ref/kraken/claims/([0-9]+)$", path)
         if m and method == "GET":
             ref = s.single_ref(int(m.group(1)))
@@ -621,7 +659,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         m = re.match(r"^/repos/[^/]+/[^/]+/git/matching-refs/(.*)$", path)
-        if m and method == "GET" and m.group(1).startswith("kraken/claims"):
+        if m and method == "GET" and m.group(1).startswith("kraken"):
             self._send(200, paginate(s.matching_refs(m.group(1)), qs))
             return
 
@@ -721,6 +759,10 @@ class Handler(BaseHTTPRequestHandler):
             "labels": [{"name": x} for x in labels],
             "body": s.issue_body(n),
             "state": "open" if s.is_open(s.issue_dir(n)) else "closed",
+            # The comment COUNT, which every terminal transition reads back to
+            # anchor the state record it writes (§3.1). Real GitHub carries it on
+            # this payload, so a transition needs no second request for it.
+            "comments": len(s.comments(n)),
         })
 
     def _list_issues_by_label(self, qs):
@@ -743,11 +785,18 @@ class Handler(BaseHTTPRequestHandler):
         ref = body.get("ref", "")
         # Race tests line every creator up here, right before the CAS.
         self.knobs.cas_wait()
+        state_m = re.match(r"^refs/kraken/state/([0-9]+)$", ref)
         m = re.match(r"^refs/kraken/claims/([0-9]+)(?:/([0-9]+))?$", ref)
-        if not m:
+        if state_m:
+            # A state record is created the same conflict-failing way — the
+            # writer falls back to a force PATCH on 422 (§3.1), so "already
+            # exists" has to be a real 422 here rather than a silent overwrite.
+            path = s.state_ref_path(state_m.group(1))
+        elif not m:
             self._send(422, {"message": "unsupported ref name"})
             return
-        path = s.ref_path(m.group(1), m.group(2) or 0)
+        else:
+            path = s.ref_path(m.group(1), m.group(2) or 0)
         # The CAS: creation is atomic under the lock — the lock IS GitHub's
         # server-side serialization, so exactly one racer sees "absent".
         with self.knobs.lock:
@@ -765,7 +814,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(422, {"message": "Reference does not exist"})
                 return
             s._write(path, body.get("sha", "") + "\n")
-        self._send(200, {"ref": s.ref_name(n, gen)})
+        self._send(200, {"ref": s.ref_name("claim", n, gen)})
 
     def _delete_ref(self, n, gen):
         s = self.state

@@ -23,15 +23,17 @@ class StatusTests(KrakenConformanceTest):
 
     def test_status(self):
         # Review queue: #88 delivered with a MERGED PR (orphan), #91 OPEN PR.
-        self.mk_issue(88, "orphan candidate", "kraken-task", "project:app", "awaiting-merge")
-        self.mk_comment(88, '> d\n\n<!-- kraken {"type":"delivered","worker":"w1","pr":"https://github.com/OWNER/work/pull/5"} -->\n\nlanded')
+        self.mk_issue(88, "orphan candidate", "kraken-task", "project:app")
+        self.deliver_state(88, pr="https://github.com/OWNER/work/pull/5")
         self.mk_pr(5, "MERGED", now_iso())
-        self.mk_issue(91, "healthy delivery", "kraken-task", "project:app", "awaiting-merge")
-        self.mk_comment(91, '> d\n\n<!-- kraken {"type":"delivered","worker":"w2","pr":"https://github.com/OWNER/work/pull/6"} -->')
+        self.mk_issue(91, "healthy delivery", "kraken-task", "project:app")
+        self.deliver_state(91, worker="w2", pr="https://github.com/OWNER/work/pull/6")
         self.mk_pr(6, "OPEN")
 
         # Decision queue.
-        self.mk_issue(97, "needs a human call", "kraken-task", "project:app", "needs-decision")
+        self.mk_issue(97, "needs a human call", "kraken-task", "project:app",
+                      "needs-decision")
+        self.mk_state_record(97, "needs-decision", worker="w1")
 
         # In flight: age comes from the claim ref's commit date. #99 DEAD (claim
         # ref 8h old, operator poked the thread — must NOT reset the clock),
@@ -87,8 +89,10 @@ class StatusTests(KrakenConformanceTest):
         self.assertFalse(next(d for d in js["review_queue"] if d["number"] == 91)["orphan"],
                          "json #91 orphan flag not false")
         self.assertEqual(
-            [d["pr_source"] for d in js["review_queue"]], ["marker", "marker"],
-            "json review_queue must say the PR came from the delivered marker")
+            [d["pr_url"] for d in js["review_queue"]],
+            ["https://github.com/OWNER/work/pull/5",
+             "https://github.com/OWNER/work/pull/6"],
+            "json review_queue must carry the record's PR")
         f99 = next(d for d in js["in_flight"] if d["number"] == 99)
         self.assertEqual(f99["worker"], "dead-worker", "json in_flight #99 worker wrong")
         self.assertGreaterEqual(f99["heartbeat_age_seconds"], 28000, "json in_flight #99 age not anchored")
@@ -101,55 +105,68 @@ class StatusTests(KrakenConformanceTest):
         self.assertEqual(scoped["in_flight"], [], "--project web should have empty in_flight")
         self.assertEqual(scoped["project"], "web", "--project not reflected in json")
 
-    def test_pr_link_comes_from_the_delivered_marker(self):
-        """#71 — the delivery URL is the `delivered` marker's `pr` field
-        (PROTOCOL.md §8), never something grepped out of the prose. The regex
-        survives only for threads delivered before the field existed, and what it
-        finds is reported as legacy."""
+    def test_the_pr_link_comes_from_the_state_record(self):
+        """#71, finished by protocol/9: the delivery URL is a field of the state
+        record (PROTOCOL.md §3.1, §8), never something grepped out of the prose
+        and never re-read off a comment marker. The console reads it from the
+        queue read it already performed, so a review queue of any size costs no
+        comment request at all."""
         # #1: a human quotes an unrelated PR of another repo BEFORE the delivery.
-        self.mk_issue(1, "marker wins", "kraken-task", "project:app", "awaiting-merge")
+        # It is not the delivery, and nothing looks at the thread to find out.
+        self.mk_issue(1, "record wins", "kraken-task", "project:app")
         self.mk_comment(1, "cf. https://github.com/OWNER/other/pull/999 — unrelated")
-        self.mk_comment(1, '> d\n\n<!-- kraken {"type":"delivered","worker":"w1","pr":"https://github.com/OWNER/work/pull/5"} -->\n\nlanded')
+        self.deliver_state(1, pr="https://github.com/OWNER/work/pull/5")
         self.mk_pr(5, "OPEN")
         self.mk_pr(999, "MERGED", now_iso())
-        # #2: a legacy thread — delivered before the marker carried `pr`, so the
-        # URL is only in the prose. It is still a WORKER comment (it carries the
-        # marker, just without the field); a delivery comment that carried
-        # neither marker nor disclaimer was never a conforming one, and under
-        # protocol/8 it would read as an operator reply and requeue the task.
-        self.mk_issue(2, "legacy delivery", "kraken-task", "project:app", "awaiting-merge")
-        self.mk_comment(2, '> d\n\ndelivered in https://github.com/OWNER/work/pull/6'
-                           '\n\n<!-- kraken {"type":"delivered","worker":"w1"} -->')
-        self.mk_pr(6, "OPEN")
-        # #3: delivered with no PR recorded at all — must not break the read.
-        self.mk_issue(3, "no pr", "kraken-task", "project:app", "awaiting-merge")
-        self.mk_comment(3, '> d\n\n<!-- kraken {"type":"delivered","worker":"w1"} -->\n\npatch in this comment')
+        # #2: delivered with no PR at all — §8's "when there is one" (a work repo
+        # that takes no push puts the diff on the thread). Must not break the
+        # read, and must not read as a defect.
+        self.mk_issue(2, "no pr", "kraken-task", "project:app")
+        self.deliver_state(2)
 
         r = self.kraken("status", "OWNER/tasks", "--project", "app")
         self.assertEqual(r.rc, 0, "status exit: %s" % r.err)
         self.assertRegex(r.out, r"#1 .*https://github\.com/OWNER/work/pull/5",
-                         "#1 must report the marker's PR")
+                         "#1 must report the record's PR")
         self.assertNotIn("other/pull/999", r.out,
                          "#1 reported a PR a human merely mentioned")
         self.assertNotIn("possible orphan(s): #1", r.out,
                          "#1 was flagged an orphan off someone else's merged PR")
-        self.assertRegex(r.out, r"#2 .*pull/6.*legacy",
-                         "#2's free-text link must be marked legacy")
-        # #3 delivered the diff on the thread — §8's "when there is one". The
-        # line must point the operator AT the issue, not report a missing PR:
-        # nothing here needs chasing.
-        self.assertRegex(r.out, r"#3 .*review on the thread \(no PR\)")
+        self.assertRegex(r.out, r"#2 .*review on the thread \(no PR\)")
         self.assertNotIn("no PR link recorded", r.out,
                          "a supported delivery must not read as a defect")
 
         js = json.loads(self.kraken("status", "OWNER/tasks", "--project", "app",
                                     "--json").out)
-        sources = {d["number"]: (d["pr_url"], d["pr_source"]) for d in js["review_queue"]}
-        self.assertEqual(sources, {
-            1: ("https://github.com/OWNER/work/pull/5", "marker"),
-            2: ("https://github.com/OWNER/work/pull/6", "legacy-free-text"),
-            3: (None, None),
-        }, "json pr_url/pr_source wrong: %s" % sources)
+        links = {d["number"]: d["pr_url"] for d in js["review_queue"]}
+        self.assertEqual(links, {1: "https://github.com/OWNER/work/pull/5",
+                                 2: None}, "json pr_url wrong: %s" % links)
+        self.assertNotIn("pr_source", js["review_queue"][0],
+                         "the legacy-vs-marker source has nothing left to report")
+
+    def test_the_review_queue_reads_no_comment_thread(self):
+        """The cost claim protocol/9 pays for: through protocol/8 the console
+        paginated the whole comment thread of every awaiting-merge task to find
+        the newest `delivered` marker. Now the link rides the queue read, so a
+        review queue of any size costs zero comment requests."""
+        for n in range(1, 6):
+            self.mk_issue(n, "delivered #%d" % n, "kraken-task", "project:app")
+            self.deliver_state(n, pr="https://github.com/OWNER/work/pull/%d" % n)
+            self.mk_pr(n, "OPEN")
+            for i in range(30):
+                self.mk_comment(n, "review chatter %d" % i)
+            # The thread grew after the delivery, so these are all requeued —
+            # which is what the count says, and exactly why nothing reads them.
+            self.mk_state_record(n, "awaiting-merge", worker="w1",
+                                 pr="https://github.com/OWNER/work/pull/%d" % n)
+
+        self.truncate_log()
+        r = self.kraken("status", "OWNER/tasks", "--project", "app")
+        self.assertEqual(r.rc, 0, "status exit: %s" % r.err)
+        comment_reads = [l for l in self.log_lines()
+                         if l.startswith("GET ") and "/comments" in l]
+        self.assertEqual(comment_reads, [],
+                         "status read a comment thread: %s" % comment_reads)
 
     def test_silent_claim_is_flagged(self):
         """A lease about to expire reads exactly like one being renewed, and

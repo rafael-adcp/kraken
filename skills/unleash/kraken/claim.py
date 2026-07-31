@@ -9,19 +9,20 @@ import dataclasses
 import json
 import os
 import sys
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 
 from .contract import (
     EXIT_LOST, EXIT_NONE, EXIT_NOT_CLEAR, EXIT_OK, EXIT_TRANSPORT,
     EXIT_UNKNOWN_PROJECT, EXIT_USAGE, HELD_LABELS, Issue, Json, Worker, diag
 )
 from .comments import compose_comment, compose_note
-from .transport import Api
+from .transport import Api, comment_total_of
 from .lease import (
     Lease, NO_LEASE, clear_claim_state, format_age, lease_ttl_seconds,
-    live_leases, write_claim_state
+    write_claim_state
 )
 from .refs import Refs
+from .state import NO_RECORD, QUEUED, States, TaskState, holding_state
 from .queue import Queue, QueueRead
 from .reconcile import apply_reconcile, project_reconcile, reconcile_plan
 
@@ -79,11 +80,13 @@ class ClaimAttempt:
 
     Constructor arguments:
 
-    `allow_held` names the held labels the caller's §6 requeue derivation has
-    already lifted, so the guard does not refuse the very task the queue filter
-    just offered. They are stale projection, and the projection phase swaps them
-    off. The guard is an optimisation either way — the claim-ref CAS is the only
-    thing that decides ownership.
+    `record` is the state record the caller already read for this issue (§3.1),
+    or None when it has not read one — a drain gets every record with its queue
+    read, a `claim <issue>` gets none, so the guard fetches it. Handing it in is
+    what stops the guard from refusing the very task the queue filter just
+    offered: both derive "is it held" from the same record and the same count.
+    The guard is an optimisation either way — the claim-ref CAS is the only thing
+    that decides ownership.
 
     `lease` is the lease record the caller observed on this issue, or `NO_LEASE`
     when it observed no claim ref. It decides the generation the CAS starts
@@ -104,20 +107,21 @@ class ClaimAttempt:
     probe is, so a held task refuses without a queue read."""
 
     def __init__(self, api: Api, issue: Issue, worker: Worker, *,
-                 allow_held: Sequence[str] = (), lease: Lease = NO_LEASE,
+                 record: TaskState | None = None, lease: Lease = NO_LEASE,
                  ttl: int | None = None, probe_lease: bool = False,
                  ensure_clear: Callable[[], int | None] | None = None):
         self.api = api
         self.refs = Refs(api)
+        self.states = States(api)
         self.issue = issue
         self.worker = worker
-        self.allow_held = allow_held
+        self.record = record
         self.lease = lease
         self.ttl = lease_ttl_seconds(ttl)
         self.probe_lease = probe_lease
         self.ensure_clear = ensure_clear or (lambda: None)
         # Decided by the guard, consumed by the projection: whose expired lease
-        # this is taking, and which requeued labels are still on the issue.
+        # this is taking, and which stale held labels are still on the issue.
         self.steal = NO_LEASE
         self.stale_held: list[str] = []
 
@@ -134,17 +138,31 @@ class ClaimAttempt:
     def _guard(self) -> int | None:
         """Refuse early and for free: a held task is skipped with zero writes.
 
-        The guard reads two labels, not three: `in-progress` is write-only (§3),
-        so the lease below is what decides whether somebody is working. No label
-        holds conditionally here, and none is probed mid-guard."""
-        label_names = self.api.issue_label_names(self.issue)
-        if label_names is None:
+        The verdict is the STATE RECORD, re-derived over a fresh read (§5.2 step
+        3): the record names the state and its `comments` anchor says whether the
+        thread has moved past it, so a task an operator has commented on is
+        claimed rather than refused. One issue fetch answers both halves — the
+        labels for the no-record fallback (§3.1) and the live comment count — so
+        the cheap refusal stays one request.
+
+        `in-progress` is not among the labels consulted: it is write-only (§3),
+        and the lease below is what decides whether somebody is working."""
+        obj = self.api.issue_detail(self.issue)
+        total = None if obj is None else comment_total_of(obj)
+        if obj is None or total is None:
             diag(f"claim: gh-failure issue={self.issue} stage=guard")
             return EXIT_TRANSPORT
-        for held in HELD_LABELS:
-            if held in label_names and held not in self.allow_held:
-                diag(f"claim: held issue={self.issue} label={held}")
-                return EXIT_NOT_CLEAR
+        label_names = [lbl.get("name", "") for lbl in obj.get("labels", [])]
+
+        if self.record is None:
+            self.record = self.states.of(self.issue)
+            if self.record.unknown:
+                diag(f"claim: gh-failure issue={self.issue} stage=record")
+                return EXIT_TRANSPORT
+        holding = holding_state(self.record, total, label_names)
+        if holding is not None:
+            diag(f"claim: held issue={self.issue} label={holding}")
+            return EXIT_NOT_CLEAR
         code = self.ensure_clear()
         if code is not None:
             return code
@@ -172,9 +190,10 @@ class ClaimAttempt:
             return EXIT_LOST
 
         self.steal = self.lease if self.lease.stealable_by(self.worker) else NO_LEASE
-        # The requeued labels still on the issue: dropped by the projection.
-        self.stale_held = [h for h in HELD_LABELS
-                           if h in label_names and h in self.allow_held]
+        # Any held label still on the issue is stale by now — the guard above
+        # just established that nothing holds this task — so the projection swaps
+        # every one of them off for `in-progress`.
+        self.stale_held = [h for h in HELD_LABELS if h in label_names]
         return None
 
     def _take(self) -> int | None:
@@ -210,16 +229,27 @@ class ClaimAttempt:
 
     def _project(self) -> int | None:
         """Write what a human reads. State file FIRST so lifecycle hooks can
-        release the claim even if the writes below fail; then the in-progress
-        label and claim comment. A failure here leaves the claim HELD by the
-        lease — exit 20 says re-check. The label is the only thing that can be
-        left behind, and nothing reads it (§3): the task stays correctly held,
-        just without its badge, until the terminal transition writes the next
-        one."""
+        release the claim even if the writes below fail; then — on a steal — the
+        `lease-expired` comment and the expiry count that goes with it; then the
+        in-progress label and claim comment. A failure here leaves the claim HELD
+        by the lease — exit 20 says re-check.
+
+        A first claim writes NO record (§3.1): it changes nothing about what the
+        task is between workers, and the lease is what says it is being executed.
+        A steal writes one because the count it carries is cumulative and §6's
+        repeat-expiry guard reads it — an increment that does not land costs one
+        further steal before that guard fires, never a wrong state."""
         write_claim_state(self.api.repo, self.issue, self.worker)
-        if self.steal.present and not self.api.post_comment(
-                self.issue, lease_expired_body(self.worker, self.steal)):
-            return self._held("comment")
+        if self.steal.present:
+            if not self.api.post_comment(
+                    self.issue, lease_expired_body(self.worker, self.steal)):
+                return self._held("comment")
+            # The guard always leaves a record behind (read or handed in), so
+            # there is nothing to fetch here — and nothing to guess: a task that
+            # never had one starts its expiry count at this steal.
+            record = self.record if self.record is not None else NO_RECORD
+            if not self.states.write(self.issue, record.stolen(self.worker)):
+                return self._held("record")
         for stale in self.stale_held:
             if not self.api.swap_labels(self.issue, remove=stale):
                 return self._held("label")
@@ -242,12 +272,12 @@ class ClaimAttempt:
 
 
 def _claim_once(api: Api, issue: Issue, worker: Worker,
-                allow_held: Sequence[str] = (), lease: Lease = NO_LEASE,
+                record: TaskState | None = None, lease: Lease = NO_LEASE,
                 ttl: int | None = None, probe_lease: bool = False,
                 ensure_clear: Callable[[], int | None] | None = None) -> int:
     """The claim sequence as a call. Kept because `acquire_next` injects it as
     `claim_step` and both subcommands reach it through here."""
-    return ClaimAttempt(api, issue, worker, allow_held=allow_held, lease=lease,
+    return ClaimAttempt(api, issue, worker, record=record, lease=lease,
                         ttl=ttl, probe_lease=probe_lease,
                         ensure_clear=ensure_clear).run()
 
@@ -451,34 +481,31 @@ def acquire_next(api: Api, project: str, worker: Worker,
     # extra, and an expired lease costs no write at all: it is simply not held,
     # and the claim below steals it. The pass is repo-wide (not project-scoped)
     # because a lock is repo-wide, exactly like the cron it replaces.
-    plan = reconcile_plan(read.tasks, leases)
+    plan = reconcile_plan(read.tasks, leases, read.states)
     if plan:
         if apply_reconcile(api, plan, worker) is None:
             # Writes of ours may have half-landed — same state-unknown rule as a
             # failed claim: re-check before retrying, never push on.
             diag("claim-next: gh-failure stage=reconcile — state unknown, re-check")
             return (EXIT_TRANSPORT, None)
-        project_reconcile(plan, read.tasks, leases)
+        project_reconcile(plan, read.tasks, leases, read.states)
 
     rows = queue.candidates(project, read=read)
     if rows is None:
         diag("claim-next: gh-failure stage=list")
         return (EXIT_TRANSPORT, None)
 
-    live = live_leases(leases)
     for cand in rows:  # priority-first, then FIFO
         if not cand.startable:
             continue
-        # Re-derive the requeue verdict from the same task the filter used — a
-        # pure call, no request — so the guard accepts a task an operator reply
-        # has already requeued instead of refusing what was just offered. The
-        # candidate carries that task, so this needs no second index over the
-        # queue read.
-        allow_held = cand.task.requeued(live)
-        # Hand the claim the lease this read already saw: it decides which
-        # generation the CAS starts from, and whether this is a steal at all.
-        rc = claim_step(api, cand.number, worker, allow_held=allow_held,
-                       lease=leases.get(cand.number, NO_LEASE), ttl=ttl)
+        # Hand the claim the record and the lease this read already saw. The
+        # record is what the guard re-derives "is it held" from, so it reaches
+        # the same verdict as the filter that just offered the task instead of
+        # refusing it — and the lease decides which generation the CAS starts
+        # from, and whether this is a steal at all.
+        rc = claim_step(api, cand.number, worker,
+                        record=read.record(cand.number),
+                        lease=leases.get(cand.number, NO_LEASE), ttl=ttl)
         if rc == EXIT_OK:
             return (EXIT_OK, {"issue": cand.number, "title": cand.title,
                               "body": cand.body})
@@ -547,21 +574,25 @@ class Terminal:
     command: str          # the subcommand name every diagnostic is prefixed with
     marker: str           # the comment's marker type (PROTOCOL.md §4)
     done: str             # the verb the success line reports
+    state: str            # the state the record lands on (§3.1)
     add_label: str | None = None  # the operator-facing state the task lands on
     label_stage: str = "labels"   # the stage name a failed label swap reports
     clear_on_lost: bool = False   # also drop the state file on a lost lease
 
 
 ESCALATE = Terminal("escalate", "needs-decision", "escalated",
-                    add_label="needs-decision")
+                    state="needs-decision", add_label="needs-decision")
 DELIVER = Terminal("deliver", "delivered", "delivered",
-                   add_label="awaiting-merge")
+                   state="awaiting-merge", add_label="awaiting-merge")
 # Release adds no label — stripping `in-progress` IS the transition, and the
-# task rejoins the queue wearing nothing. `clear_on_lost` is not a symmetry to
-# tidy away: a release whose lease turned out to be somebody else's must still
-# drop the local claim state, or the caller that asked for it (a lifecycle hook,
-# the ambush loop) retries forever a release that is no longer its business.
-RELEASE = Terminal("release", "released", "released",
+# task rejoins the queue wearing nothing. It still writes a record, and it is the
+# one transition that records `queued`: the task is going back to the queue, and
+# the record is what carries its `expiries` there (§3.1). `clear_on_lost` is not
+# a symmetry to tidy away: a release whose lease turned out to be somebody else's
+# must still drop the local claim state, or the caller that asked for it (a
+# lifecycle hook, the ambush loop) retries forever a release that is no longer
+# its business.
+RELEASE = Terminal("release", "released", "released", state=QUEUED,
                    label_stage="label", clear_on_lost=True)
 
 
@@ -584,6 +615,7 @@ class TerminalTransition:
                  terminal: Terminal):
         self.api = api
         self.refs = Refs(api)
+        self.states = States(api)
         self.issue = issue
         self.worker = worker
         self.terminal = terminal
@@ -614,6 +646,8 @@ class TerminalTransition:
             {"type": t.marker, "worker": self.worker, **(payload or {})})
         if not self.api.post_comment(self.issue, body):
             return self._failed("comment")
+        if not self._record((payload or {}).get("pr")):
+            return self._failed("record")
         if not self.api.swap_labels(self.issue, remove="in-progress",
                                     add=t.add_label):
             return self._failed(t.label_stage)
@@ -627,6 +661,32 @@ class TerminalTransition:
         diag(f"{t.command}: {t.done} issue={self.issue} "
              f"worker={self.worker}{suffix}")
         return EXIT_OK
+
+    def _record(self, pr: str | None = None) -> bool:
+        """Write the state record this transition lands the task on (§3.1) —
+        between the comment and the labels, so the record is on the server before
+        the claim ref that holds the task is deleted. A task freed with no record
+        reads as queued while it is in fact delivered, which is the one ordering
+        this protocol cannot tolerate.
+
+        The comment count is read BACK from the issue, after this transition's
+        own comment landed, rather than incremented from a count read earlier: a
+        comment that arrived in between would otherwise be consumed silently and
+        the operator's words lost.
+
+        The previous record is read first because `expiries` is cumulative and
+        `pr` is sticky (`TaskState.moved_to`) — a transition inherits the task's
+        history rather than resetting it. Either read failing fails the
+        transition, which leaves the task held by the lease this worker still
+        owns: the correct place to be stuck."""
+        total = self.api.comment_count(self.issue)
+        if total is None:
+            return False
+        previous = self.states.of(self.issue)
+        if previous.unknown:
+            return False
+        return self.states.write(self.issue, previous.moved_to(
+            self.terminal.state, self.worker, total, pr=pr))
 
     def _failed(self, stage: str) -> int:
         """A write that did not land. The lease is still ours and the task is

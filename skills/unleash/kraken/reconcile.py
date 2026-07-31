@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .contract import (
     EXIT_OK, EXIT_TRANSPORT, Issue, Json, ReconcileAction, Worker, diag
@@ -14,6 +14,7 @@ from .comments import compose_comment
 from .transport import Api
 from .lease import LEASE_EXPIRY_ESCALATE, Lease
 from .refs import Refs
+from .state import NO_RECORD, States, TaskState
 from .queue import Queue, Task
 
 # --- coordination-repo subcommands -------------------------------------------
@@ -59,6 +60,7 @@ def stale_claim_body(worker: Worker, reason: str) -> str:
 
 def reconcile_plan(
     tasks: Sequence[Task], leases: dict[Issue, Lease],
+    states: Mapping[Issue, TaskState] | None = None,
     max_expiries: int = LEASE_EXPIRY_ESCALATE,
 ) -> list[ReconcileAction]:
     """The reconciler's decision as a PURE function of one queue read — no
@@ -66,58 +68,83 @@ def reconcile_plan(
     expiry itself is already decided (`lease_state`); these are the repairs the
     expiry does NOT make on its own:
 
-      1. **orphan lock** — a ref whose issue is not an open task any more, or is
-         already labeled needs-decision/awaiting-merge (a terminal transition
-         whose ref delete was lost): delete the ref, touch nothing else;
-      2. **reclaim** — a task whose lease has expired `max_expiries` times
-         already: move it to needs-decision with a stale-claim comment, then
-         delete the ref. This is the ONLY thing an expiry escalates. A task that
-         kills whatever worker touches it — a poisoned environment, a step that
-         always hangs — would otherwise be stolen, dropped, stolen again for as
-         long as the queue has workers, each round burning a drain and telling
+      1. **orphan ref** — a claim ref or a state record whose issue is not an
+         open task any more, or a claim ref on a task whose record already names
+         a held state (a terminal transition whose ref delete was lost): delete
+         that ref, touch nothing else;
+      2. **reclaim** — a task whose record reports `expiries` ≥ `max_expiries`:
+         move it to needs-decision with a stale-claim comment, write the record,
+         then delete the ref. This is the ONLY thing an expiry escalates. A task
+         that kills whatever worker touches it — a poisoned environment, a step
+         that always hangs — would otherwise be stolen, dropped, stolen again for
+         as long as the queue has workers, each round burning a drain and telling
          nobody. Anything below the threshold is not the reconciler's business:
-         the lease is simply not held, and the claim path steals it.
+         the lease is simply not held, and the claim path steals it;
+      3. **migrate** — an open task wearing a held label with NO record: write
+         the record its label already implies, touching no label, comment or ref.
+         This is what carries a queue written before protocol/9 across the
+         upgrade, and what lets this reader tolerate a writer that still only
+         sets labels. It runs once per task, because after it the record exists.
 
-    Both rules are about the LEASE, and none is about the in-progress LABEL: that
-    label is write-only (§3), so a wrong badge misleads nobody and misroutes
-    nothing — it is not a repair the reader owes anyone, and the next transition
-    on the task overwrites it anyway.
+    No rule is about the in-progress LABEL: that label is write-only (§3), so a
+    wrong badge misleads nobody and misroutes nothing — it is not a repair the
+    reader owes anyone, and the next transition on the task overwrites it anyway.
 
     `tasks` is the open-kraken-task walk (repo-wide, before any project filter),
     so rule 1 needs no per-ref issue read: a ref on an issue absent from that
     walk is a ref on an issue that is closed, or no longer a task at all —
-    either way it holds a lock over nothing. Nothing on the issue timeline
-    anchors liveness, so an operator poking a dead worker's thread shortens
-    time-to-triage rather than extending the lease.
+    either way it holds a lock, or a state, over nothing. Nothing on the issue
+    timeline anchors liveness, so an operator poking a dead worker's thread
+    shortens time-to-triage rather than extending the lease.
 
     Returns a list of `{"rule", "issue", "reason"}` actions ordered by rule then
     issue number; an empty list means every lease is one a worker is entitled to
-    hold (the overwhelmingly common case, and it costs zero writes)."""
+    hold and every held task has said so in a record (the overwhelmingly common
+    case, and it costs zero writes)."""
+    states = {} if states is None else states
     by_number = {task.number: task for task in tasks}
     plan = []
 
-    # Every rule is keyed on a lease, so the walk is over the refs — a task with
-    # no ref has nothing for this pass to repair, whatever labels it wears.
+    # Rules 1 and 2 are keyed on a claim ref, so the walk is over the leases — a
+    # task with no ref has no lock for this pass to repair, whatever labels it
+    # wears.
     for num in sorted(leases):
         task = by_number.get(num)
-        if task is None or task.held:
+        record = states.get(num, NO_RECORD)
+        if task is None or record.holds(task.comment_total):
             plan.append({"rule": "orphan-lock", "issue": num,
                          "reason": "the task already left the claim",
                          "gens": list(leases[num].gens)})
             continue
 
-        if leases[num].expired:
-            expiries = task.expiries
-            if expiries >= max_expiries:
-                plan.append({"rule": "reclaim", "issue": num,
-                             # The escalation writes needs-decision, and clears
-                             # the in-progress badge if the task still wears one:
-                             # write-only does not mean write-and-forget.
-                             "reason": f"the lease expired {expiries} times and "
-                                       "no worker has finished the task",
-                             "held": "in-progress" in task.labels,
-                             "gens": list(leases[num].gens)})
-            # Below the threshold: not held, not repaired — stolen by the claim.
+        if leases[num].expired and record.expiries >= max_expiries:
+            plan.append({"rule": "reclaim", "issue": num,
+                         # The escalation writes needs-decision, and clears
+                         # the in-progress badge if the task still wears one:
+                         # write-only does not mean write-and-forget.
+                         "reason": f"the lease expired {record.expiries} times "
+                                   "and no worker has finished the task",
+                         "held": "in-progress" in task.labels,
+                         "gens": list(leases[num].gens)})
+        # Below the threshold: not held, not repaired — stolen by the claim.
+
+    # A state record on an issue the walk no longer carries is state over
+    # nothing, the same orphan rule 1 applies to a lock. Deleting it keeps the
+    # namespace from growing one ref per task the queue has ever closed.
+    walked = set(by_number)
+    for num in sorted(states):
+        if num not in walked:
+            plan.append({"rule": "orphan-state", "issue": num,
+                         "reason": "the task is no longer an open task"})
+
+    # Rule 3 is keyed on the ABSENCE of a record, so it walks the tasks.
+    for num in sorted(by_number):
+        task = by_number[num]
+        if task.held and num not in states:
+            plan.append({"rule": "migrate", "issue": num,
+                         "reason": "held by a label with no state record",
+                         "state": task.held[0],
+                         "comments": task.comment_total})
 
     return plan
 
@@ -136,7 +163,8 @@ def apply_reconcile(api: Api, plan: Sequence[ReconcileAction],
     ends with the ref delete, so a crash leaves the task HELD and the next
     reader's rule 1 finishes the job — the task is never observably free while a
     reclaim is half-applied (§5's ordering rule)."""
-    counts = {"orphan-lock": 0, "reclaim": 0}
+    counts = {"orphan-lock": 0, "orphan-state": 0, "reclaim": 0, "migrate": 0}
+    states = States(api)
     for action in plan:
         rule, num = action["rule"], action["issue"]
 
@@ -145,35 +173,77 @@ def apply_reconcile(api: Api, plan: Sequence[ReconcileAction],
                 return _reconcile_failure("ref", num)
             diag(f"reap: orphan-lock issue={num} — claim ref deleted")
 
+        elif rule == "orphan-state":
+            if not states.delete(num):
+                return _reconcile_failure("state", num)
+            diag(f"reap: orphan-state issue={num} — state record deleted")
+
         elif rule == "reclaim":
+            if not api.post_comment(
+                    num, stale_claim_body(worker, action["reason"])):
+                return _reconcile_failure("comment", num)
+            # Comment, then RECORD, then labels, then the ref (§3.1): the record
+            # has to be on the server before the lock that holds the task goes,
+            # or the task is observably queued while it is waiting on a human.
+            total = api.comment_count(num)
+            if total is None:
+                return _reconcile_failure("count", num)
+            if not states.write(num, states.of(num).moved_to(
+                    "needs-decision", worker, total)):
+                return _reconcile_failure("state", num)
             if not api.swap_labels(
                 num,
                 remove="in-progress" if action["held"] else None,
                 add="needs-decision",
             ):
                 return _reconcile_failure("labels", num)
-            if not api.post_comment(
-                    num, stale_claim_body(worker, action["reason"])):
-                return _reconcile_failure("comment", num)
             if not Refs(api).drop(num, action["gens"]):
                 return _reconcile_failure("ref", num)
             diag(f"reap: reclaimed issue={num} ({action['reason']})")
+
+        elif rule == "migrate":
+            # The label is already there and already holding — this only writes
+            # down what it means, so it posts nothing and swaps nothing. The
+            # count is the one the walk observed: any comment after it requeues,
+            # which is the correct reading of "nothing has been said since we
+            # learned about this task".
+            if not states.write(num, TaskState(
+                    state=action["state"], worker=worker,
+                    comments=action["comments"], recorded=True)):
+                return _reconcile_failure("state", num)
+            diag(f"reap: migrate issue={num} — recorded {action['state']}")
 
         counts[rule] += 1
     return counts
 
 
 def project_reconcile(plan: Sequence[ReconcileAction], tasks: list[Task],
-                      leases: dict[Issue, Lease]) -> None:
+                      leases: dict[Issue, Lease],
+                      states: dict[Issue, TaskState] | None = None,
+                      worker: Worker = RECONCILER_WORKER) -> None:
     """Fold an APPLIED plan back into the in-memory queue read, in place, so the
     drain that just reconciled classifies the reconciled state without paying for
     a second fetch. Mirrors exactly what apply_reconcile wrote — nothing more:
-    the leases it deleted, and the one label swap a reclaim performs."""
+    the leases it deleted, the records it wrote or removed, and the one label
+    swap a reclaim performs."""
     by_number = {task.number: task for task in tasks}
     for action in plan:
         rule, num = action["rule"], action["issue"]
         if rule in ("orphan-lock", "reclaim"):
             leases.pop(num, None)
+        if states is not None:
+            task = by_number.get(num)
+            total = task.comment_total if task is not None else 0
+            if rule == "orphan-state":
+                states.pop(num, None)
+            elif rule == "reclaim":
+                states[num] = states.get(num, NO_RECORD).moved_to(
+                    "needs-decision", worker, total)
+            elif rule == "migrate":
+                states[num] = TaskState(state=action["state"],
+                                        worker=worker,
+                                        comments=action["comments"],
+                                        recorded=True)
         task = by_number.get(num)
         if task is None:
             continue
@@ -197,7 +267,7 @@ def reconcile_pass(api: Api, worker: Worker, ttl: int | None = None, *,
         return (EXIT_TRANSPORT, None)
     leases = got.leases
 
-    plan = reconcile_plan(got.tasks, leases)
+    plan = reconcile_plan(got.tasks, leases, got.states)
     counts = apply_reconcile(api, plan, worker)
     if counts is None:
         return (EXIT_TRANSPORT, None)
@@ -222,6 +292,7 @@ def cmd_reap(args: argparse.Namespace) -> int:
 
     print(
         f"reap: done leases={counts['leases']} reclaimed={counts['reclaim']} "
-        f"orphan_locks={counts['orphan-lock']}"
+        f"orphan_locks={counts['orphan-lock']} "
+        f"orphan_states={counts['orphan-state']} migrated={counts['migrate']}"
     )
     return rc

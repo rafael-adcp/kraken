@@ -303,6 +303,63 @@ class KrakenConformanceTest(unittest.TestCase):
         """A lease seeded just past the TTL — the steal's precondition."""
         return self.mk_claim_ref(n, worker, age_seconds=lease_ttl() + 60, **kwargs)
 
+    def mk_state_record(self, n, state, worker="w1", comments=None,
+                        expiries=0, pr=None):
+        """Seed the state record of issue `n` (PROTOCOL.md §3.1) — the ref plus
+        the orphan commit whose message is the `state` marker, exactly as
+        `States.write` writes it. Returns the seeded sha.
+
+        `comments` defaults to the thread AS IT STANDS, which is what a
+        transition records: it reads the count back after posting its own
+        comment, so a freshly delivered task holds until something else is said.
+        Passing a lower number models a thread that has moved on since."""
+        payload = {"type": "state", "state": state, "worker": worker,
+                   "comments": (self.comment_count(n) if comments is None
+                                else int(comments)),
+                   "expiries": int(expiries)}
+        if pr:
+            payload["pr"] = pr
+        sha = hashlib.sha1(
+            ("state-%s-%s-%s" % (n, state, payload["comments"])).encode("utf-8")
+        ).hexdigest()
+        self._write(os.path.join(self.state, "objects", sha + ".json"),
+                    json.dumps({"message": make_marker(payload),
+                                "committedDate": self.server_ago_iso(0)}))
+        self._write(os.path.join(self.state, "refs", "state-%d" % int(n)),
+                    sha + "\n")
+        return sha
+
+    def state_record(self, n):
+        """The seeded state record's decoded marker payload, or None when the
+        task has no record. How a test asserts on what a transition wrote."""
+        ref = os.path.join(self.state, "refs", "state-%d" % int(n))
+        if not os.path.isfile(ref):
+            return None
+        with open(ref, encoding="utf-8") as f:
+            sha = f.read().strip()
+        obj = os.path.join(self.state, "objects", sha + ".json")
+        if not os.path.isfile(obj):
+            return None
+        with open(obj, encoding="utf-8") as f:
+            message = json.load(f).get("message", "")
+        return parse_marker(message)
+
+    def state_record_exists(self, n):
+        return os.path.isfile(
+            os.path.join(self.state, "refs", "state-%d" % int(n)))
+
+    def deliver_state(self, n, worker="w1", pr=None):
+        """A task in the state a delivery leaves it: the `delivered` comment, the
+        `awaiting-merge` label, and the record anchored on the thread including
+        that comment. The three-line preamble almost every review-side test
+        needs, so no test has to remember the order (§8)."""
+        self.mk_comment(n, "%s\n\ndone\n\n%s" % (
+            self.disclaimer_line(worker),
+            make_marker({"type": "delivered", "worker": worker,
+                         **({"pr": pr} if pr else {})})))
+        self.set_labels(n, self.labels(n) + ["awaiting-merge"])
+        return self.mk_state_record(n, "awaiting-merge", worker=worker, pr=pr)
+
     def claim_generations(self, n):
         """[(generation, sha), …] for issue `n`, sorted — the lease ladder."""
         rdir = os.path.join(self.state, "refs")
@@ -422,3 +479,9 @@ class KrakenConformanceTest(unittest.TestCase):
 def make_marker(payload):
     """Compact-JSON marker exactly as kraken.py emits it — for seeding threads."""
     return "<!-- kraken %s -->" % json.dumps(payload, separators=(",", ":"))
+
+
+def parse_marker(text):
+    """The marker payload out of a commit message or comment body, or None —
+    how a test reads back what a transition wrote into a state record."""
+    return kraken_module.parse_marker(text)

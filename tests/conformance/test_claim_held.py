@@ -3,9 +3,10 @@
 stacking needs-decision or awaiting-merge under a new claim is the corruption
 class the guard exists for.
 
-The guard reads exactly two labels, because exactly two labels hold: they are
-operator-facing states with no lock behind them, so the label IS the state and it
-can be refused on without touching the git API at all.
+The guard re-derives the task's state from its RECORD (PROTOCOL.md §3.1, §5.2
+step 3) — the state it names, and whether the thread has moved past the count it
+froze. Reading the record is a git-data READ; the point of the guard is that it
+refuses having WRITTEN nothing, on the issue or on any ref.
 
 `in-progress` is not one of them (protocol/7, PROTOCOL.md §3). It is write-only,
 so it decides nothing here: a task wearing one is refused only if a LIVE lease
@@ -19,11 +20,12 @@ from harness import KrakenConformanceTest
 
 
 class ClaimHeldTests(KrakenConformanceTest):
-    def test_operator_held_labels_are_refused_without_touching_git(self):
+    def test_a_held_record_is_refused_without_a_single_write(self):
         n = 10
         for held in ("needs-decision", "awaiting-merge"):
             n += 1
             self.mk_issue(n, "held by %s" % held, "kraken-task", "project:app", held)
+            self.mk_state_record(n, held, worker="w-before")
 
             self.truncate_log()
             r = self.kraken("claim", "OWNER/tasks", n, "w1")
@@ -33,10 +35,39 @@ class ClaimHeldTests(KrakenConformanceTest):
             self.assertEqual(self.comment_count(n), 0, "no comment written on %s" % held)
             self.assertFalse(self.claim_ref_exists(n),
                              "guard created a claim ref despite %s" % held)
-            wrote = any(re.search(r"/issues/%d/(comments|labels)" % n, l) for l in self.log_lines())
-            self.assertFalse(wrote, "guard wrote to issue %d despite %s" % (n, held))
-            cas = any("git/" in l for l in self.log_lines())
-            self.assertFalse(cas, "guard reached the git-data API despite %s" % held)
+            # GraphQL is a POST but it is the READ the record's commit comes
+            # back through; a write is a REST mutation on the issue or on a ref.
+            for line in self.log_lines():
+                self.assertNotRegex(
+                    line, r"^(POST|PATCH|DELETE) (?!/graphql)",
+                    "the guard wrote something despite %s: %s" % (held, line))
+
+    def test_a_held_label_with_no_record_is_refused_too(self):
+        # The protocol/9 fallback (§3.1): a queue an older writer left behind has
+        # held labels and no records at all, and must not be handed out. It is
+        # refused with no requeue derivable — §6 rule 3 gives it a record on the
+        # first reconcile, and the requeue works from then on.
+        self.mk_issue(31, "held, unrecorded", "kraken-task", "project:app",
+                      "awaiting-merge")
+        self.mk_comment(31, "a review comment nobody has an anchor for")
+
+        r = self.kraken("claim", "OWNER/tasks", 31, "w1")
+        self.assertEqual(r.rc, 11, "an unrecorded held task was handed out")
+        self.assertEqual(r.out, "claim: held issue=31 label=awaiting-merge")
+
+    def test_a_requeued_record_is_claimed_not_refused(self):
+        # The guard and the startable filter derive the same verdict from the
+        # same record, so the guard must not refuse what the filter just offered.
+        self.mk_issue(32, "reviewed", "kraken-task", "project:app", "awaiting-merge")
+        self.mk_state_record(32, "awaiting-merge", worker="w-before")
+        self.mk_comment(32, "one more thing")
+
+        r = self.kraken("claim", "OWNER/tasks", 32, "w1")
+        self.assertEqual(r.rc, 0, "the guard refused a requeued task: %s%s"
+                         % (r.out, r.err))
+        self.assertTrue(self.has_label(32, "in-progress"))
+        self.assertFalse(self.has_label(32, "awaiting-merge"),
+                         "the stale badge was not swapped off")
 
     def test_a_live_lease_is_a_lost_claim_not_an_unclear_one(self):
         # The label is incidental here — the LEASE is what refuses. Somebody owns

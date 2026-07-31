@@ -103,13 +103,15 @@ HELD_LABELS = ("needs-decision", "awaiting-merge")
 # falls back to pure FIFO, so honoring it needs no PROTOCOL_VERSION bump.
 PRIORITY_LABEL = "priority:high"
 
-# The wire contract this program speaks (PROTOCOL.md). The claim is arbitrated by
-# a git-ref CAS, and that ref is a LEASE: its commit date is the timestamp, and a
-# reader that finds one older than the TTL steals it instead of treating it as
-# held. The READER applies that expiry (§6), so a conforming coordination repo
-# runs no scheduled job of its own. The lease is the only thing any decision
-# reads — see HELD_LABELS for why `in-progress` is not.
-PROTOCOL_VERSION = 8
+# The wire contract this program speaks (PROTOCOL.md). Two refs carry every
+# decision. The claim is arbitrated by a git-ref CAS, and that ref is a LEASE: its
+# commit date is the timestamp, and a reader that finds one older than the TTL
+# steals it instead of treating it as held. The READER applies that expiry (§6), so
+# a conforming coordination repo runs no scheduled job of its own. What the task is
+# BETWEEN workers is the state record (§3.1) — state, the comment count the requeue
+# derivation compares against, the expiry count, the delivery PR. Labels are
+# projection either way; see HELD_LABELS for the one case a reader still reads one.
+PROTOCOL_VERSION = 9
 
 # Where the skill lives on disk. This file sits one level INSIDE the skill
 # directory (skills/unleash/kraken/contract.py), so the anchor is the parent of

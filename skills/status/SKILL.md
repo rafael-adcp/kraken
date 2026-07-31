@@ -108,7 +108,6 @@ A stable object for downstream tooling:
   "project": "<name>" | null,           // the --project scope, or null
   "generated_at": "2026-...Z",
   "review_queue":   [ { "number", "title", "pr_url": "<url>"|null,
-                        "pr_source": "marker"|"legacy-free-text"|null,
                         "orphan": true|false } ],
   "decision_queue": [ { "number", "title" } ],
   "in_flight":      [ { "number", "title", "worker": "<name>"|null,
@@ -126,10 +125,14 @@ no readable claim ref (an orphan projection, or a claim commit that could not be
 `stale` is `true` when the lease no longer holds — expired, or with no readable clock
 behind it; `pr_url` is `null` when the delivery carried no PR — §8 records the field
 "when there is one", so the diff is on the thread and the issue IS the review target,
-not a delivery to go chase. `pr_source` says where that
-link came from: `"marker"` is the delivery's own `pr` field, the source of truth
-(PROTOCOL.md §8); `"legacy-free-text"` means no `delivered` marker carried a `pr` and
-the link was read off the thread's prose — a legacy guess, not a recorded delivery.
+not a delivery to go chase.
+
+Every link here comes from the task's **state record** (PROTOCOL.md §3.1, §8), which
+arrives with the queue read, so a review queue of any size costs no comment request.
+Through protocol/8 the console paginated the whole thread of every delivered task
+looking for the newest `delivered` marker, and reported a `pr_source` saying whether
+the link was that field or a guess read off the prose. There is nothing left to
+guess, so there is nothing left to report.
 
 ## Authorization boundaries
 

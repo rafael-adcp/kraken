@@ -15,7 +15,8 @@ acyclic:
     transport    Api: the one object that talks to GitHub
     lease        the Lease object, the TTL, the local claim-state file
     refs         the claim-ref CAS — the generation ladder
-    queue        the Task object, the batched walk, hydration, the filter
+    state        the state record — what a task is between workers (§3.1)
+    queue        the Task object, the batched walk, the startable filter
     render       report objects to text
     reconcile    the §6 repair pass
     claim        the contended claim sequence and the terminal transitions
@@ -58,7 +59,8 @@ from .comments import (
 )
 from .transport import (
     Api, DEFAULT_API_URL, GRAPHQL_ALIAS_CHUNK, HTTP_TIMEOUT_SECONDS, PER_PAGE,
-    STATUS_NETWORK_FAILURE, api_base, github_token, parse_http_date, quote_path
+    STATUS_NETWORK_FAILURE, api_base, comment_total_of, github_token,
+    parse_http_date, quote_path
 )
 from .lease import (
     LEASE_DEFAULT_TTL_SECONDS, LEASE_EXPIRY_ESCALATE, LEASE_RENEW_DIVISOR,
@@ -69,13 +71,17 @@ from .lease import (
     write_claim_state
 )
 from .refs import (
-    CLAIM_REF_PREFIX, EMPTY_TREE_SHA, Refs, claim_ref, parse_claim_ref
+    CLAIM_REF_PREFIX, EMPTY_TREE_SHA, KRAKEN_REF_NAMESPACE, Refs, claim_ref,
+    kraken_ref_items, parse_claim_ref
+)
+from .state import (
+    NO_RECORD, QUEUED, RECORD_STATES, STATE_REF_PREFIX, States, TaskState,
+    UNREADABLE_RECORD, holding_state, parse_state_commit, parse_state_ref,
+    state_ref, state_ref_shas, state_view
 )
 from .queue import (
-    COMMENT_HYDRATE_CHUNK, DEPENDS_ON_RE, NO_RESPONSE_PLACEHOLDER,
-    QUEUE_COMMENT_WINDOW, Candidate, Queue, QueueRead, Task, claim_meta_of,
-    cmd_list_startable, comment_hungry, is_empty_section, is_worker_comment,
-    requeue_verdict, section_body
+    DEPENDS_ON_RE, NO_RESPONSE_PLACEHOLDER, Candidate, Queue, QueueRead, Task,
+    claim_meta_of, cmd_list_startable, is_empty_section, section_body
 )
 from .render import (
     render_init, render_next_action, render_status
@@ -101,8 +107,7 @@ from .watch import (
     wake_retry_due, watch, watch_failure_action
 )
 from .status import (
-    StatusReport, cmd_status, parse_github_pr_url, parse_pr_url, pr_is_merged,
-    queue_hygiene
+    StatusReport, cmd_status, parse_github_pr_url, pr_is_merged, queue_hygiene
 )
 from .workflow import (
     CANONICAL_LABELS, INIT_ASSETS, OBSOLETE_ASSETS, PROJECT_LABEL_COLOR,
