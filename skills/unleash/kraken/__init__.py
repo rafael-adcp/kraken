@@ -86,9 +86,10 @@ from .reconcile import (
 )
 from .claim import (
     ClaimAttempt, DELIVER, ESCALATE, RELEASE, Terminal, TerminalTransition,
-    acquire_next, cmd_claim, cmd_claim_next, cmd_deliver, cmd_escalate,
-    cmd_heartbeat, cmd_note, cmd_release, lease_expired_body,
-    probe_lease_state, read_body_file, refuse_second_claim
+    acquire_next, claim_is_moot, cmd_claim, cmd_claim_next, cmd_deliver,
+    cmd_escalate, cmd_heartbeat, cmd_note, cmd_release, lease_expired_body,
+    open_claim_of, probe_lease_state, read_body_file, refuse_second_claim,
+    refused_line
 )
 from .next_action import (
     NEXT_ACTIONS, NEXT_ACTION_EXIT, NextAction, NextActionEnvelope,

@@ -519,6 +519,30 @@ class Queue:
         tasks = self.open_tasks()
         if tasks is None:
             return None
+        got = self.lease_view(now, ttl)
+        if got is None:
+            return None
+        leases, commit_meta = got
+        if self.hydrate(tasks, leases) is None:
+            return None
+        return QueueRead(tasks, leases, commit_meta)
+
+    def lease_view(self, now: Epoch | None = None, ttl: int | None = None,
+                   ) -> tuple[dict[Issue, Lease], CommitMeta] | None:
+        """The ladder half of `read`: every claim ref's lease, aged against the
+        server's clock, and the commit meta it was decoded from — WITHOUT the
+        issue walk. Returns `(leases, commit_meta)`, or None on transport failure.
+
+        Two batched calls, and only when a ref actually exists: `commit_meta`
+        answers `{}` for an empty ref list without a request, so an unclaimed
+        queue pays one call and a busy one pays O(1) in the number of claims,
+        never O(N) in queue size.
+
+        Separate from `read` because one question genuinely does not need the
+        queue: "does this worker already hold a claim?" (§5) is answered by the
+        LADDER, and the ladder is what arbitrates it. A caller that asks only
+        that should not pay for a paginated issue walk and a comment hydration
+        to find out — see `claim.open_claim_of`."""
         refs = Refs(self.api)
         claim_refs = refs.all()
         if claim_refs is None:
@@ -527,14 +551,12 @@ class Queue:
         if commit_meta is None:
             return None
         # The server's clock, not this machine's (§5.1): the lease timestamps
-        # about to be aged are commit dates GitHub stamped, and the walk above
-        # has already been told what time GitHub thinks it is.
+        # about to be aged are commit dates GitHub stamped, and the reads above
+        # have already been told what time GitHub thinks it is.
         leases = lease_state(claim_refs, commit_meta,
                              self.api.server_now() if now is None else now,
                              lease_ttl_seconds(ttl))
-        if self.hydrate(tasks, leases) is None:
-            return None
-        return QueueRead(tasks, leases, commit_meta)
+        return (leases, commit_meta)
 
     def candidates(self, project: str, read: QueueRead | None = None,
                    ) -> list[Candidate] | None:
