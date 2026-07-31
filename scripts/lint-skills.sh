@@ -131,7 +131,14 @@ fi
 # and the pre-split paragraphs still quoted anywhere), whose "What changed in
 # ..." entries name retired revisions on purpose — that phrase, not the file, is
 # what marks a line as history.
-echo "[1e] protocol version (repo-wide vs $PROTOCOL)"
+#
+# Scope is the TRACKED tree (`git ls-files`), not the working directory. The rule
+# is about what the repo says, and a version bump is exactly the change that has
+# to be able to go green: scanning everything merely PRESENT let a generated
+# artifact (a knowledge-graph dump, a scratch note) fail the lint for a revision
+# it only quotes — locally, and never in CI, whose checkout has neither. A check
+# that cries wolf on the developer's machine is a check that stops being read.
+echo "[1e] protocol version (tracked tree vs $PROTOCOL)"
 fail_before=$fail
 canon="$(grep -m1 -oE '^\*\*Version: `kraken-protocol/[0-9]+`' "$PROTOCOL" | grep -oE '[0-9]+')"
 if [ -z "$canon" ]; then
@@ -145,7 +152,8 @@ else
     where="${hit%:*}"; f="${where%:*}"; n="${where##*:}"
     sed -n "${n}p" "$f" | grep -qF 'What changed in' && continue
     err "${f#./}:$n says '$v' but $PROTOCOL declares kraken-protocol/$canon"
-  done < <(grep -rInoE 'kraken-protocol/[0-9]+' . --exclude-dir=.git)
+  done < <(git ls-files -z 2>/dev/null \
+             | xargs -0 grep -IHnoE 'kraken-protocol/[0-9]+' 2>/dev/null)
 fi
 [ "$fail" -eq "$fail_before" ] \
   && note "every kraken-protocol/<n> in the tree matches PROTOCOL.md ($canon)"
