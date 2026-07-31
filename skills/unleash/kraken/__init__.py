@@ -57,7 +57,7 @@ from .comments import (
     parse_marker, task_trailer
 )
 from .transport import (
-    Api, DEFAULT_API_URL, HTTP_TIMEOUT_SECONDS, PER_PAGE,
+    Api, DEFAULT_API_URL, GRAPHQL_ALIAS_CHUNK, HTTP_TIMEOUT_SECONDS, PER_PAGE,
     STATUS_NETWORK_FAILURE, api_base, github_token, parse_http_date, quote_path
 )
 from .lease import (

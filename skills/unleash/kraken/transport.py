@@ -12,7 +12,7 @@ import re
 import subprocess
 import time
 import urllib.request
-from typing import Any
+from typing import Any, Sequence
 
 from .contract import CommentRecord, Epoch, Issue, Json, Repo, Sha
 
@@ -38,6 +38,15 @@ HTTP_TIMEOUT_SECONDS = 30
 STATUS_NETWORK_FAILURE = 0
 # GitHub caps per_page at 100; a page shorter than this is the last one.
 PER_PAGE = 100
+
+# How many aliased fields one batched GraphQL call carries. Every fan-out in this
+# program — claim commit meta, depends-on targets, comment windows — is one
+# aliased field per item inside a single query, which is what keeps a fan-out
+# from becoming a request per item. Uncapped, that turns into the opposite
+# problem: the query grows one field per claim with no ceiling, and an over-large
+# query does not degrade gracefully — the server rejects it whole, so every item
+# in it fails together. 100 is the page size the issue walk already uses.
+GRAPHQL_ALIAS_CHUNK = 100
 
 _TOKEN_CACHE = {"resolved": False, "token": ""}
 
@@ -215,6 +224,38 @@ class Api:
         if not isinstance(resp.get("data"), dict):
             return None
         return resp
+
+    def aliased(self, fields: Sequence[str],
+                chunk: int = GRAPHQL_ALIAS_CHUNK) -> Json | None:
+        """The batched fan-out: `fields` are pre-aliased selections on
+        `repository`, sent as ONE query per `chunk` of them, with the answers
+        merged into a single `{alias: node}` object. Returns that object — `{}`
+        for an empty ask, without a request — or None on transport failure.
+
+        The one place the fan-out shape lives. Its three callers (claim commit
+        meta, depends-on targets, comment windows) differ only in the field they
+        build per item and in how many of those fit one call, so the aliasing
+        stays with each of them: the caller is what reads the answer back out,
+        and only the caller knows whether `c3` names the fourth SHA or `i3`
+        names issue 3. Aliases must therefore be unique across the WHOLE ask,
+        not just within a chunk, or a merge silently loses one of them.
+
+        A chunk that fails takes the whole read down rather than answering the
+        chunks that landed: a caller handed a partial dict cannot tell an item
+        the server omitted from one this never asked about, and all three treat
+        None as the exit-20 transport path."""
+        if not fields:
+            return {}
+        owner, name = self.repo.split("/", 1)
+        merged: Json = {}
+        for start in range(0, len(fields), chunk):
+            body = " ".join(fields[start:start + chunk])
+            resp = self.graphql(
+                f'{{ repository(owner: "{owner}", name: "{name}") {{ {body} }} }}')
+            if resp is None:
+                return None
+            merged.update(resp["data"]["repository"] or {})
+        return merged
 
     # --- issues, comments, labels --------------------------------------------
 
