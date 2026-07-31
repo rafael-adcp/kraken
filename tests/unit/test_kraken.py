@@ -617,25 +617,26 @@ class CommentRecordsPaginationTests(unittest.TestCase):
         self.assertIn("page=", calls[0][1])
 
     def test_returns_records_past_one_hundred(self):
-        # REST spells the timestamp created_at; comment_records maps it.
+        # The validator's debounce is the last reader of a whole thread, and a
+        # single-page read would silently truncate it — the finding it looks for
+        # may be comment 130.
         recs = [{"body": f"c {i}", "created_at": f"2026-07-01T00:{i % 60:02d}:00Z"}
                 for i in range(150)]
-        recs[129] = {"body": dlv("w", pr="https://x/pull/9"), "created_at": "2026-07-09T00:00:00Z"}
+        recs[129] = {"body": "the one that matters",
+                     "created_at": "2026-07-09T00:00:00Z"}
         result = FakeApi(request=self._paged(recs)).comment_records("42")
         self.assertEqual(len(result), 150)
-        # The delivered marker past comment 100 is found — invisible under a
-        # 100-comment truncation.
-        self.assertEqual(kraken.parse_pr_url(result), ("https://x/pull/9", "marker"))
+        self.assertEqual(result[129]["body"], "the one that matters")
 
     def test_maps_created_at_to_createdat(self):
         recs = [
-            {"body": dlv("w1", pr="https://x/pull/1"), "created_at": "2026-07-01T00:00:00Z"},
+            {"body": "first", "created_at": "2026-07-01T00:00:00Z"},
             {"body": "just prose", "created_at": "2026-07-01T05:00:00Z"},
         ]
         result = FakeApi(request=self._paged(recs)).comment_records("42")
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0]["createdAt"], "2026-07-01T00:00:00Z")
-        self.assertEqual(kraken.parse_pr_url(result), ("https://x/pull/1", "marker"))
+        self.assertEqual(result[0]["body"], "first")
 
     def test_transport_failure_returns_none(self):
         api = FakeApi(request=lambda m, p, body=None: (500, ""))
@@ -730,7 +731,7 @@ class ClaimNextIterationTests(unittest.TestCase):
         # rows=None models a failed queue read, which surfaces at Queue.read.
         tasks = [c.task for c in (rows or [])]
 
-        def fake_claim_step(api, issue, worker, allow_held=(), lease=None,
+        def fake_claim_step(api, issue, worker, record=None, lease=None,
                             ttl=None, probe_lease=False):
             self.attempted.append(issue)
             return claim_results[issue]
@@ -954,58 +955,25 @@ class StatusHelperTests(unittest.TestCase):
     def _rec(self, body, created):
         return {"body": body, "createdAt": created}
 
-    def test_parse_pr_url_from_delivered_marker(self):
-        recs = [self._rec(dlv("w1", pr="https://github.com/o/r/pull/42") + "\n\nbody", "t")]
-        self.assertEqual(kraken.parse_pr_url(recs),
-                         ("https://github.com/o/r/pull/42", "marker"))
+    def test_the_delivery_url_is_a_field_of_the_record(self):
+        # protocol/9: the console reads `pr` off the state record (§8), so there
+        # is nothing to parse out of a thread at all. The whole `parse_pr_url`
+        # family — the newest-marker scan, the free-text fallback, and the
+        # `legacy-free-text` source it reported — went with it.
+        record = kraken.TaskState(state="awaiting-merge", worker="w1",
+                                  comments=4, pr="https://github.com/o/r/pull/42",
+                                  recorded=True)
+        self.assertEqual(record.pr, "https://github.com/o/r/pull/42")
+        self.assertFalse(hasattr(kraken, "parse_pr_url"),
+                         "the prose fallback must not come back")
 
-    def test_parse_pr_url_newest_wins(self):
-        recs = [
-            self._rec(dlv("w1", pr="https://github.com/o/r/pull/1"), "t1"),
-            self._rec(dlv("w2", pr="https://github.com/o/r/pull/9"), "t2"),
-        ]
-        self.assertEqual(kraken.parse_pr_url(recs),
-                         ("https://github.com/o/r/pull/9", "marker"))
-
-    def test_parse_pr_url_marker_beats_a_foreign_link_in_prose(self):
-        # #71: the delivery URL is a structured field, not something to grep out
-        # of the thread. A human quoting SOMEONE ELSE'S PR first must never
-        # outrank the worker's own delivered marker.
-        recs = [
-            self._rec("related work: https://github.com/other/repo/pull/3", "t1"),
-            self._rec(dlv("w1", pr="https://github.com/o/r/pull/42"), "t2"),
-        ]
-        self.assertEqual(kraken.parse_pr_url(recs),
-                         ("https://github.com/o/r/pull/42", "marker"))
-
-    def test_parse_pr_url_fallback_to_url_in_prose(self):
-        # A legacy thread, delivered before the marker carried `pr`: the prose is
-        # all there is — read it, but say it was read from free text.
-        recs = [self._rec("landed in https://github.com/o/r/pull/7 fyi", "t")]
-        self.assertEqual(kraken.parse_pr_url(recs),
-                         ("https://github.com/o/r/pull/7", "legacy-free-text"))
-
-    def test_parse_pr_url_marker_without_pr_falls_back(self):
-        # A delivered marker whose `pr` is missing or null is not a delivery URL;
-        # it must not break the read, and it must not shadow the legacy prose.
-        for marker in (dlv("w1"), kraken.make_marker(
-                {"type": "delivered", "worker": "w1", "pr": None})):
-            recs = [self._rec("see https://github.com/o/r/pull/7", "t1"),
-                    self._rec(marker + "\n\ndone", "t2")]
-            self.assertEqual(kraken.parse_pr_url(recs),
-                             ("https://github.com/o/r/pull/7", "legacy-free-text"),
-                             marker)
-
-    def test_parse_pr_url_ignores_pr_on_a_non_delivered_marker(self):
-        # `delivered` is the delivery marker; a `pr` key riding any other type is
-        # not one, and a marker line is never re-read as prose either.
-        recs = [self._rec(kraken.make_marker(
-            {"type": "note", "worker": "w1", "pr": "https://github.com/o/r/pull/3"}), "t")]
-        self.assertEqual(kraken.parse_pr_url(recs), (None, None))
-
-    def test_parse_pr_url_none_when_absent(self):
-        recs = [self._rec(dlv("w1") + "\n\njust prose", "t")]
-        self.assertEqual(kraken.parse_pr_url(recs), (None, None))
+    def test_a_delivery_with_no_pr_records_none(self):
+        # §8 carries the field "when there is one": a work repo that takes no
+        # push delivers the diff on the thread, and the issue IS the review
+        # target. `pr: None` says that, and the marker omits the key entirely.
+        record = kraken.NO_RECORD.moved_to("awaiting-merge", "w1", 3)
+        self.assertIsNone(record.pr)
+        self.assertNotIn("pr", record.payload())
 
     def test_parse_iso_roundtrip(self):
         self.assertEqual(kraken.parse_iso("2026-07-01T00:00:00Z"), 1782864000.0)
@@ -1083,19 +1051,24 @@ class StatusComputeTests(unittest.TestCase):
             "labels": {"nodes": [{"name": n} for n in labels]},
         })
 
+    @staticmethod
+    def _delivered(pr=None, comments=0):
+        """The state record a delivery writes (§3.1, §8) — where the console now
+        reads the PR link from. It used to paginate the whole comment thread of
+        every awaiting-merge task looking for a `delivered` marker."""
+        return kraken.TaskState(state="awaiting-merge", worker="w", pr=pr,
+                                comments=comments, recorded=True)
+
     def _call(self, nodes, project="", claim_refs=None, commit_meta=None,
-              comments=None, merged=None, projects=None, ttl=None):
-        comments = comments or {}
+              states=None, merged=None, projects=None, ttl=None):
         merged = merged or {}
         commit_meta = commit_meta or {}
         # Tests seed {issue: sha}; the lease view wants the generation ladder.
         refs = {n: [(1, sha)] for n, sha in (claim_refs or {}).items()}
-        # The comment thread and the label set both come off the injected Api
-        # now. `paginated` is faked rather than `Queue.projects`, so the real
+        # `paginated` is faked rather than `Queue.projects`, so the real
         # project:<name> stripping is under test too.
         api = FakeApi(
             "o/tasks",
-            comment_records=lambda i: comments.get(i, []),
             paginated=lambda path: [{"name": f"project:{p}"}
                                     for p in (projects or [])],
         )
@@ -1104,7 +1077,7 @@ class StatusComputeTests(unittest.TestCase):
         return kraken.StatusReport(
             api, project, self.NOW,
             pr_merged=lambda u: merged.get(u, False),
-        ).of(kraken.QueueRead(nodes, leases, commit_meta))
+        ).of(kraken.QueueRead(nodes, leases, commit_meta, dict(states or {})))
 
     def test_groups_by_held_label_with_ref_liveness(self):
         nodes = [
@@ -1113,12 +1086,14 @@ class StatusComputeTests(unittest.TestCase):
             self._node(99, "running", ["kraken-task", "project:app", "in-progress"]),
             self._node(12, "queued", ["kraken-task", "project:app"]),
         ]
-        comments = {88: [{"body": dlv("w", pr="https://x/pull/1"), "createdAt": "t"}]}
+        states = {88: self._delivered("https://x/pull/1"),
+                  97: kraken.TaskState(state="needs-decision", worker="w",
+                                       recorded=True)}
         claim_refs = {99: "s99"}
         commit_meta = {"s99": {"committedDate": "2026-07-01T09:00:00Z",
                                "message": hb("w1", "still going")}}
         report = self._call(nodes, claim_refs=claim_refs, commit_meta=commit_meta,
-                            comments=comments, projects=["app"])
+                            states=states, projects=["app"])
         self.assertEqual([r["number"] for r in report["review_queue"]], [88])
         self.assertEqual([r["number"] for r in report["decision_queue"]], [97])
         self.assertEqual([r["number"] for r in report["in_flight"]], [99])
@@ -1165,12 +1140,10 @@ class StatusComputeTests(unittest.TestCase):
             self._node(91, "open pr", ["kraken-task", "project:app", "awaiting-merge"],
                        created="2026-07-01T01:00:00Z"),
         ]
-        comments = {
-            88: [{"body": dlv("w", pr="https://x/pull/5"), "createdAt": "t"}],
-            91: [{"body": dlv("w", pr="https://x/pull/6"), "createdAt": "t"}],
-        }
+        states = {88: self._delivered("https://x/pull/5"),
+                  91: self._delivered("https://x/pull/6")}
         merged = {"https://x/pull/5": True, "https://x/pull/6": False}
-        report = self._call(nodes, comments=comments, merged=merged, projects=["app"])
+        report = self._call(nodes, states=states, merged=merged, projects=["app"])
         self.assertEqual(report["orphans"], [88])
         flags = {r["number"]: r["orphan"] for r in report["review_queue"]}
         self.assertTrue(flags[88])
@@ -1185,15 +1158,13 @@ class StatusComputeTests(unittest.TestCase):
         nodes = [self._node(88, "gitlab delivery",
                             ["kraken-task", "project:app", "awaiting-merge"])]
         gitlab_mr = "https://gitlab.com/group/project/-/merge_requests/2313"
-        comments = {88: [{"body": dlv("w", pr=gitlab_mr), "createdAt": "t"}]}
         api = FakeApi(
             "o/tasks",
             request=lambda m, p, body=None: (calls.append(1), (500, ""))[1],
-            comment_records=lambda i: comments.get(i, []),
             paginated=lambda path: [{"name": "project:app"}],
         )
         report = kraken.StatusReport(api, "", self.NOW).of(
-            kraken.QueueRead(nodes, {}, {}))
+            kraken.QueueRead(nodes, {}, {}, {88: self._delivered(gitlab_mr)}))
         self.assertIsNotNone(report, "a non-GitHub delivery must not be gh-failure")
         self.assertEqual(report["orphans"], [])
         self.assertEqual(calls, [], "gh must never be asked about a non-GitHub URL")
@@ -1203,56 +1174,58 @@ class StatusComputeTests(unittest.TestCase):
 
     def test_merge_state_unknown_false_for_a_verified_github_delivery(self):
         nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]
-        comments = {88: [{"body": dlv("w", pr="https://github.com/o/r/pull/5"), "createdAt": "t"}]}
-        report = self._call(nodes, comments=comments,
+        report = self._call(nodes,
+                            states={88: self._delivered("https://github.com/o/r/pull/5")},
                             merged={"https://github.com/o/r/pull/5": False}, projects=["app"])
         self.assertFalse(report["review_queue"][0]["merge_state_unknown"])
 
-    def test_review_item_reports_where_the_pr_link_came_from(self):
-        # #71: the report says whether the link is the delivery's own structured
-        # field or a legacy guess off the prose — a downstream reader must be
-        # able to tell them apart without re-reading the thread.
+    def test_the_review_row_reads_the_pr_off_the_record(self):
+        # protocol/9 (§8): the link is a field of the state record, so a PR a
+        # human quoted in the thread cannot outrank it — and a delivery with no
+        # PR reports `pr_url: null`, which the console renders as "review on the
+        # thread" rather than sending the operator hunting for a link.
         nodes = [
-            self._node(88, "delivered with a marker",
+            self._node(88, "delivered with a PR",
                        ["kraken-task", "project:app", "awaiting-merge"]),
-            self._node(91, "legacy delivery",
-                       ["kraken-task", "project:app", "awaiting-merge"],
-                       created="2026-07-01T01:00:00Z"),
             self._node(92, "no PR at all",
                        ["kraken-task", "project:app", "awaiting-merge"],
                        created="2026-07-01T02:00:00Z"),
         ]
-        comments = {
-            88: [{"body": "cf https://github.com/other/repo/pull/3", "createdAt": "t1"},
-                 {"body": dlv("w", pr="https://github.com/o/r/pull/5"), "createdAt": "t2"}],
-            91: [{"body": "delivered in https://github.com/o/r/pull/6", "createdAt": "t"}],
-            92: [{"body": dlv("w"), "createdAt": "t"}],
-        }
-        report = self._call(nodes, comments=comments, projects=["app"])
+        states = {88: self._delivered("https://github.com/o/r/pull/5"),
+                  92: self._delivered(None)}
+        report = self._call(nodes, states=states, projects=["app"])
         items = {r["number"]: r for r in report["review_queue"]}
-        self.assertEqual(items[88]["pr_url"], "https://github.com/o/r/pull/5",
-                         "a foreign PR quoted by a human outranked the marker")
-        self.assertEqual(items[88]["pr_source"], "marker")
-        self.assertEqual(items[91]["pr_url"], "https://github.com/o/r/pull/6")
-        self.assertEqual(items[91]["pr_source"], "legacy-free-text")
+        self.assertEqual(items[88]["pr_url"], "https://github.com/o/r/pull/5")
         self.assertIsNone(items[92]["pr_url"])
-        self.assertIsNone(items[92]["pr_source"])
+        self.assertNotIn("pr_source", items[88],
+                         "the legacy-vs-marker distinction has no source left")
 
-    def test_awaiting_merge_comment_failure_propagates_none(self):
-        nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]
-        api = FakeApi("o/tasks", comment_records=lambda i: None)  # transport failure
-        report = kraken.StatusReport(
-            api, "", self.NOW, pr_merged=lambda u: False,
-        ).of(kraken.QueueRead(nodes, {}, {}))
-        self.assertIsNone(report)
+    def test_the_review_queue_costs_no_comment_read(self):
+        # The cost claim protocol/9 is paying for: a console over N delivered
+        # tasks used to paginate N comment threads. Any comment read here is a
+        # regression, so the fake refuses one outright.
+        nodes = [self._node(n, "d", ["kraken-task", "project:app", "awaiting-merge"],
+                            created="2026-07-01T0%d:00:00Z" % n)
+                 for n in range(1, 6)]
+        api = FakeApi("o/tasks",
+                      comment_records=lambda i: self.fail(
+                          "status must not read a comment thread"),
+                      paginated=lambda path: [{"name": "project:app"}])
+        report = kraken.StatusReport(api, "", self.NOW, pr_merged=lambda u: False).of(
+            kraken.QueueRead(nodes, {}, {},
+                             {n: self._delivered("https://x/pull/%d" % n)
+                              for n in range(1, 6)}))
+        self.assertEqual(len(report["review_queue"]), 5)
 
-    def test_pr_read_failure_propagates_none(self):
+    def test_a_failed_pr_read_still_propagates_none(self):
+        # The console has one transport call left inside the report — the merge
+        # state of a delivery PR — and a failure there must still be exit 20
+        # rather than a report that quietly says "not merged".
         nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]
-        comments = {88: [{"body": dlv("w", pr="https://x/pull/5"), "createdAt": "t"}]}
-        api = FakeApi("o/tasks", comment_records=lambda i: comments.get(i, []))
         report = kraken.StatusReport(
-            api, "", self.NOW, pr_merged=lambda u: None,  # transport failure
-        ).of(kraken.QueueRead(nodes, {}, {}))
+            FakeApi("o/tasks"), "", self.NOW, pr_merged=lambda u: None,
+        ).of(kraken.QueueRead(nodes, {}, {},
+                              {88: self._delivered("https://github.com/o/r/pull/5")}))
         self.assertIsNone(report)
 
 
@@ -1306,15 +1279,15 @@ class QueueHygieneTests(unittest.TestCase):
         self.assertEqual([i["number"] for i in kraken.queue_hygiene([a, b])], [4, 9])
 
 
-def _task_node(number, labels, comments=()):
+def _task_node(number, labels, comment_total=0):
     """A minimal open task the way `Queue.open_tasks` returns it — the only issue
-    input reconcile_plan reads. `comments` is the trailing window the
-    repeat-expiry guard counts `lease-expired` markers in."""
+    input reconcile_plan reads. `comment_total` is the thread's live comment
+    count, which the requeue derivation compares against the state record's
+    anchor (§3.1, §6)."""
     return kraken.Task(
         {"number": number, "title": "t%d" % number, "createdAt": "2026-01-01",
          "body": "", "labels": {"nodes": [{"name": l} for l in labels]},
-         "comments": {"nodes": [{"body": b, "createdAt": "2026-01-01"}
-                                for b in comments]}})
+         "comments": {"totalCount": comment_total}})
 
 
 def _at(hours_ago):
@@ -1447,7 +1420,7 @@ class LeaseTtlTests(unittest.TestCase):
 class QueueWalkQueryTests(unittest.TestCase):
     """What the hot read asks the server for. The walk runs once a minute per
     worker over the WHOLE repo, so every field on it is paid for by every task —
-    which is why the comment thread is not one of them."""
+    which is why it carries the comment COUNT and not a single comment body."""
 
     def setUp(self):
         self.queries = []
@@ -1458,113 +1431,18 @@ class QueueWalkQueryTests(unittest.TestCase):
                 "pageInfo": {"hasNextPage": False, "endCursor": ""}, "nodes": []}}}}
         self.api = FakeApi("o/tasks", graphql=fake)
 
-    def test_the_walk_does_not_select_comments(self):
+    def test_the_walk_carries_the_count_and_no_comment_body(self):
         kraken.Queue(self.api).open_tasks()
         q = self.queries[0]
-        self.assertNotIn("comments", q,
+        self.assertIn("comments { totalCount }", q,
+                      "the requeue derivation needs the count on the walk (§6)")
+        self.assertNotIn("comments(last:", q,
                          "the queue walk must not carry comment threads")
+        self.assertNotIn("nodes { body", q)
         # The fields it does need, still on the one walk.
         for field in ("body", "labels(first:", "blockedBy(first:",
                       'labels: ["kraken-task"]', "states: OPEN"):
             self.assertIn(field, q)
-
-
-class CommentHungryTests(unittest.TestCase):
-    """Which tasks a queue read must fetch comments for — the whole point of
-    taking the trailing window off the hot walk. Pure, so the SCOPE of the fetch
-    is pinned without any transport."""
-
-    def test_a_free_queue_is_not_hungry_at_all(self):
-        nodes = [_task_node(n, ["kraken-task", "project:app"]) for n in range(1, 51)]
-        self.assertEqual(kraken.comment_hungry(nodes, {}), set())
-
-    def test_held_labels_are_hungry(self):
-        nodes = [
-            _task_node(1, ["kraken-task", "needs-decision"]),
-            _task_node(2, ["kraken-task", "awaiting-merge"]),
-            _task_node(3, ["kraken-task"]),
-            _task_node(4, ["kraken-task", "in-progress"]),
-        ]
-        # in-progress is write-only (§3): a badge is not a hold, so it buys no
-        # comment fetch.
-        self.assertEqual(kraken.comment_hungry(nodes, {}), {1, 2})
-
-    def test_a_live_lease_outranks_the_thread_so_it_is_not_hungry(self):
-        nodes = [_task_node(1, ["kraken-task", "needs-decision"])]
-        leases = _leases(i1=0)
-        self.assertTrue(leases[1].live, "fixture must model a LIVE lease")
-        self.assertEqual(kraken.comment_hungry(nodes, leases), set())
-
-    def test_an_expired_lease_is_hungry_for_the_expiry_count(self):
-        nodes = [_task_node(1, ["kraken-task"])]
-        leases = _leases(i1=kraken.LEASE_DEFAULT_TTL_SECONDS + 60)
-        self.assertFalse(leases[1].live, "fixture must model an EXPIRED lease")
-        self.assertEqual(kraken.comment_hungry(nodes, leases), {1})
-
-    def test_an_expired_lease_off_the_walk_is_an_orphan_and_costs_no_fetch(self):
-        # A ref on an issue the walk did not return is closed or no longer a
-        # task: rule 1 deletes it without ever reading a comment.
-        leases = _leases(i9=kraken.LEASE_DEFAULT_TTL_SECONDS + 60)
-        self.assertEqual(kraken.comment_hungry([], leases), set())
-
-
-class CommentHydrationTests(unittest.TestCase):
-    """The batched window fetch and the in-place hydration."""
-
-    def _reply(self, numbers, per_issue=1):
-        def fake(q):
-            self.queries.append(q)
-            return {"data": {"repository": {
-                "i%d" % n: {"comments": {"nodes": [
-                    {"body": "c%d-%d" % (n, i), "createdAt": "2026-01-01"}
-                    for i in range(per_issue)]}}
-                for n in numbers if "i%d:" % n in q}}}
-        self.queries = []
-        return FakeApi("o/t", graphql=fake)
-
-    def test_empty_ask_is_no_call(self):
-        api = FakeApi("o/t", graphql=lambda q: self.fail(
-            "graphql must not be called for []"))
-        self.assertEqual(kraken.Queue(api).comment_windows(set()), {})
-
-    def test_batches_every_issue_into_one_call(self):
-        api = self._reply(range(1, 21))
-        got = kraken.Queue(api).comment_windows({3, 1, 2})
-        self.assertEqual(len(self.queries), 1, "three issues must cost ONE call")
-        self.assertIn("i1: issue(number: 1)", self.queries[0])
-        self.assertIn("comments(last: %d)" % kraken.QUEUE_COMMENT_WINDOW,
-                      self.queries[0])
-        self.assertEqual(sorted(got), [1, 2, 3])
-        self.assertEqual(got[2][0]["body"], "c2-0")
-
-    def test_chunks_beyond_the_page_size(self):
-        total = kraken.COMMENT_HYDRATE_CHUNK * 2 + 1
-        api = self._reply(range(1, total + 1))
-        got = kraken.Queue(api).comment_windows(set(range(1, total + 1)))
-        self.assertEqual(len(self.queries), 3, "chunked, not one call per issue")
-        self.assertEqual(len(got), total)
-
-    def test_an_issue_the_reply_omits_reads_as_an_empty_thread(self):
-        api = FakeApi("o/t", graphql=lambda q: {"data": {"repository": {}}})
-        self.assertEqual(kraken.Queue(api).comment_windows({5}), {5: []})
-
-    def test_transport_failure_propagates_as_none(self):
-        api = FakeApi("o/t", graphql=lambda q: None)
-        self.assertIsNone(kraken.Queue(api).comment_windows({1}))
-
-    def test_hydration_fills_only_the_hungry_nodes(self):
-        held = _task_node(1, ["kraken-task", "needs-decision"])
-        free = _task_node(2, ["kraken-task"])
-        api = self._reply([1])
-
-        self.assertIsNotNone(kraken.Queue(api).hydrate([held, free], {}))
-        self.assertEqual(held.comments[0]["body"], "c1-0")
-        self.assertEqual(free.comments, [], "a free task must stay unhydrated")
-
-    def test_hydration_transport_failure_propagates_as_none(self):
-        held = _task_node(1, ["kraken-task", "needs-decision"])
-        api = FakeApi("o/t", graphql=lambda q: None)
-        self.assertIsNone(kraken.Queue(api).hydrate([held], {}))
 
 
 class DependsOnBatchTests(unittest.TestCase):
@@ -1619,24 +1497,45 @@ class DependsOnBatchTests(unittest.TestCase):
 
 
 class ExpiryCountTests(unittest.TestCase):
-    """The repeat-expiry guard's counter: how often this task has already been
-    stolen, read off the comment window the hydration pass filled."""
+    """The repeat-expiry guard's counter, now a FIELD of the state record
+    (PROTOCOL.md §3.1). Through protocol/8 it was counted from the
+    `lease-expired` markers in a trailing comment window, which undercounted
+    once the window scrolled past the oldest steals — a task that had burned
+    five workers could read as having burned two."""
 
-    def test_counts_only_lease_expired_markers(self):
-        task = _task_node(1, ["kraken-task"], comments=[
-            "> prose\n" + expired(), clm("w1"), stale("something else"),
-            "operator reply", expired(previous="w2"),
-        ])
-        self.assertEqual(task.expiries, 2)
+    def test_a_steal_increments_the_count_exactly(self):
+        record = kraken.NO_RECORD
+        for expected in (1, 2, 3, 4, 5):
+            record = record.stolen("thief-%d" % expected)
+            self.assertEqual(record.expiries, expected)
+        self.assertEqual(record.worker, "thief-5", "the record names its writer")
 
-    def test_a_clean_thread_counts_zero(self):
-        self.assertEqual(_task_node(1, ["kraken-task"]).expiries, 0)
+    def test_a_task_with_no_record_has_burned_nobody(self):
+        self.assertEqual(kraken.NO_RECORD.expiries, 0)
+
+    def test_a_steal_carries_the_state_and_anchor_forward(self):
+        # Taking over a lease does not change what the task IS — only how many
+        # workers it has burned. A delivery bounced back to a worker that then
+        # dies must still read as delivered against the same anchor.
+        delivered = kraken.TaskState(state="awaiting-merge", worker="w1",
+                                     comments=7, pr="https://x/pull/1",
+                                     recorded=True)
+        stolen = delivered.stolen("w2")
+        self.assertEqual((stolen.state, stolen.comments, stolen.pr),
+                         ("awaiting-merge", 7, "https://x/pull/1"))
+
+    def test_a_transition_carries_the_count_forward(self):
+        # `expiries` is cumulative over the task's whole life: a delivery does
+        # not forgive the workers the task already killed.
+        record = kraken.NO_RECORD.stolen("w1").stolen("w2")
+        moved = record.moved_to("awaiting-merge", "w3", 9)
+        self.assertEqual(moved.expiries, 2)
 
 
 class ReconcilerPlanTests(unittest.TestCase):
-    """reconcile_plan's two rules as a PURE decision (PROTOCOL.md §6) — no
-    transport at all, because the whole point of protocol/5 is that the rules run
-    off the queue read a reader already has. `nodes` carries only OPEN kraken-task
+    """reconcile_plan's rules as a PURE decision (PROTOCOL.md §6) — no transport
+    at all, because the whole point of protocol/5 is that the rules run off the
+    queue read a reader already has. `nodes` carries only OPEN kraken-task
     issues, which is what makes rule 1 free: a ref whose issue is absent from that
     walk is a lock over a closed (or no-longer-task) issue.
 
@@ -1648,12 +1547,28 @@ class ReconcilerPlanTests(unittest.TestCase):
     def _rules(self, plan):
         return sorted((a["rule"], a["issue"]) for a in plan)
 
+    @staticmethod
+    def _held(number, state, comments=0):
+        return {number: kraken.TaskState(state=state, worker="w",
+                                         comments=comments, recorded=True)}
+
     def test_rule1_orphan_lock_on_held_or_absent_issue(self):
         # #4 escalated but its ref lingered; #6 is closed, so it is not in nodes.
+        # "Already left the claim" is now the RECORD's verdict, not the label's.
         nodes = [_task_node(4, ["kraken-task", "needs-decision"])]
-        plan = kraken.reconcile_plan(nodes, _leases(i4=10, i6=10))
+        plan = kraken.reconcile_plan(nodes, _leases(i4=10, i6=10),
+                                     self._held(4, "needs-decision"))
         self.assertEqual(self._rules(plan),
                          [("orphan-lock", 4), ("orphan-lock", 6)])
+
+    def test_rule1_leaves_a_requeued_record_alone(self):
+        # The record says needs-decision but the operator has since commented,
+        # so the task is NOT held — the lease on it is a live claim somebody is
+        # working, not a lock the transition forgot to drop.
+        nodes = [_task_node(4, ["kraken-task", "needs-decision"], comment_total=5)]
+        plan = kraken.reconcile_plan(nodes, _leases(i4=10),
+                                     self._held(4, "needs-decision", comments=4))
+        self.assertEqual(plan, [])
 
     def test_an_expired_lease_alone_plans_nothing(self):
         # THE protocol/6 change: expiry is not a repair. The reader has already
@@ -1667,29 +1582,40 @@ class ReconcilerPlanTests(unittest.TestCase):
         nodes = [_task_node(1, ["kraken-task", "in-progress"])]
         self.assertEqual(kraken.reconcile_plan(nodes, _leases(i1=None)), [])
 
+    @staticmethod
+    def _expiries(number, count):
+        return {number: kraken.TaskState(state=kraken.QUEUED, worker="w",
+                                         expiries=count, recorded=True)}
+
     def test_rule2_reclaim_after_repeated_expiries(self):
         # A task nobody can finish: past the threshold it stops circulating and
-        # becomes the operator's call.
-        comments = [expired()] * kraken.LEASE_EXPIRY_ESCALATE
-        nodes = [_task_node(1, ["kraken-task", "in-progress"], comments=comments)]
+        # becomes the operator's call. The count is the record's, and it is
+        # exact — the marker count it replaces undercounted a long history.
+        nodes = [_task_node(1, ["kraken-task", "in-progress"])]
         expired_age = kraken.LEASE_DEFAULT_TTL_SECONDS + 60
-        plan = kraken.reconcile_plan(nodes, _leases(i1=expired_age))
+        plan = kraken.reconcile_plan(
+            nodes, _leases(i1=expired_age),
+            self._expiries(1, kraken.LEASE_EXPIRY_ESCALATE))
         self.assertEqual(self._rules(plan), [("reclaim", 1)])
         self.assertTrue(plan[0]["held"], "the in-progress label must be swapped off")
         self.assertIn(str(kraken.LEASE_EXPIRY_ESCALATE), plan[0]["reason"])
 
     def test_one_expiry_below_the_threshold_still_gets_stolen(self):
-        comments = [expired()] * (kraken.LEASE_EXPIRY_ESCALATE - 1)
-        nodes = [_task_node(1, ["kraken-task", "in-progress"], comments=comments)]
+        nodes = [_task_node(1, ["kraken-task", "in-progress"])]
         expired_age = kraken.LEASE_DEFAULT_TTL_SECONDS + 60
-        self.assertEqual(kraken.reconcile_plan(nodes, _leases(i1=expired_age)), [])
+        self.assertEqual(
+            kraken.reconcile_plan(nodes, _leases(i1=expired_age),
+                                  self._expiries(1, kraken.LEASE_EXPIRY_ESCALATE - 1)),
+            [])
 
     def test_a_live_lease_is_never_reclaimed_however_many_expiries(self):
         # The count is about a dead task, not a busy one: whoever holds a LIVE
         # lease is working, and the history of past steals must not evict them.
-        comments = [expired()] * (kraken.LEASE_EXPIRY_ESCALATE + 2)
-        nodes = [_task_node(1, ["kraken-task", "in-progress"], comments=comments)]
-        self.assertEqual(kraken.reconcile_plan(nodes, _leases(i1=10)), [])
+        nodes = [_task_node(1, ["kraken-task", "in-progress"])]
+        self.assertEqual(
+            kraken.reconcile_plan(nodes, _leases(i1=10),
+                                  self._expiries(1, kraken.LEASE_EXPIRY_ESCALATE + 2)),
+            [])
 
     def test_a_live_lease_with_no_label_plans_nothing(self):
         # protocol/6 healed this (rule 3: re-add the badge a crashed claim never
@@ -1710,8 +1636,44 @@ class ReconcilerPlanTests(unittest.TestCase):
         nodes = [_task_node(2, ["kraken-task", "in-progress"]),
                  _task_node(9, ["kraken-task"]),
                  _task_node(10, ["kraken-task", "awaiting-merge"])]
-        self.assertEqual(kraken.reconcile_plan(nodes, _leases(i2=10)), [],
+        states = self._held(10, "awaiting-merge")
+        self.assertEqual(kraken.reconcile_plan(nodes, _leases(i2=10), states), [],
                          "a queue holding one live lease must cost zero writes")
+
+    def test_rule3_migrates_a_held_label_with_no_record(self):
+        # THE protocol/9 migration (§6 rule 3): a queue written by an older
+        # revision wears held labels and has no records at all. One pass writes
+        # what each label already means, and the queue heals on the first drain
+        # after the upgrade — no `migrate` command, nothing installed in the repo.
+        nodes = [_task_node(3, ["kraken-task", "awaiting-merge"], comment_total=6),
+                 _task_node(4, ["kraken-task", "needs-decision"], comment_total=2)]
+        plan = kraken.reconcile_plan(nodes, {}, {})
+        self.assertEqual(self._rules(plan), [("migrate", 3), ("migrate", 4)])
+        by_issue = {a["issue"]: a for a in plan}
+        self.assertEqual(by_issue[3]["state"], "awaiting-merge")
+        self.assertEqual(by_issue[3]["comments"], 6,
+                         "the anchor is the thread as it stands right now")
+        self.assertEqual(by_issue[4]["state"], "needs-decision")
+
+    def test_rule3_is_a_one_shot(self):
+        # Once the record exists the rule is silent — otherwise every drain
+        # would rewrite it and no requeue would ever be derivable.
+        nodes = [_task_node(3, ["kraken-task", "awaiting-merge"], comment_total=6)]
+        self.assertEqual(
+            kraken.reconcile_plan(nodes, {}, self._held(3, "awaiting-merge", 6)),
+            [])
+
+    def test_rule3_ignores_a_task_no_label_holds(self):
+        nodes = [_task_node(3, ["kraken-task"]),
+                 _task_node(4, ["kraken-task", "in-progress"])]
+        self.assertEqual(kraken.reconcile_plan(nodes, {}, {}), [])
+
+    def test_an_orphan_state_record_is_swept(self):
+        # A record on an issue the walk no longer carries is state over nothing —
+        # the same orphan rule a leftover lock gets, so the namespace does not
+        # grow one ref per task the queue has ever closed (§10).
+        plan = kraken.reconcile_plan([], {}, self._held(42, "awaiting-merge"))
+        self.assertEqual(self._rules(plan), [("orphan-state", 42)])
 
 
 class ReconcilerApplyTests(unittest.TestCase):
@@ -1724,15 +1686,28 @@ class ReconcilerApplyTests(unittest.TestCase):
 
     def _api(self, swap=None):
         def request(method, path, body=None):
-            # The ref delete goes through the real CAS helper, so it shows up
-            # here as the DELETE it actually is rather than as a faked function.
-            issue, _gen = kraken.parse_claim_ref(path.split("/git/", 1)[1])
-            self.writes.append(("del-ref", issue))
+            # The ref writes go through the real gateways, so they show up here
+            # as the HTTP calls they actually are rather than as faked functions:
+            # the claim-ref DELETE, and the orphan commit + create a state record
+            # is written with (§3.1).
+            if method == "GET":
+                return (200, "[]")   # the record read a transition does first
+            if path.endswith("/git/commits"):
+                return (201, json.dumps({"sha": "state-sha"}))
+            if path.endswith("/git/refs"):
+                self.writes.append(("record", (body or {}).get("ref", "")))
+                return (201, "{}")
+            ref = path.split("/git/", 1)[1]
+            claim = kraken.parse_claim_ref(ref)
+            self.writes.append(
+                ("del-ref", claim[0] if claim else kraken.parse_state_ref(ref)))
             return (204, "")
 
         return FakeApi(
             "o/tasks",
             request=request,
+            # The anchor a reclaim records, read back after its comment lands.
+            comment_count=lambda n: 7,
             swap_labels=swap or (lambda n, remove=None, add=None: (
                 self.writes.append(("labels", n, remove, add)) or True)),
             post_comment=lambda n, body: (
@@ -1751,9 +1726,25 @@ class ReconcilerApplyTests(unittest.TestCase):
                                   "held": True, "gens": [1]}])
         self.assertEqual(counts["reclaim"], 1)
         kinds = [w[0] for w in self.writes]
-        self.assertEqual(kinds, ["labels", "comment", "del-ref"],
-                         "§5 ordering: writes first, ref delete last")
+        self.assertEqual(kinds, ["comment", "record", "labels", "del-ref"],
+                         "§3.1 ordering: comment, record, labels, ref delete last")
         self.assertIn(("labels", 1, "in-progress", "needs-decision"), self.writes)
+        self.assertIn(("record", "refs/kraken/state/1"), self.writes)
+
+    def test_migrate_writes_only_the_record(self):
+        # §6 rule 3: the label is already there and already holding, so this
+        # writes down what it means and touches nothing else — no comment, no
+        # label swap, no ref delete.
+        counts, _ = self._apply([{"rule": "migrate", "issue": 8, "reason": "x",
+                                  "state": "awaiting-merge", "comments": 4}])
+        self.assertEqual(counts["migrate"], 1)
+        self.assertEqual(self.writes, [("record", "refs/kraken/state/8")])
+
+    def test_orphan_state_deletes_the_record(self):
+        counts, _ = self._apply([{"rule": "orphan-state", "issue": 9,
+                                  "reason": "x"}])
+        self.assertEqual(counts["orphan-state"], 1)
+        self.assertEqual(self.writes, [("del-ref", 9)])
 
     def test_reclaim_comment_carries_the_worker_disclaimer(self):
         self._apply([{"rule": "reclaim", "issue": 1, "reason": "silent",
@@ -2116,3 +2107,147 @@ class TaskBriefTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class StateRecordParseTests(unittest.TestCase):
+    """Decoding a state record off its ref commit (PROTOCOL.md §3.1, §4). Foreign
+    data: a record that does not decode must never become a half-record, because
+    every reader of it is deciding whether a task is held."""
+
+    @staticmethod
+    def _commit(**fields):
+        return kraken.make_marker({"type": "state", **fields})
+
+    def test_round_trips_every_field(self):
+        written = kraken.TaskState(state="awaiting-merge", worker="env-1",
+                                   comments=7, expiries=2, pr="https://x/pull/1",
+                                   recorded=True)
+        read = kraken.parse_state_commit(kraken.make_marker(written.payload()))
+        self.assertEqual(
+            (read.state, read.worker, read.comments, read.expiries, read.pr),
+            ("awaiting-merge", "env-1", 7, 2, "https://x/pull/1"))
+        self.assertTrue(read.recorded)
+
+    def test_a_marker_of_another_type_is_not_a_record(self):
+        self.assertIsNone(kraken.parse_state_commit(
+            kraken.make_marker({"type": "claim", "worker": "w1"})))
+
+    def test_an_unknown_state_is_refused(self):
+        # A reader that accepted it would have to decide whether it holds, and
+        # there is no honest answer to that.
+        self.assertIsNone(kraken.parse_state_commit(
+            self._commit(state="in-progress", worker="w1")))
+        self.assertIsNone(kraken.parse_state_commit(
+            self._commit(state="", worker="w1")))
+
+    def test_undecodable_json_is_not_a_record(self):
+        self.assertIsNone(kraken.parse_state_commit("<!-- kraken not-json -->"))
+        self.assertIsNone(kraken.parse_state_commit(""))
+
+    def test_a_junk_counter_reads_as_zero(self):
+        # Fail-open: 0 requeues (any comment is newer than none) and never
+        # escalates early. The opposite default would bury a delivery.
+        for junk in (None, "seven", True, -3, [1]):
+            record = kraken.parse_state_commit(
+                self._commit(state="needs-decision", worker="w1",
+                             comments=junk, expiries=junk))
+            self.assertEqual((record.comments, record.expiries), (0, 0), junk)
+
+    def test_a_missing_pr_is_none_and_is_not_serialized(self):
+        record = kraken.parse_state_commit(
+            self._commit(state="awaiting-merge", worker="w1", pr="   "))
+        self.assertIsNone(record.pr)
+        self.assertNotIn("pr", record.payload())
+
+    def test_state_view_drops_what_it_cannot_decode(self):
+        # Absence is the fail-open answer (§3.1), and dropping is what makes a
+        # corrupted record self-healing: §6 rule 3 sees a held label with no
+        # record and writes a fresh one.
+        meta = {"good": {"message": self._commit(state="queued", worker="w1")},
+                "junk": {"message": "not a marker"}}
+        view = kraken.state_view({1: "good", 2: "junk", 3: "missing"}, meta)
+        self.assertEqual(sorted(view), [1])
+
+
+class StateRefNameTests(unittest.TestCase):
+    """The ref name, parsed strictly for the same reason a claim ref is:
+    matching-refs is a plain PREFIX match, so `state/12` also returns
+    `state/120` and the caller must filter on what it parsed."""
+
+    def test_round_trip(self):
+        self.assertEqual(kraken.state_ref(12), "refs/kraken/state/12")
+        self.assertEqual(kraken.parse_state_ref("refs/kraken/state/12"), 12)
+
+    def test_rejects_anything_else(self):
+        for ref in ("refs/kraken/claims/12", "refs/kraken/state/", "refs/heads/x",
+                    "refs/kraken/state/12/3", "refs/kraken/state/abc"):
+            self.assertIsNone(kraken.parse_state_ref(ref), ref)
+
+    def test_the_prefix_match_is_filtered_by_the_parse(self):
+        items = [{"ref": "refs/kraken/state/12", "object": {"sha": "a"}},
+                 {"ref": "refs/kraken/state/120", "object": {"sha": "b"}},
+                 {"ref": "refs/kraken/claims/12/1", "object": {"sha": "c"}}]
+        self.assertEqual(kraken.state_ref_shas(items), {12: "a", 120: "b"})
+
+    def test_one_namespace_read_serves_both_families(self):
+        # The call-count property protocol/9 rests on: claims and records come
+        # back from ONE matching-refs read, each parsing its own names out.
+        items = [{"ref": "refs/kraken/claims/7/2", "object": {"sha": "c7"}},
+                 {"ref": "refs/kraken/state/7", "object": {"sha": "s7"}}]
+        api = FakeApi("o/t", paginated=lambda path: self.fail(
+            "the payload was already fetched"))
+        self.assertEqual(kraken.Refs(api).all(items), {7: [(2, "c7")]})
+        self.assertEqual(kraken.States(api).all(items), {7: "s7"})
+
+
+class StatesGatewayTests(unittest.TestCase):
+    """Writing a record: create, and force-update when it is already there.
+
+    Force is correct here and would be wrong on a claim ref — there is no ladder
+    to climb and no race to arbitrate, because the lease already serialized the
+    writers (§3.1)."""
+
+    def _api(self, ref_exists):
+        self.calls = []
+
+        def request(method, path, body=None):
+            self.calls.append((method, path.rsplit("/git/", 1)[-1]))
+            if path.endswith("/git/commits"):
+                return (201, json.dumps({"sha": "deadbeef"}))
+            if path.endswith("/git/refs"):
+                return (422, "") if ref_exists else (201, "{}")
+            return (200, "{}")
+        return FakeApi("o/t", request=request)
+
+    def test_a_first_write_is_one_create(self):
+        api = self._api(ref_exists=False)
+        self.assertTrue(kraken.States(api).write(9, kraken.NO_RECORD))
+        self.assertEqual([m for m, _ in self.calls], ["POST", "POST"],
+                         "the common case must be commit + create, nothing more")
+
+    def test_an_existing_record_is_force_updated(self):
+        api = self._api(ref_exists=True)
+        self.assertTrue(kraken.States(api).write(9, kraken.NO_RECORD))
+        self.assertEqual(self.calls[-1], ("PATCH", "refs/kraken/state/9"))
+
+    def test_a_failed_commit_is_a_failed_write(self):
+        api = FakeApi("o/t", request=lambda m, p, body=None: (500, ""))
+        self.assertFalse(kraken.States(api).write(9, kraken.NO_RECORD))
+
+    def test_delete_tolerates_a_missing_record(self):
+        # Idempotent under retries, the same tolerance a claim-ref delete has.
+        api = FakeApi("o/t", request=lambda m, p, body=None: (422, ""))
+        self.assertTrue(kraken.States(api).delete(9))
+
+    def test_a_failed_ref_read_is_unknown_never_absent(self):
+        # "No record" and "the read did not land" demand opposite answers: the
+        # first offers the task, the second refuses to write at all.
+        api = FakeApi("o/t", request=lambda m, p, body=None: (500, ""))
+        self.assertTrue(kraken.States(api).of(9).unknown)
+
+    def test_no_ref_is_no_record(self):
+        api = FakeApi("o/t", request=lambda m, p, body=None: (200, "[]"))
+        record = kraken.States(api).of(9)
+        self.assertFalse(record.recorded)
+        self.assertFalse(record.unknown)
+        self.assertEqual(record.state, kraken.QUEUED)

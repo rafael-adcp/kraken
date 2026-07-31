@@ -11,11 +11,11 @@ import sys
 from typing import Callable, Sequence
 
 from .contract import (
-    CommentRecord, CommitMeta, EXIT_OK, EXIT_TRANSPORT, Epoch, Json
+    CommitMeta, EXIT_OK, EXIT_TRANSPORT, Epoch, Json
 )
-from .comments import parse_marker
 from .transport import Api
-from .lease import Lease, live_leases
+from .lease import Lease
+from .state import TaskState
 from .queue import Queue, QueueRead, Task, claim_meta_of
 from .render import render_status
 
@@ -25,56 +25,11 @@ from .render import render_status
 # queue, decision queue, in-flight with heartbeat ages, the merged-PR-but-open
 # orphan heuristic, and launch recon — computed deterministically so the skill is
 # a thin renderer and the data is reusable (`--json`). No write of any kind.
-# Reuses fetch_open_tasks (queue), the claim refs (in-flight worker/age/progress),
-# the held/leased comment hydration (the requeue derivation), and paginated
-# comment reads only for awaiting-merge tasks (the PR link).
-
-# The LEGACY free-text fallback, and nothing else (§8). The delivery URL is a
-# structured field — the `delivered` marker's `pr` — and reading it off the prose
-# is exactly the text coupling the marker retired (#24, #32, #48): a regex over a
-# comment thread happily returns a PR a human mentioned in passing, another
-# task's PR, or some other repo's `/pull/N`. Kept only for threads delivered
-# before the marker carried `pr`, always reported as legacy, and removable at the
-# next backward-incompatible protocol bump.
-_PR_URL_RE = re.compile(r"https?://\S+?/pull/\d+")
-
-
-def parse_pr_url(
-    records: Sequence[CommentRecord],
-) -> tuple[str | None, str | None]:
-    """The delivery PR URL of an awaiting-merge task, as `(url, source)`.
-
-    The structured field is the source of truth (§8): the `pr` of the newest
-    `delivered` marker in the thread, source `"marker"`. The prose is read ONLY
-    when no `delivered` marker carries a usable `pr` — a legacy thread, or a
-    delivery posted without a PR — and comes back tagged `"legacy-free-text"` so
-    every reader can say out loud that the link was guessed rather than
-    recorded. `(None, None)` when no PR was recorded at all.
-
-    A marker line is machine payload, never prose: it is skipped by the regex
-    pass, so a delivered marker with no `pr` can never seed the fallback from
-    its own JSON, and a `note`/`released` marker that happens to carry a `pr`
-    key is not a delivery."""
-    from_marker = None
-    fallback = None
-    for rec in records:  # server order — keep overwriting so the newest wins
-        for raw in (rec.get("body") or "").split("\n"):
-            marker = parse_marker(raw)
-            if marker is not None:
-                if marker.get("type") == "delivered":
-                    pr = marker.get("pr")
-                    if isinstance(pr, str) and pr.strip():
-                        from_marker = pr.strip()
-                continue
-            m = _PR_URL_RE.search(raw)
-            if m:
-                fallback = m.group(0)
-    if from_marker:
-        return from_marker, "marker"
-    if fallback:
-        return fallback, "legacy-free-text"
-    return None, None
-
+# Reuses the one queue read whole: the walk (titles, hygiene), the claim refs
+# (in-flight worker/age/progress) and the state records (what holds each task,
+# and the delivery PR). It reads no comment at all — protocol/9 moved the last
+# two things that needed one, the requeue verdict and the PR link, into the
+# record.
 
 _PR_PARTS_RE = re.compile(r"^https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 
@@ -172,21 +127,20 @@ class StatusReport:
         # precisely the one a project scope would hide, since the task belongs
         # to no project.
         hygiene = queue_hygiene(read.tasks, self.project)
-        live = live_leases(read.leases)
         review, decision, in_flight = [], [], []
 
         for task in self._scoped(read.tasks):
-            # The console reads the queue the way a worker does (§6): a task
-            # whose operator has already replied is back in the queue, so it
-            # must not keep sitting in the review or decision list waiting for a
-            # call already made.
-            labels = task.labels - set(task.requeued(live))
-            if "awaiting-merge" in labels:
-                row = self._reviewed(task)
+            # The console reads the queue the way a worker does (§3.1, §6): the
+            # state record decides, and a task whose thread has moved past it is
+            # back in the queue — so it must not keep sitting in the review or
+            # decision list waiting for a call already made.
+            holding = task.holding(read.states)
+            if holding == "awaiting-merge":
+                row = self._reviewed(task, task.record(read.states))
                 if row is None:
                     return None
                 review.append(row)
-            elif "needs-decision" in labels:
+            elif holding == "needs-decision":
                 decision.append({"number": task.number, "title": task.title})
             elif task.number in read.leases:
                 in_flight.append(self._in_flight(
@@ -215,14 +169,20 @@ class StatusReport:
             tasks = [t for t in tasks if self.project in t.projects]
         return sorted(tasks, key=lambda t: (t.created, t.number))
 
-    def _reviewed(self, task: Task) -> Json | None:
-        """One awaiting-merge row: the delivered PR link, where it came from, and
-        whether it has already been merged (which makes the still-open task an
-        orphan). None on a transport failure — the thread read or the PR read."""
-        records = self.api.comment_records(task.number)
-        if records is None:
-            return None
-        pr_url, pr_source = parse_pr_url(records)
+    def _reviewed(self, task: Task, record: TaskState) -> Json | None:
+        """One awaiting-merge row: the delivered PR link and whether it has
+        already been merged (which makes the still-open task an orphan). None on
+        a transport failure — the PR read.
+
+        The link comes from the state record's `pr` (§8), which the queue read
+        already carried, so this costs no request of its own. Through protocol/8
+        it meant paginating the whole comment thread of every delivered task to
+        find the newest `delivered` marker — and falling back to a regex over the
+        prose when none carried one, which could report a PR a human mentioned in
+        passing with the same confidence as the real delivery. There is no
+        fallback now: a record with no `pr` is a delivery with no PR, which §8
+        allows, and `pr_url: null` says exactly that."""
+        pr_url = record.pr
         orphan = False
         merge_state_unknown = False
         if pr_url:
@@ -235,7 +195,7 @@ class StatusReport:
             # the operator should still see it wasn't actually checked.
             merge_state_unknown = parse_github_pr_url(pr_url) is None
         return {"number": task.number, "title": task.title,
-                "pr_url": pr_url, "pr_source": pr_source, "orphan": orphan,
+                "pr_url": pr_url, "orphan": orphan,
                 "merge_state_unknown": merge_state_unknown}
 
     def _in_flight(self, task: Task, lease: Lease,

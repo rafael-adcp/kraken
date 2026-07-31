@@ -103,6 +103,20 @@ def parse_http_date(value: str) -> Epoch | None:
     return dt.timestamp()
 
 
+def comment_total_of(issue_obj: Json) -> int | None:
+    """The total comment count off a REST issue object, or None when the field
+    is missing or not a number.
+
+    Kept apart from `Api.comment_count` because the queue walk decodes the same
+    fact out of GraphQL's `comments { totalCount }` shape, and a count that
+    silently reads as 0 would requeue every held task at once. None means "not
+    answered" and every caller treats it as a failed read, never as zero."""
+    value = issue_obj.get("comments")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return max(0, value)
+
+
 class Api:
     """Every GitHub call this program makes, against one coordination repo.
 
@@ -304,8 +318,9 @@ class Api:
         return True
 
     def issue_detail(self, issue: Issue) -> Json | None:
-        """The live issue object (labels, body, state, ...), or None on
-        transport failure — one GET serves both the label and body readers."""
+        """The live issue object (labels, body, state, comment count, ...), or
+        None on transport failure — one GET serves the label, body and count
+        readers."""
         return self.json("GET", f"/repos/{self.repo}/issues/{issue}")
 
     def issue_label_names(self, issue: Issue) -> list[str] | None:
@@ -316,6 +331,21 @@ class Api:
         if obj is None:
             return None
         return [lbl.get("name", "") for lbl in obj.get("labels", [])]
+
+    def comment_count(self, issue: Issue) -> int | None:
+        """The issue's total comment count — the anchor a transition writes into
+        the state record (PROTOCOL.md §3.1). Returns None on transport failure.
+
+        Read BACK from the issue after the transition's own comment landed, never
+        computed as `+1` on a count read before it: a comment that arrives in
+        between would otherwise be swallowed by the record, and swallowing an
+        operator's words is the one failure the requeue derivation must not have.
+        It rides `issue_detail`, so a caller that also wants the labels — the
+        claim guard — pays for one request, not two."""
+        obj = self.issue_detail(issue)
+        if obj is None:
+            return None
+        return comment_total_of(obj)
 
     def issue_body(self, issue: Issue) -> str | None:
         """The issue's body text, live. Returns a string ("" when the body is

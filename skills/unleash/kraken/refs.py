@@ -42,10 +42,27 @@ from .lease import Lease, NO_LEASE, UNREADABLE_LEASE, parse_iso
 # they cannot. Nothing reads it back (§3).
 
 CLAIM_REF_PREFIX = "refs/kraken/claims/"
+# The namespace both ref families live under: the claim ladder and the state
+# records (§3.1). ONE paginated matching-refs read over this prefix answers both,
+# which is what keeps a queue read at the same call count it had before records
+# existed — see `kraken_ref_items`.
+KRAKEN_REF_NAMESPACE = "kraken/"
 # git's well-known empty-tree object, present in every repo, so an orphan commit
 # needs no prior read; create_claim_commit falls back to HEAD's tree if a host
 # rejects it.
 EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def kraken_ref_items(api: Api) -> list[Json] | None:
+    """Every ref under `refs/kraken/`, raw, in one paginated matching-refs read —
+    or None on transport failure.
+
+    Deliberately undecoded. Two families share this namespace and each parses its
+    own names out of the payload (`Refs.all`, `States.all`), so the read happens
+    once and neither has to know the other's shape. Splitting it into a call per
+    family would have made the state record cost an extra request on every queue
+    read, including the idle poll a watcher runs once a minute."""
+    return api.paginated(f"/repos/{api.repo}/git/matching-refs/{KRAKEN_REF_NAMESPACE}")
 
 
 def claim_ref(issue: Issue, gen: Gen) -> str:
@@ -109,15 +126,22 @@ class Refs:
 
     # --- reading the ladder ---------------------------------------------------
 
-    def all(self) -> dict[Issue, list[tuple[Gen, Sha]]] | None:
+    def all(self, items: Iterable[Json] | None = None,
+            ) -> dict[Issue, list[tuple[Gen, Sha]]] | None:
         """Every live claim ref as {issue_number: [(generation, sha), …]}, in one
         paginated matching-refs read. Returns a dict (empty when none), or None on
         transport failure. Generations are not collapsed here: the holder is the
-        highest one, and the rest are the superseded refs a reader may collect."""
-        items = self.api.paginated(
-            f"/repos/{self.api.repo}/git/matching-refs/kraken/claims/")
+        highest one, and the rest are the superseded refs a reader may collect.
+
+        `items` is an already-fetched `refs/kraken/` payload, which is how a queue
+        read gets the claim ladder and the state records (§3.1) out of one call.
+        Omitting it fetches that payload here — the ref names are parsed either
+        way, because matching-refs is a prefix match and a state ref is not a
+        claim."""
         if items is None:
-            return None
+            items = kraken_ref_items(self.api)
+            if items is None:
+                return None
         refs = {}
         for issue, gen, sha in _parse_ref_items(items):
             refs.setdefault(issue, []).append((gen, sha))

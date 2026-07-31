@@ -51,10 +51,13 @@ class MarkerAndFreeTextTests(KrakenConformanceTest):
         self.assert_marker(9, '{"type":"delivered","worker":"w1"}')
         self.assertEqual(self.marker_count(9), 1, "exactly one kraken marker in the produced comment")
 
-        # --- 4. after deliver frees the ref, the next worker can claim --------
-        self.remove_label(9, "awaiting-merge")
+        # --- 4. after deliver frees the ref, a review comment lets w2 claim ---
+        # The ref is gone, but the RECORD now holds the task at awaiting-merge
+        # (§3.1), so the gesture that hands it back is a comment — not removing
+        # the label, which protocol/9 stopped reading where a record exists.
+        self.mk_comment(9, "one more thing: rename the flag")
         r = self.kraken("claim", "OWNER/tasks", 9, "w2")
-        self.assertEqual(r.rc, 0, "deliver freed the ref; w2 can claim")
+        self.assertEqual(r.rc, 0, "deliver freed the ref; a reviewed task is claimable")
         self.assertEqual(r.out, "claim: claimed issue=9 worker=w2", "w2 owns the task")
 
 

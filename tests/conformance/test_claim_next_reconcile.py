@@ -38,6 +38,9 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         self.mk_expired_lease(1, "dead-worker")
         for i in range(LEASE_EXPIRY_ESCALATE):
             self.mk_comment(1, expiry_marker("w%d" % i))
+        # The count the guard acts on is the record's, not the thread's (§3.1).
+        self.mk_state_record(1, "queued", worker="dead-worker",
+                             expiries=LEASE_EXPIRY_ESCALATE)
 
         # #2 ALIVE — renewed just now. Untouched by every rule.
         self.mk_issue(2, "live worker", "kraken-task", "project:app", "in-progress")
@@ -50,8 +53,10 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         self.mk_issue(3, "crashed release", "kraken-task", "project:app", "in-progress")
 
         # #4 ORPHAN LOCK — a ref left on an escalated issue. Rule 1: drop it.
+        # "Escalated" is the RECORD's word now, not the label's (§3.1).
         self.mk_issue(4, "escalated, ref lingered", "kraken-task", "project:app",
                       "needs-decision")
+        self.mk_state_record(4, "needs-decision", worker="gone-worker")
         self.mk_claim_ref(4, "gone-worker", age_seconds=60)
 
         # #5 MISSING BADGE — a fresh ref whose in-progress projection never

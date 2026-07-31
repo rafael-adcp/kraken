@@ -38,59 +38,6 @@ def disclaimer_body(worker, *rest):
     return "\n\n".join(parts)
 
 
-# --- human-vs-worker discrimination ------------------------------------------
-
-class WorkerCommentTests(unittest.TestCase):
-    """The requeue derivation's discriminator: a comment is a worker's iff it
-    carries a hidden kraken marker on any line (PROTOCOL.md §4), with a first-line
-    attribution disclaimer as a legacy fallback. Both are derived from kraken.py
-    constants, never a second copy."""
-
-    def test_disclaimer_headed_comment_is_a_worker(self):
-        self.assertTrue(kraken.is_worker_comment(disclaimer_body("env-1", "some prose")))
-
-    def test_marker_bearing_comment_is_a_worker(self):
-        # The structural discriminator: any hidden marker → worker, even without a
-        # leading disclaimer line.
-        body = "prose\n\n" + kraken.make_marker({"type": "delivered", "worker": "w1"})
-        self.assertTrue(kraken.is_worker_comment(body))
-
-    def test_note_comment_is_a_worker(self):
-        # compose_note now carries a `note` marker, so a note is worker-authored
-        # structurally — not merely because of its disclaimer line.
-        self.assertTrue(kraken.is_worker_comment(kraken.compose_note("env-1", "assuming X")))
-
-    def test_operator_pasting_a_raw_marker_is_read_as_worker(self):
-        # Accepted edge (PROTOCOL.md §4): a raw kraken marker pasted by an
-        # operator reads as a worker comment; hand-removing the label is the
-        # escape hatch.
-        self.assertTrue(kraken.is_worker_comment(
-            "bounce it\n\n" + kraken.make_marker({"type": "requeue"})))
-
-    def test_bare_human_comment_is_not_a_worker(self):
-        self.assertFalse(kraken.is_worker_comment("option B, go"))
-
-    def test_malformed_marker_does_not_classify_as_worker(self):
-        # A line that is not a decodable kraken marker (no string type) is inert.
-        self.assertFalse(kraken.is_worker_comment("here is <!-- kraken not-json -->"))
-
-    def test_disclaimer_mid_body_still_a_worker_via_no_marker_is_human(self):
-        # An operator quoting the disclaimer mid-reply, with no marker anywhere,
-        # is still a human — only the opening line counts for the disclaimer path.
-        body = "answering below:\n\n" + kraken.disclaimer("env-1") + "\n\noption B"
-        self.assertFalse(kraken.is_worker_comment(body))
-
-    def test_name_agnostic(self):
-        # Any worker name matches — the disclaimer fallback keys on the prefix up
-        # to the opening backtick, not a specific name.
-        for name in ("env-1", "kraken-copilot-9", "a"):
-            self.assertTrue(kraken.is_worker_comment(disclaimer_body(name)))
-
-    def test_crlf_first_line_still_matches(self):
-        body = kraken.disclaimer("env-1") + "\r\n\r\nprose"
-        self.assertTrue(kraken.is_worker_comment(body))
-
-
 # --- section validation ------------------------------------------------------
 
 class SectionParsingTests(unittest.TestCase):
@@ -189,6 +136,7 @@ class ReapCommandTests(unittest.TestCase):
         self.swaps = []
         self.posts = []
         self.deleted = []
+        self.records = []
         time.time = lambda: self.NOW
 
     def tearDown(self):
@@ -196,15 +144,26 @@ class ReapCommandTests(unittest.TestCase):
 
     def _api(self):
         def request(method, path, body=None):
-            # The only transport the applier reaches for beyond labels and
-            # comments is the ref delete, so record it as the DELETE it is.
-            issue, _gen = kraken.parse_claim_ref(path.split("/git/", 1)[1])
-            self.deleted.append(issue)
+            # Beyond labels and comments the applier reaches for two kinds of ref
+            # write: the claim-ref delete, and the state record a reclaim or a
+            # migrate writes (§3.1). Record each as what it is.
+            if path.endswith("/git/commits"):
+                return (201, json.dumps({"sha": "state-sha"}))
+            if path.endswith("/git/refs"):
+                self.records.append((body or {}).get("ref", ""))
+                return (201, "{}")
+            parsed = kraken.parse_claim_ref(path.split("/git/", 1)[1])
+            if parsed is not None:
+                self.deleted.append(parsed[0])
             return (204, "")
 
         return FakeApi(
             "OWNER/tasks",
             request=request,
+            # The record's anchor: read back off the issue after the pass posts
+            # its comment (§3.1). The applier's wiring is what is under test, not
+            # the count, so it answers a constant.
+            comment_count=lambda issue: 0,
             swap_labels=lambda issue, remove=None, add=None: (
                 self.swaps.append((issue, remove, add)) or True),
             post_comment=lambda issue, body: (
@@ -215,14 +174,14 @@ class ReapCommandTests(unittest.TestCase):
                 "message": kraken.make_marker({"type": "claim", "worker": "w"})}
 
     @staticmethod
-    def _node(number, labels, comments=()):
+    def _node(number, labels, total=0):
         return kraken.Task(
             {"number": number, "title": "t", "createdAt": "2026-01-01",
              "body": "", "labels": {"nodes": [{"name": l} for l in labels]},
-             "comments": {"nodes": [{"body": b, "createdAt": "2026-01-01"}
-                                    for b in comments]}})
+             "comments": {"totalCount": total}})
 
-    def _run(self, nodes, refs, commit_meta, ttl=None, worker="reconciler"):
+    def _run(self, nodes, refs, commit_meta, ttl=None, worker="reconciler",
+             states=None):
         # Tests seed {issue: sha}; a lease is a generation ladder. The queue read
         # is the injected collaborator — it has its own tests; what is under test
         # here is the wiring from that read to the plan and the applier.
@@ -233,7 +192,8 @@ class ReapCommandTests(unittest.TestCase):
                 nodes,
                 kraken.lease_state(ladders, commit_meta, self.NOW,
                                    kraken.lease_ttl_seconds(ttl)),
-                commit_meta)
+                commit_meta,
+                dict(states or {}))
 
         buf = StringIO()
         with redirect_stdout(buf):
@@ -242,18 +202,21 @@ class ReapCommandTests(unittest.TestCase):
         return rc, counts, buf.getvalue()
 
     @staticmethod
-    def _expiries(n):
-        return [kraken.make_marker({"type": "lease-expired", "worker": "w%d" % i})
-                for i in range(n)]
+    def _expired(n, expiries):
+        """The state record of a task whose lease has been stolen `expiries`
+        times — the count §6 rule 2 reads (§3.1). Through protocol/8 it was
+        counted from `lease-expired` markers in a comment window."""
+        return {n: kraken.TaskState(state=kraken.QUEUED, worker="w",
+                                    expiries=expiries, recorded=True)}
 
     def test_a_repeatedly_expired_task_is_reclaimed(self):
         # The only escalation left: the task has already been stolen
         # LEASE_EXPIRY_ESCALATE times and still nobody finished it.
-        node = self._node(1, ["kraken-task", "in-progress"],
-                          comments=self._expiries(kraken.LEASE_EXPIRY_ESCALATE))
+        node = self._node(1, ["kraken-task", "in-progress"])
         rc, counts, _ = self._run(
             [node], {1: "s1"},
-            {"s1": self._meta(kraken.LEASE_DEFAULT_TTL_SECONDS + 60)})
+            {"s1": self._meta(kraken.LEASE_DEFAULT_TTL_SECONDS + 60)},
+            states=self._expired(1, kraken.LEASE_EXPIRY_ESCALATE))
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertIn((1, "in-progress", "needs-decision"), self.swaps)
         self.assertEqual(len(self.posts), 1)
@@ -286,19 +249,19 @@ class ReapCommandTests(unittest.TestCase):
         self.assertEqual((counts["reclaim"], counts["orphan-lock"]), (0, 0))
 
     def test_reclaim_is_attributed_to_the_named_worker(self):
-        node = self._node(1, ["kraken-task", "in-progress"],
-                          comments=self._expiries(kraken.LEASE_EXPIRY_ESCALATE))
+        node = self._node(1, ["kraken-task", "in-progress"])
         self._run([node], {1: "s1"},
                   {"s1": self._meta(kraken.LEASE_DEFAULT_TTL_SECONDS + 60)},
-                  worker="drain-1")
+                  worker="drain-1",
+                  states=self._expired(1, kraken.LEASE_EXPIRY_ESCALATE))
         self.assertTrue(self.posts[0][1].startswith(kraken.disclaimer("drain-1")))
 
     def test_the_ttl_flag_reaches_the_read(self):
         # --ttl 60 makes a 5-minute-old lease expired, so the repeat guard fires
         # on a task a default TTL would still consider held.
-        node = self._node(7, ["kraken-task", "in-progress"],
-                          comments=self._expiries(kraken.LEASE_EXPIRY_ESCALATE))
-        rc, _, _ = self._run([node], {7: "s7"}, {"s7": self._meta(300)}, ttl=60)
+        node = self._node(7, ["kraken-task", "in-progress"])
+        rc, _, _ = self._run([node], {7: "s7"}, {"s7": self._meta(300)}, ttl=60,
+                             states=self._expired(7, kraken.LEASE_EXPIRY_ESCALATE))
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertIn((7, "in-progress", "needs-decision"), self.swaps)
 
@@ -323,149 +286,130 @@ class ReapCommandTests(unittest.TestCase):
         with redirect_stdout(buf):
             rc = kraken.cmd_reap(args)
         self.assertEqual(rc, kraken.EXIT_OK)
-        self.assertIn("reap: done leases=0 reclaimed=0 orphan_locks=0",
-                      buf.getvalue())
+        self.assertIn("reap: done leases=0 reclaimed=0 orphan_locks=0 "
+                      "orphan_states=0 migrated=0", buf.getvalue())
 
 
-# --- the requeue derivation: held-state rules, no transport at all -----------
+# --- the requeue derivation: one integer against another, no transport -------
 
-def _cmt(body):
-    return {"body": body, "createdAt": "2026-07-01T00:00:00Z"}
-
-
-def _worker_cmt(worker="w1", mtype="needs-decision"):
-    return _cmt(kraken.compose_comment(worker, "a question",
-                                       {"type": mtype, "worker": worker}))
+def _record(state, comments, **kw):
+    """A state record as a transition would have written it (PROTOCOL.md §3.1)."""
+    return kraken.TaskState(state=state, worker="w1", comments=comments,
+                            recorded=True, **kw)
 
 
-class RequeueVerdictTests(unittest.TestCase):
-    """protocol/5's read filter (PROTOCOL.md §6). Through protocol/4 an operator
-    reply MUTATED the label via a workflow; now the same fact — an operator
-    comment newer than the last worker comment — is DERIVED on the read. No
-    network is involved, which is the point: the verdict is a property of the
-    thread, identical for every reader.
+class RequeueByCountTests(unittest.TestCase):
+    """protocol/9's requeue derivation (§3.1, §6): the thread's live comment
+    total against the count the record froze when the transition put the task
+    down. Anything added since is news the task has not been read against.
 
-    protocol/8 made the verdict SYMMETRIC: it takes no label, because a comment
-    on the thread means something needs doing whichever held badge the task
-    happens to wear."""
+    No transport, and no comment: through protocol/8 this classified a window of
+    comment BODIES into worker-authored and operator-authored and compared their
+    positions. The classifier, the window and the discriminator are all gone —
+    what is left is `total > record.comments`."""
 
-    def test_bare_reply_requeues(self):
-        comments = [_worker_cmt(), _cmt("go with option B")]
-        self.assertTrue(kraken.requeue_verdict(comments))
+    def test_a_new_comment_requeues(self):
+        rec = _record("needs-decision", 3)
+        self.assertTrue(rec.requeued(4))
+        self.assertFalse(rec.holds(4))
 
-    def test_no_reply_stays_held(self):
-        self.assertFalse(kraken.requeue_verdict([_worker_cmt()]))
+    def test_nothing_new_stays_held(self):
+        rec = _record("needs-decision", 3)
+        self.assertFalse(rec.requeued(3))
+        self.assertTrue(rec.holds(3))
 
-    def test_empty_thread_stays_held(self):
-        self.assertFalse(kraken.requeue_verdict([]))
+    def test_the_same_rule_holds_for_delivered_work(self):
+        # protocol/8 made the rule symmetric; the counter makes it symmetric for
+        # free, because neither held state has anything left to read.
+        rec = _record("awaiting-merge", 7)
+        self.assertTrue(rec.requeued(8))
+        self.assertFalse(rec.holds(8))
 
-    def test_a_worker_comment_after_the_reply_re_holds(self):
-        # The operator answered, a worker picked it up and escalated AGAIN: the
-        # newest worker comment outranks the older reply, so it is held again.
-        comments = [_worker_cmt(), _cmt("go with option B"), _worker_cmt()]
-        self.assertFalse(kraken.requeue_verdict(comments))
+    def test_a_queued_record_has_nothing_to_lift(self):
+        # `comments` is inert on a queued record — the derivation ranges over
+        # held states only — so a busy thread does not "requeue" a task that is
+        # already in the queue.
+        rec = _record(kraken.QUEUED, 0)
+        self.assertFalse(rec.requeued(5))
+        self.assertFalse(rec.holds(5))
 
-    def test_worker_comments_never_requeue(self):
-        # Every kraken-authored comment carries a marker — including the
-        # reconciler's stale-claim note and the validator's — so none of them can
-        # requeue the escalation they just posted. This is what retires the
-        # protocol/4 `user.type == Bot` gate.
-        for body in (kraken.stale_claim_body("w1", "silent"),
-                     kraken.validation_body([kraken.VALIDATE_GOAL_MISSING]),
-                     kraken.compose_note("w1", "still working")):
-            comments = [_worker_cmt(), _cmt(body)]
-            self.assertFalse(
-                kraken.requeue_verdict(comments),
-                "a kraken-authored comment requeued the task: %s" % body[:60])
-
-    def test_a_bare_comment_requeues_delivered_work(self):
-        # protocol/8's whole point, and the pin that keeps it from regressing:
-        # a delivered task takes the SAME bare reply a needs-decision one does.
-        # Through protocol/7 this thread stayed held and the ask was swallowed.
-        delivered = [_worker_cmt(mtype="delivered")]
-        self.assertTrue(kraken.requeue_verdict(
-            delivered + [_cmt("please also commit it to config/app.yml")]))
-
-    def test_a_prose_requeue_bounces_a_ready_branch_like_any_comment(self):
-        # The inverse of the protocol/7 pin. There is no directive to match any
-        # more, so a sentence merely CONTAINING "requeue:" requeues exactly
-        # because it is a comment — not because of its shape. This is the
-        # accepted trade (HISTORY.md, protocol/8): a spurious requeue costs one
-        # drain, a swallowed work request costs a debugging session.
-        delivered = [_worker_cmt(mtype="delivered")]
-        self.assertTrue(kraken.requeue_verdict(
-            delivered + [_cmt("requeue: only if CI is red, otherwise merge it")]))
+    def test_a_transition_records_its_own_comment(self):
+        # The reason no comment needs classifying: an escalation posts its
+        # question and then records the count INCLUDING it, so its own words
+        # never requeue the task it just held. The operator's answer is the
+        # first thing that moves the counter past it.
+        rec = _record("needs-decision", 4)   # question posted, thread now at 4
+        self.assertTrue(rec.holds(4))
+        self.assertFalse(rec.holds(5))       # the operator answered
 
     def test_a_congratulatory_comment_requeues_too(self):
-        # The cost side of the trade, pinned so it is a decision and not a
-        # surprise: the worker that picks this up escalates rather than invents
-        # rework (PROTOCOL.md §6, skills/unleash/SKILL.md).
-        delivered = [_worker_cmt(mtype="delivered")]
-        self.assertTrue(kraken.requeue_verdict(delivered + [_cmt("nice, thanks")]))
+        # The cost side of the trade, pinned so it stays a decision and not a
+        # surprise: any comment counts, and the worker that picks the task up
+        # escalates rather than inventing rework (§6, skills/unleash/SKILL.md).
+        self.assertTrue(_record("awaiting-merge", 2).requeued(3))
 
-    def test_a_truncated_window_cannot_mislead(self):
-        # A window holding NO worker comment means the last one is older than the
-        # window — so every operator comment in it is newer, which is the correct
-        # verdict. This is why a fixed comment window is safe.
-        self.assertTrue(kraken.requeue_verdict(
-            [_cmt("reply %d" % i) for i in range(25)]))
+    def test_a_deleted_comment_does_not_requeue(self):
+        # A total BELOW the anchor means comments were removed, not added.
+        # Nothing was said, so nothing is lifted.
+        self.assertTrue(_record("awaiting-merge", 9).holds(8))
+
+    def test_a_missing_count_reads_as_zero_and_requeues(self):
+        # Fail-open, deliberately (`_as_int`): a record whose counter did not
+        # decode offers the task, and the worker that finds nothing actionable
+        # escalates. The opposite default would bury a delivery.
+        rec = kraken.parse_state_commit(kraken.make_marker(
+            {"type": "state", "state": "awaiting-merge", "worker": "w1"}))
+        self.assertEqual(rec.comments, 0)
+        self.assertTrue(rec.requeued(1))
 
 
-class RequeuedLabelsTests(unittest.TestCase):
-    """Task.requeued: the derivation as the classifier and the claim both see
-    it — which held labels an operator reply has already lifted."""
+class HoldingStateTests(unittest.TestCase):
+    """`Task.holding` / `holding_state`: the record decides, and the held LABEL
+    is consulted in exactly one case — a task that has no record (§3.1)."""
 
     @staticmethod
-    def _node(number, labels, comments=()):
+    def _task(number, labels, total=0):
         return kraken.Task(
             {"number": number, "title": "t", "createdAt": "2026-01-01",
              "body": "", "labels": {"nodes": [{"name": l} for l in labels]},
-             "comments": {"nodes": list(comments)},
+             "comments": {"totalCount": total},
              "blockedBy": {"nodes": []}})
 
-    def test_answered_needs_decision_is_lifted(self):
-        task = self._node(1, ["kraken-task", "needs-decision"],
-                          [_worker_cmt(), _cmt("do option B")])
-        self.assertEqual(task.requeued({}), ("needs-decision",))
+    def test_the_record_holds_even_with_no_badge(self):
+        # A delivery whose label swap never landed is still delivered: the
+        # record is the state, and the badge is projection that nothing repairs.
+        task = self._task(1, ["kraken-task"], total=4)
+        self.assertEqual(task.holding({1: _record("awaiting-merge", 4)}),
+                         "awaiting-merge")
 
-    def test_unanswered_stays_held(self):
-        task = self._node(1, ["kraken-task", "needs-decision"], [_worker_cmt()])
-        self.assertEqual(task.requeued({}), ())
+    def test_a_stale_held_badge_cannot_hold_a_recorded_queued_task(self):
+        # The inverse, and the reason the label is not consulted where a record
+        # exists: a release left `awaiting-merge` behind, the record says queued.
+        task = self._task(1, ["kraken-task", "awaiting-merge"], total=9)
+        self.assertIsNone(task.holding({1: _record(kraken.QUEUED, 9)}))
 
-    def test_a_live_claim_ref_outranks_the_thread(self):
-        # A comment on a CLAIMED task is context for its worker, never a requeue:
-        # the lock is the truth (§5), so the timeline is not consulted at all.
-        task = self._node(1, ["kraken-task", "needs-decision"],
-                          [_worker_cmt(), _cmt("do option B")])
-        self.assertEqual(task.requeued({1: "sha"}), ())
+    def test_a_new_comment_lifts_the_record(self):
+        task = self._task(1, ["kraken-task", "awaiting-merge"], total=8)
+        self.assertIsNone(task.holding({1: _record("awaiting-merge", 7)}))
 
-    def test_in_progress_needs_no_lifting(self):
-        # Nothing to lift: the badge is write-only (§3), so the task is already
-        # queued and the derivation has no held label to report.
-        task = self._node(1, ["kraken-task", "in-progress"],
-                          [_worker_cmt(), _cmt("any news?")])
-        self.assertEqual(task.requeued({}), ())
+    def test_no_record_falls_back_to_the_label(self):
+        task = self._task(1, ["kraken-task", "needs-decision"], total=12)
+        self.assertEqual(task.holding({}), "needs-decision")
 
-    def test_a_stale_badge_cannot_suppress_a_requeue(self):
-        # Both labels at once — a crashed escalate that left the badge on. Under
-        # protocol/6 the in-progress label short-circuited the whole derivation,
-        # so the operator's answer was silently ignored. It holds nothing now.
-        task = self._node(1, ["kraken-task", "in-progress", "needs-decision"],
-                          [_worker_cmt(), _cmt("do option B")])
-        self.assertEqual(task.requeued({}), ("needs-decision",))
+    def test_no_record_derives_no_requeue_however_long_the_thread(self):
+        # The migration's safety property (§3.1, §6 rule 3): a queue written by
+        # an older revision reads as held until the reconcile writes a record.
+        # Deriving a requeue here instead would hand every pre-upgrade delivery
+        # back to a worker with nothing to do.
+        task = self._task(1, ["kraken-task", "awaiting-merge"], total=999)
+        self.assertEqual(task.holding({}), "awaiting-merge")
 
-    def test_a_reviewed_awaiting_merge_is_lifted_by_a_bare_comment(self):
-        # The same derivation, the same gesture, the other held label (protocol/8).
-        # Pinned at the Task level too: the classifier and the claim both read
-        # this, so a regression here is a queue that silently stops moving.
-        task = self._node(1, ["kraken-task", "awaiting-merge"],
-                          [_worker_cmt(mtype="delivered"),
-                           _cmt("also commit it to config/app.yml")])
-        self.assertEqual(task.requeued({}), ("awaiting-merge",))
+    def test_in_progress_holds_nothing(self):
+        task = self._task(1, ["kraken-task", "in-progress"], total=3)
+        self.assertIsNone(task.holding({}))
 
-    def test_an_unheld_task_lifts_nothing(self):
-        task = self._node(1, ["kraken-task"], [_cmt("just chatter")])
-        self.assertEqual(task.requeued({}), ())
+    def test_an_unheld_task_holds_nothing(self):
+        self.assertIsNone(self._task(1, ["kraken-task"], total=5).holding({}))
 
 
 # --- cmd_validate: gate + debounce, transport mocked ------------------------
