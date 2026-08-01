@@ -327,12 +327,11 @@ def claim_is_moot(record: TaskState, comment_total: int,
 
     Decided by `holding_state`, which is the §3.1 read rule itself — where a
     record exists it decides and the labels are not consulted, and only a task
-    with no record falls back to its badge. Reading the label unconditionally
-    was this program's last place that consulted a projection to decide
-    something, and it disagreed with §6's rule 1 (`reconcile_plan`), which has
-    asked the record since protocol/9: a delivered task the operator requeued by
-    commenting reads as still-held by its stale badge and as free by its record.
-    Two answers to "did the task leave my claim" is one too many.
+    with no record falls back to its badge. Consulting the label unconditionally
+    would disagree with §6's rule 1 (`reconcile_plan`): a delivered task the
+    operator requeued by commenting reads as still-held by its stale badge and
+    as free by its record, and two answers to "did the task leave my claim" is
+    one too many.
 
     One predicate, because the same rule is decided from three observations: the
     drain reads it off the queue walk it already has, a named claim off one issue

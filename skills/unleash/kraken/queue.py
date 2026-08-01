@@ -41,13 +41,10 @@ from .state import (
 # The whole derivation is `total > record.comments` (§3.1, `TaskState.requeued`).
 # The transition wrote down what the thread carried when it put the task down,
 # and the walk brings back what it carries now. One integer against another: no
-# comment is fetched, no author classified, no body opened. Through protocol/8
-# this was a trailing comment window, hydrated per held task, classified
-# marker-by-marker into worker and operator — a hydration pass, a discriminator,
-# and a window that could scroll past what it was counting.
+# comment is fetched, no author classified, no body opened.
 #
-# The rule is the SAME for both held states, as it has been since protocol/8, and
-# the counter makes it symmetric for free: neither state has anything to read.
+# The rule is the SAME for both held states, and the counter makes it symmetric
+# for free: neither state has anything to read.
 
 # --- the issue-form body -----------------------------------------------------
 # Pure string readers, kept free of `Task`: the same two are applied to a body
@@ -372,12 +369,10 @@ class Queue:
         the constructor beside it and to nothing else.
 
         Carries the comment COUNT and not one comment body. This walk is the hot
-        read — every worker's watcher runs it once a minute — so a trailing comment
-        window on every node was the queue's scaling wall: a 200-task queue would
-        ship 5,000 comment bodies per poll, per worker, to answer a question about a
-        handful of them. `totalCount` is one integer per node, it is all the requeue
-        derivation needs against the record's anchor (§6), and it retires the
-        hydration pass that used to fetch those windows for the held few."""
+        read — every worker's watcher runs it once a minute — and `totalCount` is
+        one integer per node, which is all the requeue derivation needs against
+        the record's anchor (§6). Fetching bodies here would put the whole
+        queue's comment volume on every poll of every worker."""
         owner, name = self.api.repo.split("/", 1)
         tasks = []
         cursor = None
@@ -414,10 +409,8 @@ class Queue:
         one paginated read of the whole `refs/kraken/` namespace (claims AND
         records — see `kraken_ref_items`), and one batched commit read resolving
         both families at once. `Refs.commit_meta` answers `{}` for an empty ref list
-        without a request, so an idle queue still pays exactly two calls, the same
-        as it did before records existed. What this no longer pays for at all is the
-        comment hydration protocol/8 needed, and the paginated comment read the
-        console needed per delivered task."""
+        without a request, so an idle queue pays exactly two calls. No comment is
+        read on any path."""
         tasks = self.open_tasks()
         if tasks is None:
             return None

@@ -21,25 +21,9 @@ from .refs import EMPTY_TREE_SHA, Refs, kraken_ref_items
 # at an orphan commit whose message is a `state` marker (§4), so one paginated
 # read of refs/kraken/ brings the whole queue's state back with the claim refs.
 #
-# Everything in it used to be DERIVED from the comment thread, and each
-# derivation paid for the same missing fact — nobody had written the state down:
-#
-#   "has the operator replied?"  -> classify every comment of a window as
-#                                   worker- or operator-authored
-#   "how many times has this     -> count `lease-expired` markers in that same
-#    lease expired?"               window, undercounting once it scrolled
-#   "where is the delivery?"     -> the newest `delivered` marker's `pr`, with a
-#                                   regex over the prose behind it
-#
-# The record replaces all three with fields. `comments` is the anchor of the
-# first: the count the thread carried when the transition put the task down, so
-# "anything said since" is one integer against another — and the total rides the
-# queue walk, so the derivation costs no call and opens no comment (§6).
-#
-# It is NOT a compare-and-swap. The lease already serializes every writer and
-# §5.3 makes each one prove it before writing, so a second lock over a lock would
-# only be a second thing to reconcile. A writer creates the ref when it is absent
-# and force-updates it when it is present.
+# It is NOT a compare-and-swap: a writer creates the ref when it is absent and
+# force-updates it when it is present. The lease is what serializes writers
+# (§5.3) — see HISTORY.md §3.1 for why a second lock would buy nothing.
 
 STATE_REF_PREFIX = "refs/kraken/state/"
 
@@ -242,8 +226,8 @@ def _as_int(value: object) -> int:
 def holding_state(record: TaskState, total: int | None,
                   held_labels: Iterable[str] = ()) -> str | None:
     """The state holding a task — `needs-decision`, `awaiting-merge`, or None
-    when nothing is (PROTOCOL.md §3.1). The whole of protocol/9's read rule, in
-    one pure function, because three callers ask it from three different reads:
+    when nothing is (PROTOCOL.md §3.1). The whole of §3.1's read rule, in one
+    pure function, because three callers ask it from three different reads:
     the startable filter off the queue walk, the claim guard off one issue fetch,
     and the console off the same walk again.
 

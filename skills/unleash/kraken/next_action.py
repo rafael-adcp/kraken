@@ -210,10 +210,9 @@ def issue_is_finished(issue_obj: Json | None, record: TaskState = NO_RECORD,
 
     The held half is `claim_is_moot`, which is `holding_state`, which is §3.1:
     the record decides, and the labels are consulted only for a task that has
-    none. This used to read the labels outright, which made a delivered task the
-    operator requeued by commenting look finished — the badge still says
-    `awaiting-merge` until somebody claims it — and the worker would drop a task
-    the queue had just handed back."""
+    none. Reading the labels outright would make a delivered task the operator
+    requeued by commenting look finished — the badge still says `awaiting-merge`
+    until somebody claims it — and drop a task the queue just handed back."""
     if str((issue_obj or {}).get("state", "")).upper() == "CLOSED":
         return True
     names = {lbl.get("name", "") for lbl in (issue_obj or {}).get("labels", [])}
