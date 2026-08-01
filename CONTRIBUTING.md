@@ -62,15 +62,6 @@ It uses your logged-in Claude Code subscription (no paid API key) and self-skips
 cleanly when it can't run for real (no `claude` on PATH, a spend/rate limit, or
 the stub can't be reached).
 
-A lighter **semantic** review still runs locally via the pre-push hook
-(`.githooks/pre-push`): when a push touches `skills/**` or `README.md`, it asks
-your logged-in `claude` CLI to review the diff against the skill invariants. It
-costs no API bill. Enable it once per clone with:
-
-```bash
-git config core.hooksPath .githooks
-```
-
 ## Pull request conventions
 
 These are the conventions the history already follows — match them:

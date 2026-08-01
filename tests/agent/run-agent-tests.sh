@@ -5,9 +5,9 @@
 # task body, runs a real `claude -p "/kraken:unleash ... --once"`, and asserts on
 # ARTIFACTS (stub labels/machine lines + a real local work repo).
 #
-# REAL model runs — NOT part of the mechanical conformance suite. It runs from
-# the pre-push hook when a push touches skills/ or tests/agent/, and by hand.
-# Requires: claude on PATH, ANTHROPIC_API_KEY (or logged-in CLI), jq, git —
+# REAL model runs — NOT part of the mechanical conformance suite, and wired into
+# no hook or CI. Run it by hand (`make test-agent`) when skills/ or tests/agent/
+# change. Requires: claude on PATH, ANTHROPIC_API_KEY (or logged-in CLI), jq, git —
 # absent any, SKIP with exit 0, never a false failure.
 #
 # Advisory scenarios (flaky by nature) are listed in ADVISORY: they run and
