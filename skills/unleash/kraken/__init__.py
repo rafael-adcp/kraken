@@ -19,7 +19,8 @@ acyclic:
     queue        the Task object, the batched walk, the startable filter
     render       report objects to text
     reconcile    the §6 repair pass
-    claim        the contended claim sequence and the terminal transitions
+    claim        taking a task and holding it: the CAS, the guard, the drain
+    terminal     how a turn ends: escalate, deliver, release (§7-§9)
     next_action  the driver loop as one envelope
     watch        the zero-token ambush
     status       the read-only console
@@ -55,7 +56,7 @@ from .contract import (
 from .comments import (
     DISCLAIMER, MARKER_PREFIX, MARKER_RE, MARKER_SUFFIX, MARKER_TYPES,
     TASK_TRAILER, compose_comment, compose_note, disclaimer, make_marker,
-    parse_marker, task_trailer
+    parse_marker, read_body_file, task_trailer
 )
 from .transport import (
     Api, DEFAULT_API_URL, GRAPHQL_ALIAS_CHUNK, HTTP_TIMEOUT_SECONDS, PER_PAGE,
@@ -91,11 +92,13 @@ from .reconcile import (
     project_reconcile, reconcile_pass, reconcile_plan, stale_claim_body
 )
 from .claim import (
-    ClaimAttempt, DELIVER, ESCALATE, RELEASE, Terminal, TerminalTransition,
-    acquire_next, claim_is_moot, cmd_claim, cmd_claim_next, cmd_deliver,
-    cmd_escalate, cmd_heartbeat, cmd_note, cmd_release, lease_expired_body,
-    open_claim_of, probe_lease_state, read_body_file, refuse_second_claim,
-    refused_line
+    ClaimAttempt, acquire_next, claim_is_moot, cmd_claim, cmd_claim_next,
+    cmd_heartbeat, cmd_note, lease_expired_body, open_claim_of,
+    probe_lease_state, refuse_second_claim, refused_line
+)
+from .terminal import (
+    DELIVER, ESCALATE, RELEASE, Terminal, TerminalTransition, cmd_deliver,
+    cmd_escalate, cmd_release
 )
 from .next_action import (
     NEXT_ACTIONS, NEXT_ACTION_EXIT, NextAction, NextActionEnvelope,

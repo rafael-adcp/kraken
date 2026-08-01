@@ -1,8 +1,7 @@
 * text=auto
 
-# Shell scripts and git hooks must keep LF endings — CRLF breaks bash heredoc
-# delimiters and exact-match line checks silently on Windows checkouts.
+# Shell scripts must keep LF endings — CRLF breaks bash heredoc delimiters and
+# exact-match line checks silently on Windows checkouts.
 *.sh          text eol=lf
 *.py          text eol=lf
-.githooks/*   text eol=lf
 tests/gh-stub/gh text eol=lf

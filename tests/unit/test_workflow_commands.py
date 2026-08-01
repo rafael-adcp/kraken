@@ -412,6 +412,59 @@ class HoldingStateTests(unittest.TestCase):
         self.assertIsNone(self._task(1, ["kraken-task"], total=5).holding({}))
 
 
+class ClaimIsMootTests(unittest.TestCase):
+    """`claim_is_moot`: whether a claim ref of ours locks a task whose turn is
+    already over (§3.1). The same `holding_state` rule `Task.holding` and §6's
+    rule 1 apply, which is the point — this used to read the held LABELS
+    outright and so returned a different verdict than the reconciler for the
+    same task."""
+
+    def test_a_recorded_held_state_makes_the_ref_moot(self):
+        # The ordinary case: we delivered, the record landed, the ref delete
+        # did not. The ref locks nothing and must not brick this worker.
+        self.assertTrue(
+            kraken.claim_is_moot(_record("awaiting-merge", 4), 4,
+                                 ["kraken-task", "awaiting-merge"]))
+
+    def test_a_requeued_delivery_is_not_moot(self):
+        # The divergence this change exists to close. The operator replied to a
+        # delivered task, so §6 requeued it — but the badge still says
+        # `awaiting-merge` until somebody claims it. Reading the badge called
+        # this moot while `reconcile_plan` called it live.
+        self.assertFalse(
+            kraken.claim_is_moot(_record("awaiting-merge", 4), 5,
+                                 ["kraken-task", "awaiting-merge"]))
+
+    def test_a_stale_badge_the_record_contradicts_is_not_moot(self):
+        # A release left the badge behind; the record says queued. The label
+        # would have called our live claim moot and let this worker take a
+        # second task, which §5 forbids.
+        self.assertFalse(
+            kraken.claim_is_moot(_record(kraken.QUEUED, 9), 9,
+                                 ["kraken-task", "awaiting-merge"]))
+
+    def test_no_record_still_falls_back_to_the_badge(self):
+        # §3.1's one sanctioned label read, and what keeps a pre-protocol/9
+        # queue behaving exactly as it did before this change.
+        self.assertTrue(
+            kraken.claim_is_moot(kraken.NO_RECORD, 12,
+                                 ["kraken-task", "needs-decision"]))
+
+    def test_an_unreadable_comment_count_errs_toward_live(self):
+        # `comment_total_of` answers None for an issue object whose field is
+        # missing. Erring toward "not moot" refuses a second claim and resumes
+        # a task; erring the other way would bury a delivery the operator
+        # reopened — the same direction `_comment_total` floors a lost field to.
+        self.assertFalse(
+            kraken.claim_is_moot(_record("awaiting-merge", 4), None,
+                                 ["kraken-task", "awaiting-merge"]))
+
+    def test_in_progress_never_makes_a_ref_moot(self):
+        self.assertFalse(
+            kraken.claim_is_moot(kraken.NO_RECORD, 3,
+                                 ["kraken-task", "in-progress"]))
+
+
 # --- cmd_validate: gate + debounce, transport mocked ------------------------
 
 class ValidateCommandTests(unittest.TestCase):

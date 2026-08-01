@@ -4,7 +4,7 @@
 #   label drift across files, protocol-version drift, orphan "step N"
 #   references, task-template field drift, broken relative links/images, and
 #   invalid shell/YAML/JSON snippets.
-# Runs as a CI gate (.github/workflows/lint.yml) and locally (e.g. a pre-push hook).
+# Runs as a CI gate (.github/workflows/lint.yml) and locally via `make lint`.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,10 +26,12 @@ PKG="skills/unleash/kraken"
 WATCHER="$PKG/watch.py"
 LISTER="$PKG/queue.py"
 CLAIM="$PKG/claim.py"
-RELEASE="$PKG/claim.py"
-ESCALATE="$PKG/claim.py"
-DELIVER="$PKG/claim.py"
 HEARTBEAT="$PKG/claim.py"
+# The three ways a turn ENDS live in terminal.py, not claim.py — see that
+# module's docstring for why the two halves are siblings.
+RELEASE="$PKG/terminal.py"
+ESCALATE="$PKG/terminal.py"
+DELIVER="$PKG/terminal.py"
 
 fail=0
 err() { printf '  \033[31mx\033[0m %s\n' "$1"; fail=$((fail+1)); }

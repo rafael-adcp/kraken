@@ -27,9 +27,7 @@ from .render import render_status
 # a thin renderer and the data is reusable (`--json`). No write of any kind.
 # Reuses the one queue read whole: the walk (titles, hygiene), the claim refs
 # (in-flight worker/age/progress) and the state records (what holds each task,
-# and the delivery PR). It reads no comment at all — protocol/9 moved the last
-# two things that needed one, the requeue verdict and the PR link, into the
-# record.
+# and the delivery PR). It reads no comment at all.
 
 _PR_PARTS_RE = re.compile(r"^https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 
@@ -175,12 +173,8 @@ class StatusReport:
         a transport failure — the PR read.
 
         The link comes from the state record's `pr` (§8), which the queue read
-        already carried, so this costs no request of its own. Through protocol/8
-        it meant paginating the whole comment thread of every delivered task to
-        find the newest `delivered` marker — and falling back to a regex over the
-        prose when none carried one, which could report a PR a human mentioned in
-        passing with the same confidence as the real delivery. There is no
-        fallback now: a record with no `pr` is a delivery with no PR, which §8
+        already carried, so this costs no request of its own. There is no prose
+        fallback: a record with no `pr` is a delivery with no PR, which §8
         allows, and `pr_url: null` says exactly that."""
         pr_url = record.pr
         orphan = False

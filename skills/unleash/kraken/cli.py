@@ -4,7 +4,8 @@ Part of the kraken protocol package; see __init__.py."""
 from __future__ import annotations
 
 import argparse
-from typing import Sequence
+import dataclasses
+from typing import Callable, Sequence
 
 from .contract import EXIT_OK, PROTOCOL_VERSION
 from .comments import MARKER_TYPES, disclaimer, task_trailer
@@ -15,8 +16,10 @@ from .lease import (
 from .queue import cmd_list_startable
 from .reconcile import RECONCILER_WORKER, cmd_reap
 from .claim import (
-    cmd_claim, cmd_claim_next, cmd_deliver, cmd_escalate, cmd_heartbeat,
-    cmd_note, cmd_release
+    cmd_claim, cmd_claim_next, cmd_heartbeat, cmd_note
+)
+from .terminal import (
+    cmd_deliver, cmd_escalate, cmd_release
 )
 from .next_action import NEXT_ACTIONS, cmd_next_action
 from .watch import cmd_watch
@@ -54,171 +57,163 @@ def cmd_contract(args: argparse.Namespace) -> int:
 
 # --- CLI ---------------------------------------------------------------------
 
+
+@dataclasses.dataclass(frozen=True)
+class Command:
+    """One subcommand as data: the name it is invoked by, the function that runs
+    it, its `--help` line, and its arguments.
+
+    `args` is the positional signature — names in order, a trailing `?` marking
+    one that may be omitted (defaulting to ""). `opts` holds everything needing
+    explicit argparse keywords, passed through verbatim and added after `args`;
+    argparse reads a name without dashes as a positional, so the two positionals
+    with keywords of their own (`reap worker`, `contract field`) ride there too."""
+
+    name: str
+    func: Callable[[argparse.Namespace], int]
+    help: str
+    args: str = ""
+    opts: tuple[tuple[str, dict], ...] = ()
+
+
+COMMANDS = (
+    Command("list-startable", cmd_list_startable,
+            "startable candidates / queue snapshot",
+            "repo project",
+            (("--snapshot", dict(
+                action="store_true",
+                help="emit every open task as <number>:startable|held")),)),
+
+    Command("claim", cmd_claim,
+            "queued -> in-progress",
+            "repo issue worker"),
+
+    Command("claim-next", cmd_claim_next,
+            "list + guard + claim the oldest startable candidate in one shot",
+            "repo project worker",
+            (("--json", dict(
+                action="store_true",
+                help="emit the won claim as a JSON object {issue,title,body}")),)),
+
+    Command("next-action", cmd_next_action,
+            "the driver loop in one call: resume the task this worker holds, "
+            "or claim the next one, and say what to run next (JSON envelope)",
+            "repo project worker",
+            (("--text", dict(
+                action="store_true",
+                help="render the envelope as human-readable lines instead "
+                     "of JSON (the JSON is the machine contract)")),)),
+
+    Command("heartbeat", cmd_heartbeat,
+            "liveness: advance the claim ref to a fresh commit",
+            "repo issue worker message"),
+
+    Command("escalate", cmd_escalate,
+            "in-progress -> needs-decision",
+            "repo issue worker question_file"),
+
+    Command("deliver", cmd_deliver,
+            "in-progress -> awaiting-merge",
+            "repo issue worker result_file pr_url?"),
+
+    Command("release", cmd_release,
+            "in-progress -> queued (honest release)",
+            "repo issue worker reason?"),
+
+    Command("note", cmd_note,
+            "post a free-form worker comment (disclaimer prepended, inert "
+            "`note` marker); changes no label or claim ref",
+            "repo issue worker body_file"),
+
+    Command("watch", cmd_watch,
+            "poll the queue, print on a startable change",
+            "repo project"),
+
+    Command("reap", cmd_reap,
+            "run the §6 reconcile stand-alone — reclaim repeatedly expired "
+            "claims, delete orphan locks (a drain does this itself)",
+            "repo",
+            (("worker", dict(
+                nargs="?", default=RECONCILER_WORKER,
+                help="who the reclaim comments are attributed to "
+                     f"(default: {RECONCILER_WORKER})")),
+             ("--ttl", dict(
+                 type=int, default=None,
+                 help="lease TTL in seconds (default: KRAKEN_LEASE_TTL_SECONDS "
+                      f"env, else {LEASE_DEFAULT_TTL_SECONDS})")))),
+
+    Command("validate", cmd_validate,
+            "flag a task missing its project label, Goal, or Acceptance by "
+            "commenting on it (debounced; informs only). `status` reports the "
+            "same three checks read-only, for the whole queue at once",
+            "repo issue"),
+
+    Command("cleanup", cmd_cleanup,
+            "strip every state/non-identity label off a closed task, keeping "
+            "only kraken-task and project:<name> (cosmetic; nothing decides on "
+            "a closed task's labels)",
+            "repo issue"),
+
+    Command("status", cmd_status,
+            "read-only operator console: review / decision / in-flight queues",
+            "repo",
+            (("--project", dict(
+                default="",
+                help="scope every queue to project:<name> (default: whole queue)")),
+             ("--json", dict(
+                 action="store_true",
+                 help="emit the stable machine-readable status schema")))),
+
+    Command("init", cmd_init,
+            "stand up a coordination repo: private repo + bundled assets + "
+            "canonical labels (idempotent; touches no issues)",
+            "repo",
+            (("--project", dict(
+                default="",
+                help="also upsert the project:<name> routing label")),
+             ("--json", dict(
+                 action="store_true",
+                 help="emit the machine-readable init report")))),
+
+    Command("contract", cmd_contract,
+            "print an authoritative contract literal (disclaimer / marker "
+            "vocabulary) for consumers to derive from — no network",
+            "",
+            (("field", dict(
+                choices=sorted(CONTRACT_FIELDS),
+                help="which contract literal to print")),
+             ("--worker", dict(
+                 default="<worker-name>",
+                 help="worker name to substitute into the disclaimer "
+                      "(default: the doc placeholder <worker-name>)")),
+             ("--repo", dict(
+                 default="<coordination-repo>",
+                 help="coordination repo slug for the task-trailer field "
+                      "(default: the doc placeholder <coordination-repo>)")),
+             ("--issue", dict(
+                 default="<issue>",
+                 help="task issue number for the task-trailer field "
+                      "(default: the doc placeholder <issue>)")))),
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
+    """The parser, walked off `COMMANDS` — one subparser per entry."""
     parser = argparse.ArgumentParser(
         prog="kraken.py",
         description="Bundled kraken worker-side queue transitions.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
-
-    p = sub.add_parser("list-startable", help="startable candidates / queue snapshot")
-    p.add_argument("repo")
-    p.add_argument("project")
-    p.add_argument("--snapshot", action="store_true",
-                   help="emit every open task as <number>:startable|held")
-    p.set_defaults(func=cmd_list_startable)
-
-    p = sub.add_parser("claim", help="queued -> in-progress")
-    p.add_argument("repo")
-    p.add_argument("issue")
-    p.add_argument("worker")
-    p.set_defaults(func=cmd_claim)
-
-    p = sub.add_parser(
-        "claim-next",
-        help="list + guard + claim the oldest startable candidate in one shot",
-    )
-    p.add_argument("repo")
-    p.add_argument("project")
-    p.add_argument("worker")
-    p.add_argument("--json", action="store_true",
-                   help="emit the won claim as a JSON object {issue,title,body}")
-    p.set_defaults(func=cmd_claim_next)
-
-    p = sub.add_parser(
-        "next-action",
-        help="the driver loop in one call: resume the task this worker holds, "
-             "or claim the next one, and say what to run next (JSON envelope)",
-    )
-    p.add_argument("repo")
-    p.add_argument("project")
-    p.add_argument("worker")
-    p.add_argument("--text", action="store_true",
-                   help="render the envelope as human-readable lines instead "
-                        "of JSON (the JSON is the machine contract)")
-    p.set_defaults(func=cmd_next_action)
-
-    p = sub.add_parser("heartbeat",
-                       help="liveness: advance the claim ref to a fresh commit")
-    p.add_argument("repo")
-    p.add_argument("issue")
-    p.add_argument("worker")
-    p.add_argument("message")
-    p.set_defaults(func=cmd_heartbeat)
-
-    p = sub.add_parser("escalate", help="in-progress -> needs-decision")
-    p.add_argument("repo")
-    p.add_argument("issue")
-    p.add_argument("worker")
-    p.add_argument("question_file")
-    p.set_defaults(func=cmd_escalate)
-
-    p = sub.add_parser("deliver", help="in-progress -> awaiting-merge")
-    p.add_argument("repo")
-    p.add_argument("issue")
-    p.add_argument("worker")
-    p.add_argument("result_file")
-    p.add_argument("pr_url", nargs="?", default="")
-    p.set_defaults(func=cmd_deliver)
-
-    p = sub.add_parser("release", help="in-progress -> queued (honest release)")
-    p.add_argument("repo")
-    p.add_argument("issue")
-    p.add_argument("worker")
-    p.add_argument("reason", nargs="?", default="")
-    p.set_defaults(func=cmd_release)
-
-    p = sub.add_parser(
-        "note",
-        help="post a free-form worker comment (disclaimer prepended, inert "
-             "`note` marker); changes no label or claim ref",
-    )
-    p.add_argument("repo")
-    p.add_argument("issue")
-    p.add_argument("worker")
-    p.add_argument("body_file")
-    p.set_defaults(func=cmd_note)
-
-    p = sub.add_parser("watch", help="poll the queue, print on a startable change")
-    p.add_argument("repo")
-    p.add_argument("project")
-    p.set_defaults(func=cmd_watch)
-
-    p = sub.add_parser(
-        "reap",
-        help="run the §6 reconcile stand-alone — reclaim repeatedly expired "
-             "claims, delete orphan locks (a drain does this itself)",
-    )
-    p.add_argument("repo")
-    p.add_argument("worker", nargs="?", default=RECONCILER_WORKER,
-                   help="who the reclaim comments are attributed to "
-                        f"(default: {RECONCILER_WORKER})")
-    p.add_argument("--ttl", type=int, default=None,
-                   help="lease TTL in seconds (default: KRAKEN_LEASE_TTL_SECONDS "
-                        f"env, else {LEASE_DEFAULT_TTL_SECONDS})")
-    p.set_defaults(func=cmd_reap)
-
-    p = sub.add_parser(
-        "validate",
-        help="flag a task missing its project label, Goal, or Acceptance by "
-             "commenting on it (debounced; informs only). `status` reports the "
-             "same three checks read-only, for the whole queue at once",
-    )
-    p.add_argument("repo")
-    p.add_argument("issue")
-    p.set_defaults(func=cmd_validate)
-
-    p = sub.add_parser(
-        "cleanup",
-        help="strip every state/non-identity label off a closed task, keeping "
-             "only kraken-task and project:<name> (cosmetic; nothing decides on "
-             "a closed task's labels)",
-    )
-    p.add_argument("repo")
-    p.add_argument("issue")
-    p.set_defaults(func=cmd_cleanup)
-
-    p = sub.add_parser(
-        "status",
-        help="read-only operator console: review / decision / in-flight queues",
-    )
-    p.add_argument("repo")
-    p.add_argument("--project", default="",
-                   help="scope every queue to project:<name> (default: whole queue)")
-    p.add_argument("--json", action="store_true",
-                   help="emit the stable machine-readable status schema")
-    p.set_defaults(func=cmd_status)
-
-    p = sub.add_parser(
-        "init",
-        help="stand up a coordination repo: private repo + bundled assets + "
-             "canonical labels (idempotent; touches no issues)",
-    )
-    p.add_argument("repo")
-    p.add_argument("--project", default="",
-                   help="also upsert the project:<name> routing label")
-    p.add_argument("--json", action="store_true",
-                   help="emit the machine-readable init report")
-    p.set_defaults(func=cmd_init)
-
-    p = sub.add_parser(
-        "contract",
-        help="print an authoritative contract literal (disclaimer / marker "
-             "vocabulary) for consumers to derive from — no network",
-    )
-    p.add_argument("field", choices=sorted(CONTRACT_FIELDS),
-                   help="which contract literal to print")
-    p.add_argument("--worker", default="<worker-name>",
-                   help="worker name to substitute into the disclaimer "
-                        "(default: the doc placeholder <worker-name>)")
-    p.add_argument("--repo", default="<coordination-repo>",
-                   help="coordination repo slug for the task-trailer field "
-                        "(default: the doc placeholder <coordination-repo>)")
-    p.add_argument("--issue", default="<issue>",
-                   help="task issue number for the task-trailer field "
-                        "(default: the doc placeholder <issue>)")
-    p.set_defaults(func=cmd_contract)
-
+    for cmd in COMMANDS:
+        p = sub.add_parser(cmd.name, help=cmd.help)
+        for name in cmd.args.split():
+            if name.endswith("?"):
+                p.add_argument(name[:-1], nargs="?", default="")
+            else:
+                p.add_argument(name)
+        for name, kwargs in cmd.opts:
+            p.add_argument(name, **kwargs)
+        p.set_defaults(func=cmd.func)
     return parser
 
 

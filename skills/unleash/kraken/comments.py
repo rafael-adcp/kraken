@@ -81,6 +81,19 @@ def task_trailer(repo: Repo, issue: Issue, worker: Worker) -> str:
     )
 
 
+def read_body_file(path: str) -> str:
+    """Read a file the way `$(cat file)` did: content with trailing newlines
+    stripped (interior preserved).
+
+    Here rather than beside one of its callers because both halves of the
+    write surface use it — the terminal transitions compose their prose from a
+    file, and so does `note` — and this module is where a comment's raw
+    material already lives. Putting it next to either one would make the other
+    import a module it otherwise has no business knowing."""
+    with open(path, encoding="utf-8") as fh:
+        return fh.read().rstrip("\n")
+
+
 def compose_comment(worker: Worker, prose: str, payload: Json) -> str:
     """Assemble a state-changing comment: disclaimer, human-facing prose, then the
     one hidden marker, blank-line separated so GitHub keeps them distinct."""

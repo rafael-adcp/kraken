@@ -21,25 +21,9 @@ from .refs import EMPTY_TREE_SHA, Refs, kraken_ref_items
 # at an orphan commit whose message is a `state` marker (§4), so one paginated
 # read of refs/kraken/ brings the whole queue's state back with the claim refs.
 #
-# Everything in it used to be DERIVED from the comment thread, and each
-# derivation paid for the same missing fact — nobody had written the state down:
-#
-#   "has the operator replied?"  -> classify every comment of a window as
-#                                   worker- or operator-authored
-#   "how many times has this     -> count `lease-expired` markers in that same
-#    lease expired?"               window, undercounting once it scrolled
-#   "where is the delivery?"     -> the newest `delivered` marker's `pr`, with a
-#                                   regex over the prose behind it
-#
-# The record replaces all three with fields. `comments` is the anchor of the
-# first: the count the thread carried when the transition put the task down, so
-# "anything said since" is one integer against another — and the total rides the
-# queue walk, so the derivation costs no call and opens no comment (§6).
-#
-# It is NOT a compare-and-swap. The lease already serializes every writer and
-# §5.3 makes each one prove it before writing, so a second lock over a lock would
-# only be a second thing to reconcile. A writer creates the ref when it is absent
-# and force-updates it when it is present.
+# It is NOT a compare-and-swap: a writer creates the ref when it is absent and
+# force-updates it when it is present. The lease is what serializes writers
+# (§5.3) — see HISTORY.md §3.1 for why a second lock would buy nothing.
 
 STATE_REF_PREFIX = "refs/kraken/state/"
 
@@ -130,16 +114,26 @@ class TaskState:
         requeued, and holds nothing."""
         return self.state in HELD_LABELS
 
-    def requeued(self, total: int) -> bool:
+    def requeued(self, total: int | None) -> bool:
         """Whether a comment has arrived since this record was written — the
         whole of §6's requeue derivation, and the reason it costs no call: the
         total rides the queue walk, and this is the comparison.
 
         Only a held record can be requeued. A `queued` one is not holding
-        anything to lift."""
-        return self.held_state and total > self.comments
+        anything to lift.
 
-    def holds(self, total: int) -> bool:
+        `total` is None when the count could not be read — `comment_total_of`
+        answers that for a REST issue object whose field is missing. It reads as
+        REQUEUED, the same direction `_comment_total` floors a lost GraphQL field
+        to 0, and for the same reason: erring toward "the thread moved on" offers
+        a task whose worker then finds nothing to do and escalates (§6), while
+        erring the other way buries a delivery the operator asked to reopen and
+        tells nobody."""
+        if not self.held_state:
+            return False
+        return True if total is None else total > self.comments
+
+    def holds(self, total: int | None) -> bool:
         """Whether this record still holds the task against a live comment
         total. The single question the startable filter, the claim guard and the
         console all ask, so the derivation cannot drift into three copies."""
@@ -229,11 +223,11 @@ def _as_int(value: object) -> int:
     return max(0, int(value))
 
 
-def holding_state(record: TaskState, total: int,
+def holding_state(record: TaskState, total: int | None,
                   held_labels: Iterable[str] = ()) -> str | None:
     """The state holding a task — `needs-decision`, `awaiting-merge`, or None
-    when nothing is (PROTOCOL.md §3.1). The whole of protocol/9's read rule, in
-    one pure function, because three callers ask it from three different reads:
+    when nothing is (PROTOCOL.md §3.1). The whole of §3.1's read rule, in one
+    pure function, because three callers ask it from three different reads:
     the startable filter off the queue walk, the claim guard off one issue fetch,
     and the console off the same walk again.
 
@@ -299,6 +293,28 @@ class States:
             if items is None:
                 return None
         return state_ref_shas(items)
+
+    def at(self, sha: Sha) -> TaskState:
+        """The record a sha already names — ONE commit read, for a caller that
+        got the sha from a `refs/kraken/` payload it had already fetched.
+
+        This is the half of `of` that is worth paying for on its own. Parsing the
+        state refs out of that payload is pure (`state_ref_shas`), so a caller
+        holding one knows which tasks have a record before spending anything;
+        what it does not have is the commit behind it. Resolving exactly the one
+        it cares about is how the §5 guard reads a record without the paginated
+        ref read `of` would repeat — see `claim.open_claim_of`.
+
+        `UNREADABLE_RECORD` only when the read did not land. A commit that does
+        not decode reads as `NO_RECORD` — the same answer `of` and `state_view`
+        give it, because a corrupt record is the case §6's rule 3 rewrites, and
+        a reader that refused on it would block the repair instead."""
+        meta = Refs(self.api).commit_meta([sha])
+        if meta is None:
+            return UNREADABLE_RECORD
+        entry = meta.get(sha) or {}
+        record = parse_state_commit(entry.get("message") or "", sha)
+        return NO_RECORD if record is None else record
 
     def of(self, issue: Issue) -> TaskState:
         """One task's record — `NO_RECORD` when it has none, `UNREADABLE_RECORD`

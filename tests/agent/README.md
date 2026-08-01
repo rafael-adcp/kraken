@@ -43,10 +43,9 @@ bash tests/agent/run-agent-tests.sh 04       # only names matching "04"
 
 Requires `claude` on `PATH`, `jq`, `git`, and `ANTHROPIC_API_KEY` (or a
 logged-in CLI plus `KRAKEN_AGENT_ASSUME_AUTH=1`). Missing any of these → the
-suite **skips** cleanly (exit 0), never a false failure. Runs automatically from
-the **pre-push hook** (`.githooks/pre-push`, Stage 2) when a push touches
-`skills/` or `tests/agent/`, driving your logged-in CLI (no paid API key).
-Bypass a given push with `SKIP_AGENT_TESTS=1 git push`.
+suite **skips** cleanly (exit 0), never a false failure. Wired into no hook or
+CI (real model runs, spends tokens) — run it by hand (`make test-agent`) when
+`skills/` or `tests/agent/` change, driving your logged-in CLI (no paid API key).
 
 ## Honest skips vs. failures
 
