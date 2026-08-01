@@ -204,8 +204,10 @@ instead.
 - Invoking this skill is my durable authorization to:
   (a) manage issues **in the coordination repo** — labels and comments, never closing or
   reopening a task ("done" is *delivered for review*; closing is mine or the merge's) —
-  and your own claim ref under `refs/kraken/claims/`: create, renew and delete your own
-  lease, and take over one that has expired;
+  and the refs under `refs/kraken/`: your own claim ref under `refs/kraken/claims/`
+  (create, renew and delete your own lease, and take over one that has expired), and the
+  state record under `refs/kraken/state/` for the task you hold, which every transition
+  that ends your turn writes;
   (b) in the task's work repo, **deliver as [`DELIVERY.md`](DELIVERY.md) describes**:
   create work branches, commit to them with the attribution trailers, push them, and
   open draft PRs.

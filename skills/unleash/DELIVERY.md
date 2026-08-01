@@ -10,8 +10,8 @@ task's **notes** say otherwise, every task ends as a pushed branch and a draft P
 ## The branch
 
 **First, check whether this task already has one.** A task can come back to the queue
-after it was delivered — I bounce a review by commenting the feedback and removing
-`awaiting-merge`, and the task requeues with its whole thread. The `brief.body` and the
+after it was delivered — I bounce a review by commenting the feedback, and that comment
+alone requeues the task with its whole thread. The `brief.body` and the
 issue thread will show the earlier delivery and its PR. When they do, **continue on that
 branch and update that PR**: opening a second branch and a second draft PR for one task
 splits the review and leaves an orphan PR behind.

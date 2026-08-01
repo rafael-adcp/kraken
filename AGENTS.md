@@ -13,8 +13,9 @@ loop around `kraken.py next-action` — **no deltas either**.
 ## Your operating contract — read these, then follow them
 
 1. [`PROTOCOL.md`](PROTOCOL.md) — the normative wire contract (`kraken-protocol/9`): the
-   label state machine, the hidden `<!-- kraken {...} -->` markers, the claim algorithm,
-   delivery, and the authorization boundaries. Agent-agnostic already.
+   state record and the label state machine it projects, the hidden
+   `<!-- kraken {...} -->` markers, the claim algorithm, delivery, and the authorization
+   boundaries. Agent-agnostic already.
 2. [`skills/unleash/SKILL.md`](skills/unleash/SKILL.md) — how a worker *executes* that
    contract. **Read it in full and follow it.** Every transition runs through the bundled
    [`skills/unleash/kraken.py`](skills/unleash/kraken.py) — the **same** program the
