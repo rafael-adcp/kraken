@@ -362,6 +362,18 @@ delivered, the result with the acceptance check executed, and the close:
 
 <img src="images/pilot-task.png" width="720" alt="A kraken task issue timeline: claim comment, assumptions, draft PR link, result comment, and close">
 
+
+
+## FAQ
+
+<details>
+<summary><b>Doesn't this already exist — Copilot, Claude cloud agents, CI?</b></summary>
+
+Partly, and for a single GitHub repo with no local services those are simpler —
+say so and use them. Kraken's edge is the prepared environment, GitLab/private
+work repos, and a fan-out of named, audited workers. The honest side-by-side can
+be found below.
+
 ## Why not just use X?
 
 | Alternative | Coordination primitive | Infra required | Agent-agnostic | Prefer it when |
@@ -411,16 +423,6 @@ any tool that follows the protocol can drain it. **Prefer `claude-code-action`
 when** your automation is CI-shaped and a disposable runner is the correct
 environment; prefer Kraken when the environment is the point and you want no
 lock to a single runner or vendor.
-
-## FAQ
-
-<details>
-<summary><b>Doesn't this already exist — Copilot, Claude cloud agents, CI?</b></summary>
-
-Partly, and for a single GitHub repo with no local services those are simpler —
-say so and use them. Kraken's edge is the prepared environment, GitLab/private
-work repos, and a fan-out of named, audited workers. The honest side-by-side is
-[Why not just use X?](#why-not-just-use-x) above.
 
 </details>
 
