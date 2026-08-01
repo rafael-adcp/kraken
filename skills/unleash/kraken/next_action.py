@@ -12,15 +12,16 @@ from .contract import (
     EXIT_TRANSPORT, EXIT_UNKNOWN_PROJECT, Envelope, Epoch, Gen, Issue, Json,
     Repo, Worker, diag, diagnostics_on_stderr
 )
-from .transport import Api
+from .transport import Api, comment_total_of
 from .lease import (
     Lease, UNREADABLE_LEASE, clear_claim_state, format_iso,
     lease_renew_seconds, lease_ttl_seconds, open_claim_record, write_claim_state
 )
 from .refs import Refs
+from .state import NO_RECORD, States, TaskState
 from .queue import is_empty_section, section_body
 from .render import render_next_action
-from .claim import acquire_next
+from .claim import acquire_next, claim_is_moot
 
 # --- subcommand: next-action -------------------------------------------------
 #
@@ -200,20 +201,28 @@ def next_action_envelope(action: str, repo: Repo, worker: Worker, *,
     return NextActionEnvelope(repo, worker, script).build(action, **fields)
 
 
-def issue_is_finished(issue_obj: Json | None) -> bool:
+def issue_is_finished(issue_obj: Json | None, record: TaskState = NO_RECORD,
+                      ) -> bool:
     """Whether an issue has left the state where "keep executing" makes sense:
-    closed, or carrying a terminal held label. A worker whose state file still
-    names such a task already finished with it — the transition landed and only
-    the local scratch file lagged."""
+    closed, or already in a held state. A worker whose scratch file still names
+    such a task already finished with it — the transition landed and only the
+    local file lagged.
+
+    The held half is `claim_is_moot`, which is `holding_state`, which is §3.1:
+    the record decides, and the labels are consulted only for a task that has
+    none. This used to read the labels outright, which made a delivered task the
+    operator requeued by commenting look finished — the badge still says
+    `awaiting-merge` until somebody claims it — and the worker would drop a task
+    the queue had just handed back."""
     if str((issue_obj or {}).get("state", "")).upper() == "CLOSED":
         return True
     names = {lbl.get("name", "") for lbl in (issue_obj or {}).get("labels", [])}
-    return bool(names & {"needs-decision", "awaiting-merge"})
+    return claim_is_moot(record, comment_total_of(issue_obj or {}), names)
 
 
 def resume_verdict(
     record: ClaimRecord, repo: Repo, worker: Worker, head: Lease,
-    issue_obj: Json | None,
+    issue_obj: Json | None, state: TaskState = NO_RECORD,
 ) -> tuple[str, Json]:
     """Decide what a recorded open claim is worth, as a pure function of what was
     observed. Returns `(verdict, detail)` where verdict is one of:
@@ -237,7 +246,13 @@ def resume_verdict(
     still resumes: §5.3 is explicit that an expired-but-unstolen lease may
     complete its transition — the caller is told to renew first. That is why no
     clock reaches this function: the verdict is about WHO holds the lease, never
-    how old it is, so there is no `now`/`ttl` here to get backwards."""
+    how old it is, so there is no `now`/`ttl` here to get backwards.
+
+    `state` is the task's state record (§3.1) — what decides "finished" for both
+    the not-ours and the still-ours branch. It defaults to `NO_RECORD`, which
+    falls back to the issue's labels exactly as §3.1 prescribes for a task that
+    has none, so a caller that could not read one degrades to the older
+    behaviour rather than to a wrong verdict."""
     if record["repo"] and record["repo"] != repo:
         return ("blocked", {"reason": "claim-elsewhere",
                             "detail": f"this worker holds {record['repo']}"
@@ -253,7 +268,7 @@ def resume_verdict(
                                     "before writing anything"})
 
     if not head.held_by(worker):
-        if issue_is_finished(issue_obj):
+        if issue_is_finished(issue_obj, state):
             # Whether this worker's own terminal transition deleted the ref or
             # the reconciler reclaimed it is not answerable from here — and the
             # right move is the same either way: the task is not ours and not in
@@ -268,7 +283,7 @@ def resume_verdict(
                             "detail": f"the lease is held by {holder} now — the "
                                       f"branch and PR you pushed stay, and "
                                       f"whoever holds the task inherits them"})
-    if issue_is_finished(issue_obj):
+    if issue_is_finished(issue_obj, state):
         # Our lease, but the task ended under us (an operator closed or answered
         # it). Nothing to resume; the lease frees itself within one TTL.
         return ("resolved", {"reason": "task-finished"})
@@ -348,8 +363,16 @@ class NextAction:
         return self._resumed(issue, detail, issue_obj)
 
     def _observe(self, record: ClaimRecord):
-        """What the verdict is decided from: the lease and the issue, or neither
-        when the record names a claim in a different repo."""
+        """What the verdict is decided from: the lease, the issue and the task's
+        state record — or none of them when the record names a claim in a
+        different repo.
+
+        The state record is what says whether this task is still ours to execute
+        (§3.1), so it is read here rather than inferred from the badge: a task
+        delivered and then requeued by an operator comment wears `awaiting-merge`
+        until somebody claims it, and resuming on the badge alone dropped it.
+        Read only once the lease proves readable, because a verdict of `retry`
+        needs nothing else."""
         if record["repo"] and record["repo"] != self.api.repo:
             # Nothing was read, and nothing needs to be: the repo mismatch
             # decides it.
@@ -358,10 +381,15 @@ class NextAction:
             return (verdict, detail, None)
         issue = record["issue"]
         head = Refs(self.api).head(issue)
-        # One GET serves both the finished-task check and the brief.
+        # One GET serves the finished-task check, the comment anchor and the brief.
         issue_obj = None if head.unknown else self.api.issue_detail(issue)
+        state = NO_RECORD if issue_obj is None else States(self.api).of(issue)
+        if state.unknown:
+            # The record did not read. Ambiguous is never a decision (§3.1) —
+            # the same answer an unreadable lease or issue gets.
+            issue_obj = None
         verdict, detail = resume_verdict(
-            record, self.api.repo, self.worker, head, issue_obj)
+            record, self.api.repo, self.worker, head, issue_obj, state)
         return (verdict, detail, issue_obj)
 
     def _refuse(self, action: str, record: ClaimRecord,

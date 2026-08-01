@@ -15,8 +15,10 @@ from .lease import (
 from .queue import cmd_list_startable
 from .reconcile import RECONCILER_WORKER, cmd_reap
 from .claim import (
-    cmd_claim, cmd_claim_next, cmd_deliver, cmd_escalate, cmd_heartbeat,
-    cmd_note, cmd_release
+    cmd_claim, cmd_claim_next, cmd_heartbeat, cmd_note
+)
+from .terminal import (
+    cmd_deliver, cmd_escalate, cmd_release
 )
 from .next_action import NEXT_ACTIONS, cmd_next_action
 from .watch import cmd_watch

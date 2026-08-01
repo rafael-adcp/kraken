@@ -1931,9 +1931,15 @@ def ref_head(worker="w1", epoch=1000.0, gen=1):
                         gens=tuple(range(1, gen + 1)))
 
 
-def issue_obj(state="open", labels=("kraken-task", "in-progress")):
-    return {"state": state, "title": "t", "body": "b",
+def issue_obj(state="open", labels=("kraken-task", "in-progress"), comments=0):
+    return {"state": state, "title": "t", "body": "b", "comments": comments,
             "labels": [{"name": n} for n in labels]}
+
+
+def task_state(state, comments, **kw):
+    """A state record as a transition would have written it (PROTOCOL.md §3.1)."""
+    return kraken.TaskState(state=state, worker="w1", comments=comments,
+                            recorded=True, **kw)
 
 
 class ResumeVerdictTests(unittest.TestCase):
@@ -1946,11 +1952,11 @@ class ResumeVerdictTests(unittest.TestCase):
     DEFAULT = object()
 
     def verdict(self, *, record=None, repo="OWNER/tasks", worker="w1",
-                head=DEFAULT, obj=DEFAULT):
+                head=DEFAULT, obj=DEFAULT, state=kraken.NO_RECORD):
         return kraken.resume_verdict(
             record or rec(), repo, worker,
             ref_head() if head is self.DEFAULT else head,
-            issue_obj() if obj is self.DEFAULT else obj)
+            issue_obj() if obj is self.DEFAULT else obj, state)
 
     def test_live_lease_of_ours_resumes(self):
         v, detail = self.verdict(head=ref_head(epoch=1900.0))
@@ -2000,6 +2006,53 @@ class ResumeVerdictTests(unittest.TestCase):
         v, detail = self.verdict(obj=issue_obj(state="closed"))
         self.assertEqual(v, "resolved", "a closed task has nothing to resume")
         self.assertEqual(detail["reason"], "task-finished")
+
+    def test_a_requeued_delivery_under_our_lease_resumes(self):
+        # §3.1 through the resume path. We delivered #7 and the ref delete was
+        # lost, so the lease is still ours; the operator then replied, which §6
+        # requeues. The badge still reads `awaiting-merge`, and reading it made
+        # this "resolved" — the worker dropped a task the queue had just handed
+        # back, silently, with nobody else holding it.
+        v, _ = self.verdict(
+            obj=issue_obj(labels=("kraken-task", "awaiting-merge"), comments=5),
+            state=task_state("awaiting-merge", 4))
+        self.assertEqual(v, "execute",
+                         "a requeued delivery is live work, not a finished task")
+
+    def test_an_unrequeued_delivery_under_our_lease_is_resolved(self):
+        # The other direction, unchanged: nothing was said after the delivery,
+        # so the record still holds and the turn really is over.
+        v, detail = self.verdict(
+            obj=issue_obj(labels=("kraken-task", "awaiting-merge"), comments=4),
+            state=task_state("awaiting-merge", 4))
+        self.assertEqual(v, "resolved", "an untouched delivery is finished")
+        self.assertEqual(detail["reason"], "task-finished")
+
+    def test_a_stale_badge_the_record_contradicts_resumes(self):
+        # The record says queued — a release whose label swap was lost. The
+        # badge must not end a turn the record says is still open.
+        v, _ = self.verdict(
+            obj=issue_obj(labels=("kraken-task", "awaiting-merge"), comments=9),
+            state=task_state(kraken.QUEUED, 9))
+        self.assertEqual(v, "execute", "a badge the record contradicts decides nothing")
+
+    def test_a_record_holds_even_when_the_badge_never_landed(self):
+        # The inverse: the transition wrote the record and lost the label swap.
+        v, detail = self.verdict(
+            obj=issue_obj(labels=("kraken-task", "in-progress"), comments=4),
+            state=task_state("needs-decision", 4))
+        self.assertEqual(v, "resolved", "the record is the state, badge or not")
+        self.assertEqual(detail["reason"], "task-finished")
+
+    def test_no_record_still_reads_the_badge(self):
+        # §3.1's sanctioned fallback — and the proof this change left a
+        # pre-protocol/9 queue behaving exactly as it did.
+        v, detail = self.verdict(
+            head=kraken.NO_LEASE,
+            obj=issue_obj(labels=("kraken-task", "awaiting-merge"),
+                          comments=999))
+        self.assertEqual(v, "resolved", "a task with no record is read off its badge")
+        self.assertEqual(detail["reason"], "already-resolved")
 
     def test_claim_in_another_repo_blocks(self):
         # One task at a time is repo-independent, and it is decided before any

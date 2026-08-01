@@ -50,10 +50,26 @@ review console read a delivery URL out of one. Both readers now go to the record
 and the claim is the ref CAS, the state is the record, and a comment decides
 nothing — which is the sentence protocol/4 wrote and protocol/9 finally earns.
 
-The requests balance out negative. `refs/kraken/state/` is paginated by the same
-`matching-refs/kraken/` read that already fetched the claim refs, and against that
-one enlarged read stand the whole comment-hydration pass and a paginated comment
-read per `awaiting-merge` task in the console.
+The requests balance out negative **on the read**, which is the side that runs
+hot. `refs/kraken/state/` is paginated by the same `matching-refs/kraken/` read
+that already fetched the claim refs, and against that one enlarged read stand the
+whole comment-hydration pass and a paginated comment read per `awaiting-merge`
+task in the console. A queue walk — the poll every watcher runs once a minute,
+per worker — got cheaper, and a 200-task queue stopped shipping comment bodies
+to answer a question about a handful of them.
+
+The **write** side got more expensive, and deliberately. Every terminal
+transition now reads the comment count back after its own comment lands (§3.1),
+reads the previous record to carry `expiries` and `pr` forward, and writes a
+commit plus a ref — on the order of five requests that protocol/8 did not make.
+That is the right trade because of where each cost falls: a transition runs
+**once per task**, at human pace, at the end of work that took minutes; the queue
+walk runs once a minute forever, times every worker in the fleet. Paying on the
+rare path to make the hot path cheaper and exact is the whole shape of this
+revision. It is also why the ordering in §3.1 is a MUST rather than an
+optimisation — those reads are what make `comments` an anchor nobody has to
+guess, and skipping them to save a call would put the derivation back into the
+business of inferring what it could have read.
 
 This is a backward-incompatible change — a protocol/8 reader derives the requeue by
 classifying a comment window and never looks at a record; a protocol/9 reader stops

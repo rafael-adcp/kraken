@@ -424,41 +424,54 @@ class Queue:
         got = self._ref_view(now, ttl, with_states=True)
         if got is None:
             return None
-        leases, commit_meta, states = got
+        leases, commit_meta, states, _state_shas = got
         return QueueRead(tasks, leases, commit_meta, states)
 
     def lease_view(self, now: Epoch | None = None, ttl: int | None = None,
-                   ) -> tuple[dict[Issue, Lease], CommitMeta] | None:
+                   ) -> tuple[dict[Issue, Lease], CommitMeta,
+                              dict[Issue, Sha]] | None:
         """The ladder half of `read`: every claim ref's lease, aged against the
-        server's clock, and the commit meta it was decoded from — WITHOUT the
-        issue walk and WITHOUT resolving the state records.
+        server's clock, the commit meta it was decoded from, and the state refs
+        as raw `{issue: sha}` — WITHOUT the issue walk and WITHOUT resolving
+        those records into `TaskState`s.
 
-        Returns `(leases, commit_meta)`, or None on transport failure.
+        Returns `(leases, commit_meta, state_shas)`, or None on transport failure.
 
         Separate from `read` because one question genuinely does not need the
         queue: "does this worker already hold a claim?" (§5) is answered by the
         LADDER, and the ladder is what arbitrates it. A caller that asks only
         that should not pay for a paginated issue walk to find out — see
-        `claim.open_claim_of`. It skips the records for the same reason: a worker
-        holding nothing has no record to read, so resolving the namespace's other
-        half would put a commit read on the one path that had none."""
+        `claim.open_claim_of`.
+
+        The state shas ride along because parsing them out of the payload is
+        pure — the matching-refs read already carried them, and `state_ref_shas`
+        spends nothing. What is NOT done here is resolving their commits: a
+        worker holding nothing needs no record, and batching every record of the
+        queue into this read would put a commit read on the one path that had
+        none. The caller resolves the one record it turns out to need
+        (`States.at`), which is zero or one per invocation."""
         got = self._ref_view(now, ttl, with_states=False)
         if got is None:
             return None
-        leases, commit_meta, _states = got
-        return (leases, commit_meta)
+        leases, commit_meta, _states, state_shas = got
+        return (leases, commit_meta, state_shas)
 
     def _ref_view(self, now: Epoch | None, ttl: int | None, *,
                   with_states: bool,
                   ) -> tuple[dict[Issue, Lease], CommitMeta,
-                             dict[Issue, TaskState]] | None:
+                             dict[Issue, TaskState], dict[Issue, Sha]] | None:
         """The `refs/kraken/` namespace, decoded: leases, the commit meta behind
-        them, and — when asked for — the state records. None on transport failure.
+        them, the state records when asked for, and the raw state shas either
+        way. None on transport failure.
 
         One matching-refs read serves both families, and ONE batched commit read
         resolves every sha either of them named, so adding records to a queue read
         costs no extra round trip: the aliases just get longer, and `Api.aliased`
-        already chunks them."""
+        already chunks them.
+
+        `with_states` buys the COMMITS, not the shas: naming which tasks have a
+        record is a pure parse of the payload above, so it happens either way and
+        a caller that wants one record can resolve it alone."""
         refs = Refs(self.api)
         items = kraken_ref_items(self.api)
         if items is None:
@@ -466,11 +479,12 @@ class Queue:
         claim_refs = refs.all(items)
         if claim_refs is None:
             return None
-        state_shas = States(self.api).all(items) if with_states else {}
+        state_shas = States(self.api).all(items)
         if state_shas is None:
             return None
         commit_meta = refs.commit_meta(
-            holder_shas(claim_refs) + sorted(state_shas.values()))
+            holder_shas(claim_refs)
+            + (sorted(state_shas.values()) if with_states else []))
         if commit_meta is None:
             return None
         # The server's clock, not this machine's (§5.1): the lease timestamps
@@ -479,7 +493,8 @@ class Queue:
         leases = lease_state(claim_refs, commit_meta,
                              self.api.server_now() if now is None else now,
                              lease_ttl_seconds(ttl))
-        return (leases, commit_meta, state_view(state_shas, commit_meta))
+        states = state_view(state_shas, commit_meta) if with_states else {}
+        return (leases, commit_meta, states, state_shas)
 
     def candidates(self, project: str, read: QueueRead | None = None,
                    ) -> list[Candidate] | None:
