@@ -18,7 +18,7 @@ class ClaimRaceTests(KrakenConformanceTest):
         self.mk_issue(7, "contested task", "kraken-task", "project:app")
 
         results = self.run_concurrent(
-            [("claim", "OWNER/tasks", 7, "w-a"), ("claim", "OWNER/tasks", 7, "w-b")],
+            [("claim", "acme/tasks", 7, "w-a"), ("claim", "acme/tasks", 7, "w-b")],
             env={"GH_STUB_BARRIER": "2"},
         )
         rc_a, rc_b = results[0].rc, results[1].rc

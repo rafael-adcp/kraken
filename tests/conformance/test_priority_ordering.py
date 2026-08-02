@@ -18,7 +18,7 @@ class PriorityOrderingTests(KrakenConformanceTest):
         self.mk_issue(9, "younger high-priority task",
                       "kraken-task", "project:app", "priority:high")
 
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w1")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w1")
         self.assertEqual(r.rc, 0, "clean claim-next exit")
         self.assertIn("claim-next: claimed issue=9 worker=w1", r.out.split("\n"),
                       "high-priority #9 not claimed before older normal #7")
@@ -27,7 +27,7 @@ class PriorityOrderingTests(KrakenConformanceTest):
                          "older normal #7 wrongly claimed before high-priority #9")
 
         # With #9 held, the next claim falls through to the older normal #7.
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w2")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w2")
         self.assertEqual(r.rc, 0, "second claim-next exit")
         self.assertIn("claim-next: claimed issue=7 worker=w2", r.out.split("\n"),
                       "normal #7 not claimed once the high-priority task is held")
@@ -41,7 +41,7 @@ class PriorityOrderingTests(KrakenConformanceTest):
         # high tier still leads despite losing the FIFO race overall.
         self.mk_issue(3, "oldest normal", "kraken-task", "project:app")
 
-        r = self.kraken("list-startable", "OWNER/tasks", "app")
+        r = self.kraken("list-startable", "acme/tasks", "app")
         self.assertEqual(r.rc, 0, "list-startable exit")
         numbers = [line.split("\t")[0] for line in r.out.split("\n") if line.strip()]
         self.assertEqual(numbers, ["5", "8", "3"],

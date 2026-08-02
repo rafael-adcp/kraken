@@ -191,8 +191,8 @@ reuses it through [`AGENTS.md`](AGENTS.md) with **no deltas at all**.
 ## The full walkthrough
 
 1. **Create the coordination repo** (once). Running the plugin? One command stands it
-   all up — verifies or creates the private repo, installs the task template and its four
-   coordination workflows, and creates
+   all up — verifies or creates the private repo, installs the task template, deletes
+   anything an earlier release installed to be executed server-side, and creates
    the canonical labels (idempotent, safe to re-run):
 
    ```

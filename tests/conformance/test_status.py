@@ -24,10 +24,10 @@ class StatusTests(KrakenConformanceTest):
     def test_status(self):
         # Review queue: #88 delivered with a MERGED PR (orphan), #91 OPEN PR.
         self.mk_issue(88, "orphan candidate", "kraken-task", "project:app")
-        self.deliver_state(88, pr="https://github.com/OWNER/work/pull/5")
+        self.deliver_state(88, pr="https://github.com/acme/work/pull/5")
         self.mk_pr(5, "MERGED", now_iso())
         self.mk_issue(91, "healthy delivery", "kraken-task", "project:app")
-        self.deliver_state(91, worker="w2", pr="https://github.com/OWNER/work/pull/6")
+        self.deliver_state(91, worker="w2", pr="https://github.com/acme/work/pull/6")
         self.mk_pr(6, "OPEN")
 
         # Decision queue.
@@ -52,11 +52,11 @@ class StatusTests(KrakenConformanceTest):
         snapshot = self._queue_snapshot()
 
         # --- 1. human console ------------------------------------------------
-        r = self.kraken("status", "OWNER/tasks")
+        r = self.kraken("status", "acme/tasks")
         self.assertEqual(r.rc, 0, "status human exit")
         out = r.out
         self.assertIn("#88  orphan candidate", out, "review item #88 missing")
-        self.assertIn("https://github.com/OWNER/work/pull/5", out, "PR link for #88 missing")
+        self.assertIn("https://github.com/acme/work/pull/5", out, "PR link for #88 missing")
         self.assertIn("#97  needs a human call", out, "decision item #97 missing")
 
         # Heartbeat age anchors to the machine line.
@@ -73,14 +73,14 @@ class StatusTests(KrakenConformanceTest):
         # Launch recon lists every project: label, incl. the empty one.
         for p in ("app", "idle", "web"):
             self.assertIn("--project %s" % p, out, "launch recon missing project:%s" % p)
-        self.assertIn("OWNER/tasks --worker-name <worker-name>", out, "launch line shape wrong")
+        self.assertIn("acme/tasks --worker-name <worker-name>", out, "launch line shape wrong")
 
         # --- 2. THE read-only guarantee: nothing was written -----------------
         self.assertEqual(self._queue_snapshot(), snapshot, "status mutated the queue — must be read-only")
         self.assertTrue(self.has_label(88, "awaiting-merge"), "status changed #88's label")
 
         # --- 3. --json: the documented stable schema -------------------------
-        js = json.loads(self.kraken("status", "OWNER/tasks", "--json").out)
+        js = json.loads(self.kraken("status", "acme/tasks", "--json").out)
         self.assertEqual(len(js["review_queue"]), 2, "json review_queue wrong length")
         self.assertIn(97, [d["number"] for d in js["decision_queue"]], "json decision_queue missing #97")
         self.assertEqual(js["orphans"], [88], "json orphans != [88]")
@@ -90,8 +90,8 @@ class StatusTests(KrakenConformanceTest):
                          "json #91 orphan flag not false")
         self.assertEqual(
             [d["pr_url"] for d in js["review_queue"]],
-            ["https://github.com/OWNER/work/pull/5",
-             "https://github.com/OWNER/work/pull/6"],
+            ["https://github.com/acme/work/pull/5",
+             "https://github.com/acme/work/pull/6"],
             "json review_queue must carry the record's PR")
         f99 = next(d for d in js["in_flight"] if d["number"] == 99)
         self.assertEqual(f99["worker"], "dead-worker", "json in_flight #99 worker wrong")
@@ -99,7 +99,7 @@ class StatusTests(KrakenConformanceTest):
         self.assertEqual(js["projects"], ["app", "idle", "web"], "json projects list wrong")
 
         # --- 4. --project scopes every list to that project ------------------
-        scoped = json.loads(self.kraken("status", "OWNER/tasks", "--project", "web", "--json").out)
+        scoped = json.loads(self.kraken("status", "acme/tasks", "--project", "web", "--json").out)
         self.assertEqual(scoped["review_queue"], [], "--project web should have empty review queue")
         self.assertEqual(scoped["decision_queue"], [], "--project web should have empty decision queue")
         self.assertEqual(scoped["in_flight"], [], "--project web should have empty in_flight")
@@ -114,8 +114,8 @@ class StatusTests(KrakenConformanceTest):
         # #1: a human quotes an unrelated PR of another repo BEFORE the delivery.
         # It is not the delivery, and nothing looks at the thread to find out.
         self.mk_issue(1, "record wins", "kraken-task", "project:app")
-        self.mk_comment(1, "cf. https://github.com/OWNER/other/pull/999 — unrelated")
-        self.deliver_state(1, pr="https://github.com/OWNER/work/pull/5")
+        self.mk_comment(1, "cf. https://github.com/acme/other/pull/999 — unrelated")
+        self.deliver_state(1, pr="https://github.com/acme/work/pull/5")
         self.mk_pr(5, "OPEN")
         self.mk_pr(999, "MERGED", now_iso())
         # #2: delivered with no PR at all — §8's "when there is one" (a work repo
@@ -124,9 +124,9 @@ class StatusTests(KrakenConformanceTest):
         self.mk_issue(2, "no pr", "kraken-task", "project:app")
         self.deliver_state(2)
 
-        r = self.kraken("status", "OWNER/tasks", "--project", "app")
+        r = self.kraken("status", "acme/tasks", "--project", "app")
         self.assertEqual(r.rc, 0, "status exit: %s" % r.err)
-        self.assertRegex(r.out, r"#1 .*https://github\.com/OWNER/work/pull/5",
+        self.assertRegex(r.out, r"#1 .*https://github\.com/acme/work/pull/5",
                          "#1 must report the record's PR")
         self.assertNotIn("other/pull/999", r.out,
                          "#1 reported a PR a human merely mentioned")
@@ -136,10 +136,10 @@ class StatusTests(KrakenConformanceTest):
         self.assertNotIn("no PR link recorded", r.out,
                          "a supported delivery must not read as a defect")
 
-        js = json.loads(self.kraken("status", "OWNER/tasks", "--project", "app",
+        js = json.loads(self.kraken("status", "acme/tasks", "--project", "app",
                                     "--json").out)
         links = {d["number"]: d["pr_url"] for d in js["review_queue"]}
-        self.assertEqual(links, {1: "https://github.com/OWNER/work/pull/5",
+        self.assertEqual(links, {1: "https://github.com/acme/work/pull/5",
                                  2: None}, "json pr_url wrong: %s" % links)
         self.assertNotIn("pr_source", js["review_queue"][0],
                          "the legacy-vs-marker source has nothing left to report")
@@ -151,17 +151,17 @@ class StatusTests(KrakenConformanceTest):
         review queue of any size costs zero comment requests."""
         for n in range(1, 6):
             self.mk_issue(n, "delivered #%d" % n, "kraken-task", "project:app")
-            self.deliver_state(n, pr="https://github.com/OWNER/work/pull/%d" % n)
+            self.deliver_state(n, pr="https://github.com/acme/work/pull/%d" % n)
             self.mk_pr(n, "OPEN")
             for i in range(30):
                 self.mk_comment(n, "review chatter %d" % i)
             # The thread grew after the delivery, so these are all requeued —
             # which is what the count says, and exactly why nothing reads them.
             self.mk_state_record(n, "awaiting-merge", worker="w1",
-                                 pr="https://github.com/OWNER/work/pull/%d" % n)
+                                 pr="https://github.com/acme/work/pull/%d" % n)
 
         self.truncate_log()
-        r = self.kraken("status", "OWNER/tasks", "--project", "app")
+        r = self.kraken("status", "acme/tasks", "--project", "app")
         self.assertEqual(r.rc, 0, "status exit: %s" % r.err)
         comment_reads = [l for l in self.log_lines()
                          if l.startswith("GET ") and "/comments" in l]
@@ -177,13 +177,13 @@ class StatusTests(KrakenConformanceTest):
         self.mk_issue(2, "alive", "kraken-task", "project:app", "in-progress")
         self.mk_claim_ref(2, "live-worker", age_hours=0, mtype="heartbeat", msg="going")
 
-        r = self.kraken("status", "OWNER/tasks", "--project", "app")
+        r = self.kraken("status", "acme/tasks", "--project", "app")
         self.assertEqual(r.rc, 0, "status exit: %s" % r.err)
         self.assertRegex(r.out, r"#1 .*lease expired — the next drain steals it")
         self.assertNotRegex(r.out, r"#2 .*lease expired",
                             "a live worker's lease was flagged expired")
 
-        js = json.loads(self.kraken("status", "OWNER/tasks", "--project", "app",
+        js = json.loads(self.kraken("status", "acme/tasks", "--project", "app",
                                     "--json").out)
         flags = {d["number"]: d["stale"] for d in js["in_flight"]}
         self.assertEqual(flags, {1: True, 2: False})
@@ -199,25 +199,25 @@ class StatusTests(KrakenConformanceTest):
         self.mk_issue(3, "no sections", "kraken-task", "project:app")
         self.mk_body(3, "just some prose")
 
-        r = self.kraken("status", "OWNER/tasks", "--project", "app")
+        r = self.kraken("status", "acme/tasks", "--project", "app")
         self.assertEqual(r.rc, 0, "status exit: %s" % r.err)
         self.assertIn("Queue hygiene", r.out)
 
-        js = json.loads(self.kraken("status", "OWNER/tasks", "--project", "app",
+        js = json.loads(self.kraken("status", "acme/tasks", "--project", "app",
                                     "--json").out)
         reported = {d["number"]: d["missing"] for d in js["queue_hygiene"]}
         self.assertEqual(reported, {2: ["project label"], 3: ["Goal", "Acceptance"]},
                          "hygiene report wrong: %s" % reported)
 
         # A compliant queue says nothing at all — no noise on the happy path.
-        js = json.loads(self.kraken("status", "OWNER/tasks", "--json").out)
+        js = json.loads(self.kraken("status", "acme/tasks", "--json").out)
         self.mk_body(2, good)
         self.mk_body(3, good)
         self.set_labels(2, ["kraken-task", "project:app"])
-        js = json.loads(self.kraken("status", "OWNER/tasks", "--json").out)
+        js = json.loads(self.kraken("status", "acme/tasks", "--json").out)
         self.assertEqual(js["queue_hygiene"], [])
         self.assertNotIn("Queue hygiene",
-                         self.kraken("status", "OWNER/tasks").out)
+                         self.kraken("status", "acme/tasks").out)
 
 
 if __name__ == "__main__":

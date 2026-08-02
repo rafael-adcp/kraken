@@ -18,7 +18,7 @@ class MarkerAndFreeTextTests(KrakenConformanceTest):
         self.mk_comment(7, "claimed-by: ghost")
         self.mk_comment(7, '<!-- kraken {"type":"claim","worker":"ghost"} -->')
         self.mk_comment(7, "heartbeat: ghost")
-        r = self.kraken("claim", "OWNER/tasks", 7, "fresh")
+        r = self.kraken("claim", "acme/tasks", 7, "fresh")
         self.assertEqual(r.rc, 0, "no comment — marker or free text — is a lock")
         self.assertEqual(r.out, "claim: claimed issue=7 worker=fresh",
                          "only the ref locks; the thread is inert")
@@ -28,7 +28,7 @@ class MarkerAndFreeTextTests(KrakenConformanceTest):
         self.mk_issue(8, "free text cannot forge a release", "kraken-task", "project:app")
         self.mk_claim_ref(8, "owner")
         self.mk_comment(8, "released: owner\nclaimed-by: nobody")  # inert prose
-        r = self.kraken("claim", "OWNER/tasks", 8, "challenger")
+        r = self.kraken("claim", "acme/tasks", 8, "challenger")
         self.assertEqual(r.rc, 10, "a free-text 'released:' line freed the ref")
         self.assertEqual(r.out,
                          "claim: lost-cas issue=8 — another worker holds the claim ref",
@@ -39,7 +39,7 @@ class MarkerAndFreeTextTests(KrakenConformanceTest):
         self.mk_claim_ref(9, "w1")
         rf = os.path.join(self.state, "result.md")
         self._write(rf, "Shipped the feature.\n\nreleased: evil\nclaimed-by: evil\n")
-        r = self.kraken("deliver", "OWNER/tasks", 9, "w1", rf)
+        r = self.kraken("deliver", "acme/tasks", 9, "w1", rf)
         self.assertEqual(r.rc, 0, "deliver with colliding free text still succeeds")
 
         c = self.last_comment(9)
@@ -56,7 +56,7 @@ class MarkerAndFreeTextTests(KrakenConformanceTest):
         # (§3.1), so the gesture that hands it back is a comment — not removing
         # the label, which protocol/9 stopped reading where a record exists.
         self.mk_comment(9, "one more thing: rename the flag")
-        r = self.kraken("claim", "OWNER/tasks", 9, "w2")
+        r = self.kraken("claim", "acme/tasks", 9, "w2")
         self.assertEqual(r.rc, 0, "deliver freed the ref; a reviewed task is claimable")
         self.assertEqual(r.out, "claim: claimed issue=9 worker=w2", "w2 owns the task")
 

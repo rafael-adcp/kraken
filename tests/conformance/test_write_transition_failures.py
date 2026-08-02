@@ -16,7 +16,7 @@ class WriteTransitionFailureTests(KrakenConformanceTest):
         self.mk_claim_ref(7, "w1")
         q = os.path.join(self.state, "q.md")
         self._write(q, "which way?\n")
-        r = self.kraken("escalate", "OWNER/tasks", 7, "w1", q, fail=r"POST \S*/comments")
+        r = self.kraken("escalate", "acme/tasks", 7, "w1", q, fail=r"POST \S*/comments")
         self.assertEqual(r.rc, 20, "escalate exit on comment failure")
         self.assertEqual(r.out, "escalate: gh-failure issue=7 stage=comment", "escalate failure line")
         self.assertTrue(self.has_label(7, "in-progress"), "escalate touched labels before the comment landed")
@@ -24,7 +24,7 @@ class WriteTransitionFailureTests(KrakenConformanceTest):
         self.assertTrue(self.claim_ref_exists(7), "escalate freed the lock despite comment failure")
 
         # escalate: label swap fails -> comment landed, task still held by in-progress.
-        r = self.kraken("escalate", "OWNER/tasks", 7, "w1", q, fail=r"/labels")
+        r = self.kraken("escalate", "acme/tasks", 7, "w1", q, fail=r"/labels")
         self.assertEqual(r.rc, 20, "escalate exit on label failure")
         self.assertEqual(r.out, "escalate: gh-failure issue=7 stage=labels", "escalate label-failure line")
         self.assertTrue(self.has_label(7, "in-progress"), "task lost in-progress on a failed swap")
@@ -32,7 +32,7 @@ class WriteTransitionFailureTests(KrakenConformanceTest):
 
         # escalate: ref delete fails -> the lock outlives a half-release; the
         # reaper's orphan-lock rule (needs-decision + a live ref) mops it up.
-        r = self.kraken("escalate", "OWNER/tasks", 7, "w1", q, fail=r"DELETE \S*/git/refs")
+        r = self.kraken("escalate", "acme/tasks", 7, "w1", q, fail=r"DELETE \S*/git/refs")
         self.assertEqual(r.rc, 20, "escalate exit on ref-delete failure")
         self.assertEqual(r.out, "escalate: gh-failure issue=7 stage=ref", "escalate ref-failure line")
         self.assertTrue(self.claim_ref_exists(7), "ref should survive its own failed delete")
@@ -42,7 +42,7 @@ class WriteTransitionFailureTests(KrakenConformanceTest):
         self.mk_claim_ref(8, "w1")
         rf = os.path.join(self.state, "r.md")
         self._write(rf, "done, validated\n")
-        r = self.kraken("deliver", "OWNER/tasks", 8, "w1", rf, "https://x/pr/1", fail=r"/labels")
+        r = self.kraken("deliver", "acme/tasks", 8, "w1", rf, "https://x/pr/1", fail=r"/labels")
         self.assertEqual(r.rc, 20, "deliver exit on label failure")
         self.assertEqual(r.out, "deliver: gh-failure issue=8 stage=labels", "deliver label-failure line")
         self.assertTrue(self.has_label(8, "in-progress"), "task lost in-progress on a failed swap")
@@ -50,7 +50,7 @@ class WriteTransitionFailureTests(KrakenConformanceTest):
         self.assertTrue(self.claim_ref_exists(8), "deliver freed the lock despite label failure")
 
         # heartbeat: the claim-commit POST fails -> 20, ref untouched.
-        r = self.kraken("heartbeat", "OWNER/tasks", 8, "w1", "still here", fail="git/commits")
+        r = self.kraken("heartbeat", "acme/tasks", 8, "w1", "still here", fail="git/commits")
         self.assertEqual(r.rc, 20, "heartbeat exit on commit failure")
         self.assertEqual(r.out, "heartbeat: gh-failure issue=8 stage=commit", "heartbeat commit-failure line")
 
@@ -59,7 +59,7 @@ class WriteTransitionFailureTests(KrakenConformanceTest):
         # was — the old generation, the old anchor — which is the safe
         # direction: the worker still holds the task, just closer to its TTL.
         held = self.claim_ref(8)
-        r = self.kraken("heartbeat", "OWNER/tasks", 8, "w1", "still here",
+        r = self.kraken("heartbeat", "acme/tasks", 8, "w1", "still here",
                         fail=r"POST \S*/git/refs")
         self.assertEqual(r.rc, 20, "heartbeat exit on ref failure")
         self.assertEqual(r.out, "heartbeat: gh-failure issue=8 stage=ref", "heartbeat ref-failure line")

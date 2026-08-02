@@ -67,6 +67,8 @@ class Envelope(_EnvelopeRequired, total=False):
 
     issue: Issue
     resumed: bool
+    bounced: bool    # the task came back: a comment landed past its anchor (§6)
+    pr: str          # where an earlier turn delivered (§8) — rework continues there
     reason: str      # a stable machine slug — branch on this
     detail: str      # the human sentence — read this, never match on it
     holding: Json    # {"repo", "issue"} of a claim that must be resolved first
@@ -77,13 +79,17 @@ class Envelope(_EnvelopeRequired, total=False):
 
 class ReconcileAction(TypedDict, total=False):
     """One repair `reconcile_plan` decided on and `apply_reconcile` executes.
-    `held` rides only the `reclaim` rule (whether to also clear a stale badge)."""
+    `held` rides only the `reclaim` rule (whether to also clear a stale badge),
+    and `state`/`comments` only `migrate` (the record its label implies)."""
 
-    rule: str        # "orphan-lock" | "reclaim"
+    rule: str        # "orphan-lock" | "orphan-state" | "reclaim" | "migrate"
+                     # | "re-anchor"
     issue: Issue
     reason: str
     gens: list[Gen]  # every rung to delete
     held: bool
+    state: str       # the held state a `migrate` writes down
+    comments: int    # the anchor that goes with it
 
 # A task carrying either of these is held, never startable. Both are
 # operator-facing states with no lock behind them, which is exactly why a label
@@ -125,6 +131,11 @@ PLUGIN_MANIFEST = os.path.join(
     SKILL_DIR, "..", "..", ".claude-plugin", "plugin.json")
 PLUGIN_VERSION_UNKNOWN = "unknown"
 
+# The spec, bundled beside the skill. It is normative prose, so nothing here
+# parses it — the one thing read out of it is a whole section, verbatim, for a
+# caller that has to hand the rules to something that cannot read a file.
+PROTOCOL_DOC = os.path.join(SKILL_DIR, "..", "..", "PROTOCOL.md")
+
 
 def plugin_version(manifest: str = PLUGIN_MANIFEST) -> str:
     """Plugin version from the bundled `.claude-plugin/plugin.json`, or
@@ -135,6 +146,37 @@ def plugin_version(manifest: str = PLUGIN_MANIFEST) -> str:
     except (OSError, ValueError):
         return PLUGIN_VERSION_UNKNOWN
     return version if isinstance(version, str) and version else PLUGIN_VERSION_UNKNOWN
+
+
+def protocol_section(number: int, doc: str = PROTOCOL_DOC) -> list[str]:
+    """One numbered PROTOCOL.md section — heading included, trailing blank lines
+    trimmed — as lines, or `[]` when the spec cannot be read or carries no such
+    section.
+
+    The alternative was asking the model to paste the prose it remembers, which
+    is how a rule ends up paraphrased at exactly the moment it matters. The
+    delimiter is the spec's own `## <n>.` heading, so a section that grows needs
+    no second edit here.
+
+    Empty is not a fallback text on purpose: a caller handing these lines to a
+    subagent with push access must be able to tell "here are the rules" from
+    "the rules did not load", and any placeholder prose would read as the
+    former."""
+    try:
+        with open(doc, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
+    opening = f"## {int(number)}. "
+    out: list[str] = []
+    for line in lines:
+        if out and line.startswith("## "):
+            break
+        if out or line.startswith(opening):
+            out.append(line)
+    while out and not out[-1].strip():
+        out.pop()
+    return out
 
 
 # --- diagnostic output -------------------------------------------------------

@@ -15,7 +15,7 @@ import unittest
 
 from harness import KrakenConformanceTest
 
-REPO_SLUG = "OWNER/tasks"
+REPO_SLUG = "acme/tasks"
 ISSUE = 7
 WORKER = "w1"
 # The agent's own identity line (this suite's driver is GitHub Copilot).

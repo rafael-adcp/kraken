@@ -28,7 +28,7 @@ class NextActionTests(KrakenConformanceTest):
         self.mk_issue(7, "oldest task", "kraken-task", "project:app")
         self.mk_body(7, "### Goal\nship it\n\n### Acceptance\nmake check passes")
 
-        r, env = self.envelope("OWNER/tasks", "app", "w1")
+        r, env = self.envelope("acme/tasks", "app", "w1")
         self.assertEqual(r.rc, 0, "a won claim exits 0")
         self.assertEqual(env["action"], "execute", "expected an execute verdict")
         self.assertEqual(env["issue"], 7, "wrong task in the envelope")
@@ -40,6 +40,13 @@ class NextActionTests(KrakenConformanceTest):
                          "an absent Notes section must read as empty, not as the "
                          "issue-form placeholder")
         self.assertTrue(self.has_label(7, "in-progress"), "claim not projected")
+
+        # A task nobody has delivered is not rework, and `bounced` says so
+        # rather than being absent: false is an answer, silence is not.
+        self.assertFalse(env["bounced"], "a first claim is not a bounce")
+        self.assertNotIn("pr", env,
+                         "a task with no delivery must carry no pr — an empty "
+                         "one reads as a PR the agent should go find")
 
         # The lease block is the renewal contract as numbers, not as an
         # instruction the model has to remember.
@@ -55,7 +62,7 @@ class NextActionTests(KrakenConformanceTest):
         # spaces) and every command names this repo, issue and worker.
         for name in ("renew", "note", "escalate", "deliver", "release"):
             command = env["then"][name]
-            self.assertIn("OWNER/tasks 7 w1", command,
+            self.assertIn("acme/tasks 7 w1", command,
                           "then.%s is not interpolated: %r" % (name, command))
             self.assertIn('python3 "/', command,
                           "then.%s does not carry a quoted absolute path: %r"
@@ -64,12 +71,12 @@ class NextActionTests(KrakenConformanceTest):
     def test_resume_does_not_reclaim(self):
         self.mk_issue(7, "a resumable task", "kraken-task", "project:app")
         self.mk_body(7, "### Goal\nship it")
-        _, first = self.envelope("OWNER/tasks", "app", "w1")
+        _, first = self.envelope("acme/tasks", "app", "w1")
         self.assertEqual(first["action"], "execute", "setup claim failed")
         comments = self.comment_count(7)
         generations = self.claim_generations(7)
 
-        r, env = self.envelope("OWNER/tasks", "app", "w1")
+        r, env = self.envelope("acme/tasks", "app", "w1")
         self.assertEqual(r.rc, 0, "resuming a held task exits 0")
         self.assertEqual(env["action"], "execute", "expected to resume")
         self.assertEqual(env["issue"], 7, "resumed the wrong task")
@@ -90,10 +97,44 @@ class NextActionTests(KrakenConformanceTest):
         self.assertEqual(self.claim_generations(7), generations,
                          "resuming advanced the claim ref")
 
+    def test_a_bounced_task_arrives_flagged_and_carrying_its_pr(self):
+        """The whole of c1: what the program derived, the envelope says.
+
+        A delivered task the operator commented on is requeued by derivation
+        (§6). The worker that takes it back is doing REWORK on an existing
+        branch — and both facts are integer arithmetic and a record field the
+        claim already read, so neither is left for the agent to rediscover by
+        reading the thread and guessing whose comment is newest."""
+        pr = "https://github.com/acme/work/pull/12"
+        self.mk_issue(7, "delivered once", "kraken-task", "project:app")
+        self.mk_body(7, "### Goal\nship it")
+        self.deliver_state(7, worker="w0", pr=pr)
+        self.mk_comment(7, "almost — the pagination is off by one, please fix")
+
+        r, env = self.envelope("acme/tasks", "app", "w1")
+        self.assertEqual(r.rc, 0, "a requeued task must be claimable")
+        self.assertEqual(env["action"], "execute", "expected an execute verdict")
+        self.assertEqual(env["issue"], 7, "claimed the wrong task")
+        self.assertTrue(env["bounced"],
+                        "a comment past the record's anchor is a bounce (§6) — "
+                        "the agent must not have to derive that from the thread")
+        self.assertEqual(env["pr"], pr,
+                         "the earlier delivery's PR was dropped; a worker "
+                         "without it opens a second, orphan PR")
+
+        # And it survives the claim: taking the task writes no record (§3.1), so
+        # every resume of it reports the same verdict its acquisition did. A
+        # bounce that evaporated on the first `next-action` after the claim
+        # would tell the agent halfway through that its rework was a new task.
+        _r, again = self.envelope("acme/tasks", "app", "w1")
+        self.assertTrue(again["resumed"], "setup: expected a resume")
+        self.assertTrue(again["bounced"], "the bounce did not survive the claim")
+        self.assertEqual(again["pr"], pr, "the resume dropped the delivery URL")
+
     def test_stolen_lease_is_abandoned_without_writing(self):
         self.mk_issue(7, "task", "kraken-task", "project:app")
         self.mk_body(7, "### Goal\nship it")
-        _, env = self.envelope("OWNER/tasks", "app", "w1")
+        _, env = self.envelope("acme/tasks", "app", "w1")
         self.assertEqual(env["action"], "execute", "setup claim failed")
         comments = self.comment_count(7)
 
@@ -101,7 +142,7 @@ class NextActionTests(KrakenConformanceTest):
         # w1's own ref surviving proves nothing (PROTOCOL.md §5.3).
         self.mk_claim_ref(7, "w-thief", gen=2)
 
-        r, env = self.envelope("OWNER/tasks", "app", "w1")
+        r, env = self.envelope("acme/tasks", "app", "w1")
         self.assertEqual(r.rc, 10, "a stolen lease exits 10")
         self.assertEqual(env["action"], "abandon", "expected an abandon verdict")
         self.assertEqual(env["reason"], "lease-stolen", "wrong abandon reason")
@@ -125,9 +166,9 @@ class NextActionTests(KrakenConformanceTest):
         self.mk_body(9, "### Goal\nthe next one")
         os.makedirs(self.kraken_state_dir, exist_ok=True)
         with open(self.claim_state_file("w1"), "w", encoding="utf-8") as fh:
-            json.dump({"repo": "OWNER/tasks", "issue": "7", "worker": "w1"}, fh)
+            json.dump({"repo": "acme/tasks", "issue": "7", "worker": "w1"}, fh)
 
-        r, env = self.envelope("OWNER/tasks", "app", "w1")
+        r, env = self.envelope("acme/tasks", "app", "w1")
         self.assertEqual(r.rc, 0, "a resolved claim must not stall the drain")
         self.assertEqual(env["action"], "execute", "expected to move on")
         self.assertEqual(env["issue"], 9, "did not move on to the next task")
@@ -142,29 +183,29 @@ class NextActionTests(KrakenConformanceTest):
         self.mk_issue(9, "a task here", "kraken-task", "project:app")
         os.makedirs(self.kraken_state_dir, exist_ok=True)
         with open(self.claim_state_file("w1"), "w", encoding="utf-8") as fh:
-            json.dump({"repo": "OWNER/other", "issue": "42", "worker": "w1"}, fh)
+            json.dump({"repo": "acme/other", "issue": "42", "worker": "w1"}, fh)
 
-        r, env = self.envelope("OWNER/tasks", "app", "w1")
+        r, env = self.envelope("acme/tasks", "app", "w1")
         self.assertEqual(r.rc, 11, "a claim held elsewhere exits 11")
         self.assertEqual(env["action"], "blocked", "expected a blocked verdict")
-        self.assertEqual(env["holding"], {"repo": "OWNER/other", "issue": 42},
+        self.assertEqual(env["holding"], {"repo": "acme/other", "issue": 42},
                          "the blocking claim is not named")
         self.assertNotIn("issue", env,
-                         "a bare top-level issue would read against OWNER/tasks")
-        self.assertIn("OWNER/other 42 w1", env["then"]["release"],
+                         "a bare top-level issue would read against acme/tasks")
+        self.assertIn("acme/other 42 w1", env["then"]["release"],
                       "then.release must target the held claim, not the drain")
         self.assertFalse(self.has_label(9, "in-progress"),
                          "a blocked worker must claim nothing")
 
     def test_idle_and_unknown_project(self):
         self.mk_label("project:app")
-        r, env = self.envelope("OWNER/tasks", "app", "w1")
+        r, env = self.envelope("acme/tasks", "app", "w1")
         self.assertEqual(r.rc, 3, "an empty queue exits 3")
         self.assertEqual(env["action"], "idle", "expected an idle verdict")
         self.assertEqual(env["reason"], "queue-empty", "wrong idle reason")
         self.assertNotIn("then", env, "idle offers no next write")
 
-        r, env = self.envelope("OWNER/tasks", "nosuch", "w1")
+        r, env = self.envelope("acme/tasks", "nosuch", "w1")
         self.assertEqual(r.rc, 13, "an unknown project exits 13")
         self.assertEqual(env["action"], "stop", "expected a stop verdict")
         self.assertEqual(env["reason"], "unknown-project", "wrong stop reason")
@@ -172,7 +213,7 @@ class NextActionTests(KrakenConformanceTest):
     def test_every_action_is_in_the_published_vocabulary(self):
         vocabulary = set(self.kraken("contract", "next-actions").lines)
         self.mk_issue(7, "task", "kraken-task", "project:app")
-        _, env = self.envelope("OWNER/tasks", "app", "w1")
+        _, env = self.envelope("acme/tasks", "app", "w1")
         self.assertIn(env["action"], vocabulary,
                       "next-action emitted a verdict `contract next-actions` "
                       "does not publish")

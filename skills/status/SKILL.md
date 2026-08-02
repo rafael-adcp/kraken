@@ -23,8 +23,9 @@ its output. You read the queue; you never touch it.
 The `OWNER/tasks` argument is REQUIRED — the coordination repo whose queue you report
 on. Missing? Do not guess. Ask for it and stop.
 
-If the slug matches `^OWNER/` or contains `<`/`>`, refuse: it looks like the template
-placeholder — substitute your real `owner/repo` and re-run.
+A slug that is still the doc placeholder (`OWNER/...`, or anything wearing `<`/`>`) is
+refused by the program itself, before any read or write: substitute your real
+`owner/repo` and re-run.
 
 `--project <name>` is OPTIONAL here (unlike `unleash`). A worker needs project
 scoping because it runs in a prepared environment; a human checking the queue does not.
@@ -47,10 +48,10 @@ orchestration left to do by hand.
    It prints a ready-to-render human console. For a machine-readable snapshot
    (scripts, cron, a future `stats` over the timeline) add `--json` — see the schema
    below. The subcommand is **read-only**: it runs `gh` reads only (the batched
-   GraphQL queue walk, the claim refs plus their commit meta for in-flight
-   worker/lease-age, the paginated comment history for the awaiting-merge PR
-   link, `gh pr view` for the orphan check, `gh label list` for the recon) and
-   never writes.
+   GraphQL queue walk, the claim refs and state records plus their commit meta
+   for in-flight worker/lease-age and the delivery link, `gh pr view` for the
+   orphan check, `gh label list` for the recon) and never writes. It opens **no
+   comment thread at all**, whatever the queue's size.
 
 2. **Render its output.** The default output already matches the summary shape below —
    surface it as-is. Its exit code is `0` on success or `20` on a `gh`/network
@@ -61,7 +62,6 @@ orchestration left to do by hand.
 
      📋 Review queue (awaiting-merge) — N waiting for your merge
         #88  <title> → PR/MR link
-        #91  <title> → PR/MR link  (legacy: read from free text, no delivered marker)
         #94  <title> → review on the thread (no PR)
 
      ❓ Decision queue (needs-decision) — N waiting for your call
@@ -82,9 +82,11 @@ orchestration left to do by hand.
         /kraken:unleash OWNER/tasks --worker-name <worker-name> --project <name-2>
    ```
 
-   The PR link comes from the delivery's own `pr` field (PROTOCOL.md §8). The
-   `legacy:` tag on a review line means no `delivered` marker carried one and the link
-   was read off the thread's prose — treat it as a guess and confirm before merging.
+   The PR link comes from the task's state record (PROTOCOL.md §3.1, §8) and from
+   nowhere else — there is no prose fallback to second-guess. A line reading
+   "review on the thread (no PR)" is not a missing link: §8 records the field
+   "when there is one", so a work repo that takes no push delivers the diff on the
+   thread and the issue itself is the review target.
 
    The lease age is anchored to the worker's **claim ref commit date** (the
    `claim`/`heartbeat` commit on the highest `refs/kraken/claims/<issue>/<gen>`),
@@ -137,8 +139,8 @@ guess, so there is nothing left to report.
 ## Authorization boundaries
 
 - Read-only. `kraken.py status` runs `gh` reads (`api graphql`, `git/matching-refs`
-  for the claim refs, the paginated `issues/*/comments`, `pr view`, `label list`)
-  and prints a summary.
+  for the claim refs and state records, `pr view`, `label list`) and prints a
+  summary.
 - It does NOT write, comment, change labels, close issues, or merge anything — not even
   the orphan it flags. Every action is mine; the output tells me what needs me.
 - It does NOT invoke `/kraken:unleash` on my behalf — the launch lines are copy-paste;

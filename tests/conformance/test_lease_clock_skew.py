@@ -30,7 +30,7 @@ class LeaseClockSkewTests(KrakenConformanceTest):
         self.mk_issue(1, "running", "kraken-task", "project:app", "in-progress")
         held = self.mk_claim_ref(1, "w-other", age_seconds=60)
 
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w-drain")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w-drain")
         self.assertEqual(r.rc, 3, "a live lease was stolen off a skewed clock: "
                                   "%s%s" % (r.out, r.err))
         self.assertEqual(self.claim_ref(1), held, "the live lease was replaced")
@@ -45,7 +45,7 @@ class LeaseClockSkewTests(KrakenConformanceTest):
         self.mk_issue(2, "abandoned", "kraken-task", "project:app", "in-progress")
         dead = self.mk_claim_ref(2, "w-dead", age_seconds=lease_ttl() + 60)
 
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w-drain")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w-drain")
         self.assertEqual(r.rc, 0, "an expired lease held the task off a skewed "
                                   "clock: %s%s" % (r.out, r.err))
         self.assertNotEqual(self.claim_ref(2), dead, "the expired lease survived")
@@ -58,7 +58,7 @@ class LeaseClockSkewTests(KrakenConformanceTest):
         self.mk_issue(3, "live", "kraken-task", "project:app", "in-progress")
         live = self.mk_claim_ref(3, "w-other", age_seconds=60)
 
-        r = self.kraken("claim", "OWNER/tasks", 3, "w-drain")
+        r = self.kraken("claim", "acme/tasks", 3, "w-drain")
         self.assertEqual(r.rc, 10, "the named claim probe took a live lease off "
                                    "a skewed clock: %s%s" % (r.out, r.err))
         self.assertEqual(self.claim_ref(3), live)
@@ -72,7 +72,7 @@ class LeaseClockSkewTests(KrakenConformanceTest):
         self.mk_claim_ref(4, "w-other", age_seconds=60, mtype="heartbeat",
                           msg="still going")
 
-        report = json.loads(self.kraken("status", "OWNER/tasks", "--json").out)
+        report = json.loads(self.kraken("status", "acme/tasks", "--json").out)
         rows = report["in_flight"]
         self.assertEqual([r["number"] for r in rows], [4], "the in-flight row is gone")
         self.assertFalse(rows[0]["stale"],
@@ -88,7 +88,7 @@ class LeaseClockSkewTests(KrakenConformanceTest):
         self.mk_issue(5, "mine", "kraken-task", "project:app", "in-progress")
         self.mk_claim_ref(5, "w-drain", age_seconds=60)
 
-        r = self.kraken("next-action", "OWNER/tasks", "app", "w-drain")
+        r = self.kraken("next-action", "acme/tasks", "app", "w-drain")
         env = json.loads(r.out)
         self.assertEqual(env["action"], "execute", "the held task did not resume: "
                                                    "%s%s" % (r.out, r.err))

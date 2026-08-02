@@ -124,11 +124,22 @@ class TaskState:
 
         `total` is None when the count could not be read — `comment_total_of`
         answers that for a REST issue object whose field is missing. It reads as
-        REQUEUED, the same direction `_comment_total` floors a lost GraphQL field
-        to 0, and for the same reason: erring toward "the thread moved on" offers
-        a task whose worker then finds nothing to do and escalates (§6), while
-        erring the other way buries a delivery the operator asked to reopen and
-        tells nobody."""
+        REQUEUED, which is the fail-open direction: erring toward "the thread
+        moved on" offers a task whose worker then finds nothing to do and
+        escalates (§6), while erring the other way buries a delivery the
+        operator asked to reopen and tells nobody.
+
+        A GraphQL walk that loses the field does NOT get that treatment —
+        `_comment_total` floors it to 0, which is below every anchor and so
+        fails CLOSED, toward held. The asymmetry is deliberate and load-bearing:
+        the walk reads the whole queue at once, so a fail-open there would offer
+        every held task in the repo on one bad response. §6's re-anchor repair
+        covers the other side, confirming over REST before it moves an anchor.
+
+        This comparison is also memoryless on purpose. It cannot tell a thread
+        that never had a reply from one whose comments were DELETED down past
+        the anchor, and it must not: the anchor is what §6's repair fixes, not
+        something a reader may reinterpret on the fly."""
         if not self.held_state:
             return False
         return True if total is None else total > self.comments
@@ -154,6 +165,19 @@ class TaskState:
             pr=pr if pr is not None else self.pr,
             recorded=True, known=True, sha=None,
         )
+
+    def re_anchored(self, comments: int) -> TaskState:
+        """The record §6's re-anchor repair should write: everything exactly as
+        it stands, with the `comments` anchor moved back onto a thread that
+        SHRANK below it.
+
+        Nothing else moves — not the state, not the worker, not the expiry
+        count, not the PR. The hold is deliberately NOT lifted: a deleted
+        comment is not an answer, and the repair only restores the *comparison*
+        so the operator's next reply requeues instead of being absorbed by an
+        anchor the thread can no longer reach."""
+        return dataclasses.replace(self, comments=int(comments),
+                                   recorded=True, known=True, sha=None)
 
     def stolen(self, worker: Worker) -> TaskState:
         """The record a steal should write: everything as it stood, with one

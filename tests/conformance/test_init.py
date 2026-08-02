@@ -32,7 +32,7 @@ class InitTests(KrakenConformanceTest):
     def test_init(self):
         # --- 1. fresh bootstrap: absent repo created private, assets + labels --
         self.truncate_log()
-        r = self.kraken("init", "OWNER/tasks", "--project", "app")
+        r = self.kraken("init", "acme/tasks", "--project", "app")
         self.assertEqual(r.rc, 0, "fresh init exit")
         self.assertIn("POST /user/repos", self.log_text(),
                       "fresh init did not create the repo")
@@ -56,7 +56,7 @@ class InitTests(KrakenConformanceTest):
 
         # --- 2. idempotent re-run: no repo create, no PUT --------------------
         self.truncate_log()
-        r = self.kraken("init", "OWNER/tasks", "--project", "app")
+        r = self.kraken("init", "acme/tasks", "--project", "app")
         self.assertEqual(r.rc, 0, "idempotent re-run exit")
         self.assertNotIn("POST /user/repos", self.log_text(), "re-run wrongly re-created the repo")
         self.assertNotIn("PUT ", self.log_text(), "re-run wrongly re-wrote an asset (PUT on unchanged file)")
@@ -71,7 +71,7 @@ class InitTests(KrakenConformanceTest):
         custom = os.path.join(self.state, "custom.yml")
         self._write(custom, "name: my hand-edited task form\n")
         self.mk_content(ASSET_DSTS[0], custom)
-        r = self.kraken("init", "OWNER/tasks")
+        r = self.kraken("init", "acme/tasks")
         self.assertEqual(r.rc, 0, "create-only exit")
         self.assertIn("init: asset %s (present)" % ASSET_DSTS[0], r.out)
         self.assertTrue(filecmp.cmp(self._contents(ASSET_DSTS[0]), custom, shallow=False),
@@ -83,7 +83,7 @@ class InitTests(KrakenConformanceTest):
         """Re-running init on a repo stood up by an older release is the
         migration: each retired workflow is deleted, so no server-side job keeps
         mutating labels under semantics the workers no longer implement."""
-        self.mk_repo("OWNER/tasks")
+        self.mk_repo("acme/tasks")
         for i, dst in enumerate(RETIRED_DSTS):
             vendored = os.path.join(self.state, "old-%d.yml" % i)
             # The bytes an older init installed: the bundled header is the
@@ -100,7 +100,7 @@ class InitTests(KrakenConformanceTest):
                             "coordination repo as\n# %s\nname: retired\n" % dst)
             self.mk_content(dst, vendored)
 
-        r = self.kraken("init", "OWNER/tasks")
+        r = self.kraken("init", "acme/tasks")
         self.assertEqual(r.rc, 0, "init exit with retired assets present")
         for dst in RETIRED_DSTS:
             self.assertIn("init: asset %s (removed)" % dst, r.out,
@@ -110,7 +110,7 @@ class InitTests(KrakenConformanceTest):
         self.assertIn("assets_removed=%d" % len(RETIRED_DSTS), r.out)
 
         # Idempotent: a second run finds nothing to prune and says removed=0.
-        r = self.kraken("init", "OWNER/tasks")
+        r = self.kraken("init", "acme/tasks")
         self.assertEqual(r.rc, 0, "second init exit")
         self.assertIn("assets_removed=0", r.out, "the prune is not idempotent")
 
@@ -118,12 +118,12 @@ class InitTests(KrakenConformanceTest):
         """The prune is gated on kraken's own header. An operator who wrote their
         own workflow at that path keeps it — a bootstrap command must never
         delete something it did not install."""
-        self.mk_repo("OWNER/tasks")
+        self.mk_repo("acme/tasks")
         mine = os.path.join(self.state, "mine.yml")
         self._write(mine, "name: my own nightly job\non:\n  schedule: []\n")
         self.mk_content(RETIRED_DST, mine)
 
-        r = self.kraken("init", "OWNER/tasks")
+        r = self.kraken("init", "acme/tasks")
         self.assertEqual(r.rc, 0, "init exit")
         self.assertIn("assets_removed=0", r.out)
         self.assertTrue(filecmp.cmp(self._contents(RETIRED_DST), mine, shallow=False),

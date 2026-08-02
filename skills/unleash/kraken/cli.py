@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import re
+import sys
 from typing import Callable, Sequence
 
-from .contract import EXIT_OK, PROTOCOL_VERSION
+from .contract import EXIT_OK, EXIT_USAGE, PROTOCOL_VERSION, protocol_section
 from .comments import MARKER_TYPES, disclaimer, task_trailer
 from .transport import Api
 from .lease import (
@@ -43,19 +45,51 @@ CONTRACT_FIELDS = {
     # cadence everywhere in one edit.
     "lease-ttl": lambda args: [str(lease_ttl_seconds())],
     "lease-renew": lambda args: [str(lease_renew_seconds())],
+    # The authorization boundaries (PROTOCOL.md §11) verbatim, for a driver that
+    # has to hand the rules to a subagent that will not read a file. Fetched
+    # rather than recited: prose a model pastes from memory is prose that drifts,
+    # and this is the one section where drifting means a worker with push access
+    # operating under rules nobody wrote.
+    "boundary": lambda args: protocol_section(11),
 }
 
 
 def cmd_contract(args: argparse.Namespace) -> int:
     """Print an authoritative contract literal (no network) — the single source of
     truth for the disclaimer format and marker vocabulary, so a format change lands
-    in one place."""
-    for line in CONTRACT_FIELDS[args.field](args):
+    in one place.
+
+    A field that produces NOTHING is a broken install, not an empty answer — the
+    spec was not bundled beside the skill, or was not readable. It exits like any
+    other invocation that cannot be served, so a caller that pipes this into a
+    prompt fails loudly instead of pasting a blank where the rules go."""
+    lines = CONTRACT_FIELDS[args.field](args)
+    if not lines:
+        print(f"kraken: contract {args.field} is unavailable — the bundled "
+              "PROTOCOL.md did not read; check the installation",
+              file=sys.stderr)
+        return EXIT_USAGE
+    for line in lines:
         print(line)
     return EXIT_OK
 
 
 # --- CLI ---------------------------------------------------------------------
+
+# The template placeholder, in the two shapes the docs write it: a leading
+# `OWNER/`, or an argument still wearing its `<angle brackets>`. Every SKILL.md
+# used to carry this guard as prose — three copies of one rule, enforced by a
+# model remembering to look — and the failure it guards against is a worker that
+# spends a drain getting 404s from a repo that was never a repo. Here it is one
+# refusal, before anything is read or written.
+PLACEHOLDER_SLUG = re.compile(r"^OWNER/|[<>]")
+
+
+def placeholder_slug(repo: str) -> bool:
+    """Whether a repo slug is the documentation's placeholder rather than a
+    repo. Deliberately not a validity check: a real slug this rejects does not
+    exist, and a wrong-but-plausible one is GitHub's 404 to give, not ours."""
+    return bool(PLACEHOLDER_SLUG.search(repo))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -93,7 +127,8 @@ COMMANDS = (
             "repo project worker",
             (("--json", dict(
                 action="store_true",
-                help="emit the won claim as a JSON object {issue,title,body}")),)),
+                help="emit the won claim as a JSON object "
+                     "{issue,title,body,bounced,pr}")),)),
 
     Command("next-action", cmd_next_action,
             "the driver loop in one call: resume the task this worker holds, "
@@ -213,13 +248,24 @@ def build_parser() -> argparse.ArgumentParser:
                 p.add_argument(name)
         for name, kwargs in cmd.opts:
             p.add_argument(name, **kwargs)
-        p.set_defaults(func=cmd.func)
+        # Whether this command's `repo` is the coordination-repo slug it will
+        # talk to, rather than a string it only prints. `contract` takes one as
+        # an OPTION and defaults it to the doc placeholder on purpose, so the
+        # guard below is keyed on the positional — the argument that is always a
+        # real repo — and any later command with one is covered by declaring it.
+        p.set_defaults(func=cmd.func, repo_is_target="repo" in cmd.args.split())
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "repo_is_target", False) and placeholder_slug(args.repo):
+        # stderr, because `next-action` owns stdout for its envelope and a
+        # refusal that landed there would be parsed as one.
+        print(f"kraken: '{args.repo}' is the template placeholder, not a repo — "
+              "substitute your own owner/repo slug", file=sys.stderr)
+        return EXIT_USAGE
     # The client every subcommand talks through, built ONCE here and carried on
     # the parsed args. Constructing it inside each `cmd_*` would give a test no
     # way to hand the program a stand-in short of rebinding a module attribute,

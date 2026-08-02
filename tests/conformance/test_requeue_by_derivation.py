@@ -20,12 +20,12 @@ from harness import KrakenConformanceTest, make_marker
 
 class RequeueByDerivationTests(KrakenConformanceTest):
     def startable(self):
-        r = self.kraken("list-startable", "OWNER/tasks", "app")
+        r = self.kraken("list-startable", "acme/tasks", "app")
         self.assertEqual(r.rc, 0, "list-startable exit: %s" % r.err)
         return {int(l.split("\t")[0]) for l in r.out.split("\n") if l.strip()}
 
     def decision_queue(self):
-        r = self.kraken("status", "OWNER/tasks", "--project", "app", "--json")
+        r = self.kraken("status", "acme/tasks", "--project", "app", "--json")
         self.assertEqual(r.rc, 0, "status exit: %s" % r.err)
         return {i["number"] for i in json.loads(r.out)["decision_queue"]}
 
@@ -143,7 +143,7 @@ class RequeueByDerivationTests(KrakenConformanceTest):
         self.deliver_state(16)
         self.mk_comment(16, "almost — rename the flag and re-push")
 
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w3")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w3")
         self.assertEqual(r.rc, 0, "claim-next on a reviewed delivery: %s%s"
                          % (r.out, r.err))
         self.assertIn("claim-next: claimed issue=16 worker=w3", r.out.split("\n"))
@@ -162,7 +162,7 @@ class RequeueByDerivationTests(KrakenConformanceTest):
         self.escalate(11)
         self.mk_comment(11, "option B, go")
 
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w2")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w2")
         self.assertEqual(r.rc, 0, "claim-next on a requeued task: %s%s" % (r.out, r.err))
         self.assertIn("claim-next: claimed issue=11 worker=w2", r.out.split("\n"))
         self.assertTrue(self.has_label(11, "in-progress"), "in-progress not projected")
@@ -217,6 +217,63 @@ class RequeueByDerivationTests(KrakenConformanceTest):
         self.set_labels(19, ["kraken-task", "project:app"])
         self.assertNotIn(19, self.startable(),
                          "a delivery whose badge never landed was offered again")
+
+    # --- §6 rule 4: an anchor the thread can no longer reach -----------------
+
+    def test_a_deletion_buries_every_reply_until_the_anchor_is_repaired(self):
+        """The failure the re-anchor rule exists for, end to end.
+
+        The derivation is memoryless — it compares the live total against the
+        frozen anchor and cannot tell an untouched thread from one whose
+        comments were DELETED. Once a deletion puts the anchor above the thread,
+        `total > anchor` is false for the operator's answer too, and the task
+        sits held while they believe they replied. Nobody is watching that
+        silence except the operator, which is the class protocol/8 was written
+        to eliminate."""
+        self.mk_issue(21, "answered into the void", "kraken-task", "project:app",
+                      "needs-decision")
+        for i in range(3):
+            self.mk_comment(21, "noise %d" % i)
+        # The anchor a transition froze at 5, over a thread now carrying 3: two
+        # comments were deleted after it. (Seeding the anchor IS the deletion —
+        # the record is the only place the old count survives.)
+        self.mk_state_record(21, "needs-decision", comments=5)
+        self.assertNotIn(21, self.startable(),
+                         "held, and correctly so — nothing has been said since")
+
+        self.mk_comment(21, "option B, go")
+        self.assertNotIn(21, self.startable(),
+                         "PINS THE BUG: 4 > 5 is false, so the answer is "
+                         "absorbed and the task stays buried")
+
+        r = self.kraken("reap", "acme/tasks", "w1")
+        self.assertEqual(r.rc, 0, "reap exit: %s" % r.err)
+        self.assertEqual(int(self.state_record(21)["comments"]), 4,
+                         "the anchor was not moved back onto the thread")
+        self.assertEqual(self.state_record(21)["state"], "needs-decision",
+                         "re-anchoring must not lift the hold — a deleted "
+                         "comment is not an answer")
+        self.assertNotIn(21, self.startable(),
+                         "the repair restores the comparison; it does not "
+                         "recover the reply it already absorbed")
+
+        self.mk_comment(21, "seriously, option B")
+        self.assertIn(21, self.startable(),
+                      "the NEXT reply must be seen — that is what the repair buys")
+
+    def test_the_repair_is_idempotent_and_silent_on_a_healthy_queue(self):
+        """Two reaps in a row over a repaired task write nothing more, and a
+        task whose anchor is already reachable is never rewritten — otherwise
+        every drain would move an anchor and no requeue would survive it."""
+        self.mk_issue(22, "healthy", "kraken-task", "project:app", "awaiting-merge")
+        self.deliver_state(22)
+        before = self.state_record(22)
+
+        for _ in range(2):
+            self.assertEqual(self.kraken("reap", "acme/tasks", "w1").rc, 0)
+        self.assertEqual(self.state_record(22), before,
+                         "a reachable anchor was rewritten by the repair")
+        self.assertNotIn(22, self.startable(), "the delivery was un-held")
 
     def test_a_stale_badge_cannot_hold_a_task_the_record_released(self):
         """The inverse: a release whose label removal did not land leaves the

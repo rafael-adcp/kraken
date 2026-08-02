@@ -108,9 +108,11 @@ def comment_total_of(issue_obj: Json) -> int | None:
     is missing or not a number.
 
     Kept apart from `Api.comment_count` because the queue walk decodes the same
-    fact out of GraphQL's `comments { totalCount }` shape, and a count that
-    silently reads as 0 would requeue every held task at once. None means "not
-    answered" and every caller treats it as a failed read, never as zero."""
+    fact out of GraphQL's `comments { totalCount }` shape. None means "not
+    answered" and every caller treats it as a failed read, never as zero — a 0
+    here would be BELOW every anchor a transition ever wrote, so it would report
+    every held task as still held and bury the answers instead of surfacing
+    them (`TaskState.requeued` takes None the other way, toward offering)."""
     value = issue_obj.get("comments")
     if isinstance(value, bool) or not isinstance(value, int):
         return None

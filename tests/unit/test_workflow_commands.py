@@ -158,7 +158,7 @@ class ReapCommandTests(unittest.TestCase):
             return (204, "")
 
         return FakeApi(
-            "OWNER/tasks",
+            "acme/tasks",
             request=request,
             # The record's anchor: read back off the issue after the pass posts
             # its comment (§3.1). The applier's wiring is what is under test, not
@@ -279,15 +279,15 @@ class ReapCommandTests(unittest.TestCase):
         # answers the real walk with no issues and no claim refs.
         empty_walk = {"data": {"repository": {"issues": {
             "pageInfo": {"hasNextPage": False, "endCursor": ""}, "nodes": []}}}}
-        api = FakeApi("OWNER/tasks", graphql=lambda q: empty_walk,
+        api = FakeApi("acme/tasks", graphql=lambda q: empty_walk,
                       paginated=lambda path: [])
-        args = SimpleNamespace(repo="OWNER/tasks", worker="w", ttl=None, api=api)
+        args = SimpleNamespace(repo="acme/tasks", worker="w", ttl=None, api=api)
         buf = StringIO()
         with redirect_stdout(buf):
             rc = kraken.cmd_reap(args)
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertIn("reap: done leases=0 reclaimed=0 orphan_locks=0 "
-                      "orphan_states=0 migrated=0", buf.getvalue())
+                      "orphan_states=0 migrated=0 re_anchored=0", buf.getvalue())
 
 
 # --- the requeue derivation: one integer against another, no transport -------
@@ -482,14 +482,14 @@ class ValidateCommandTests(unittest.TestCase):
             "comment_records": lambda issue: [],
         }
         defaults.update(methods)
-        return FakeApi("OWNER/tasks", **defaults)
+        return FakeApi("acme/tasks", **defaults)
 
     def _run(self, issue, labels, body, prior_records=None):
         methods = {"issue_label_names": lambda i: labels,
                    "issue_body": lambda i: body}
         if prior_records is not None:
             methods["comment_records"] = lambda i: prior_records
-        args = SimpleNamespace(repo="OWNER/tasks", issue=str(issue),
+        args = SimpleNamespace(repo="acme/tasks", issue=str(issue),
                                api=self._api(**methods))
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_validate(args)
@@ -533,7 +533,7 @@ class ValidateCommandTests(unittest.TestCase):
 
     def test_transport_failure_on_labels_is_twenty(self):
         args = SimpleNamespace(
-            repo="OWNER/tasks", issue="1",
+            repo="acme/tasks", issue="1",
             api=self._api(issue_label_names=lambda i: None))
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_validate(args)
@@ -592,7 +592,7 @@ class CleanupCommandTests(unittest.TestCase):
             return (204, "")
 
         return FakeApi(
-            "OWNER/tasks",
+            "acme/tasks",
             request=request,
             issue_label_names=lambda i: labels,
             swap_labels=swap or (lambda issue, remove=None, add=None: (
@@ -600,7 +600,7 @@ class CleanupCommandTests(unittest.TestCase):
         )
 
     def _run(self, issue, labels, **api_kwargs):
-        args = SimpleNamespace(repo="OWNER/tasks", issue=str(issue),
+        args = SimpleNamespace(repo="acme/tasks", issue=str(issue),
                                api=self._api(labels, **api_kwargs))
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_cleanup(args)
@@ -647,7 +647,7 @@ class CleanupCommandTests(unittest.TestCase):
         self.assertEqual(self.removed, [])
 
     def test_transport_failure_on_labels_is_twenty(self):
-        args = SimpleNamespace(repo="OWNER/tasks", issue="1",
+        args = SimpleNamespace(repo="acme/tasks", issue="1",
                                api=self._api(labels=None))
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_cleanup(args)
@@ -656,7 +656,7 @@ class CleanupCommandTests(unittest.TestCase):
     def test_transport_failure_on_remove_is_twenty(self):
         api = self._api(labels=["kraken-task", "in-progress"],
                         swap=lambda issue, remove=None, add=None: False)
-        args = SimpleNamespace(repo="OWNER/tasks", issue="1", api=api)
+        args = SimpleNamespace(repo="acme/tasks", issue="1", api=api)
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_cleanup(args)
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)

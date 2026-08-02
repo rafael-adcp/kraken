@@ -30,7 +30,7 @@ class WriteAfterExpiryTests(KrakenConformanceTest):
         holds the task."""
         self.mk_issue(n, title, "kraken-task", "project:app", "in-progress")
         self.mk_expired_lease(n, "w-dead")
-        r = self.kraken("claim", "OWNER/tasks", n, "w-live")
+        r = self.kraken("claim", "acme/tasks", n, "w-live")
         self.assertEqual(r.rc, 0, "the steal that sets the scene failed: %s%s"
                          % (r.out, r.err))
         return self.claim_ref(n)
@@ -39,8 +39,8 @@ class WriteAfterExpiryTests(KrakenConformanceTest):
         theirs = self._stolen(1, "taken over")
         before = self.comment_count(1)
 
-        r = self.kraken("deliver", "OWNER/tasks", 1, "w-dead", self.result,
-                        "https://github.com/OWNER/work/pull/9")
+        r = self.kraken("deliver", "acme/tasks", 1, "w-dead", self.result,
+                        "https://github.com/acme/work/pull/9")
         self.assertEqual(r.rc, 10, "a stolen-from worker delivered anyway")
         self.assertIn("lost-lease issue=1", r.out)
 
@@ -57,7 +57,7 @@ class WriteAfterExpiryTests(KrakenConformanceTest):
         theirs = self._stolen(2, "taken over")
         before = self.comment_count(2)
 
-        r = self.kraken("escalate", "OWNER/tasks", 2, "w-dead", self.result)
+        r = self.kraken("escalate", "acme/tasks", 2, "w-dead", self.result)
         self.assertEqual(r.rc, 10, "a stolen-from worker escalated anyway")
         self.assertEqual(self.comment_count(2), before,
                          "the zombie put a question on the thread")
@@ -71,7 +71,7 @@ class WriteAfterExpiryTests(KrakenConformanceTest):
         theirs = self._stolen(3, "taken over")
         before = self.comment_count(3)
 
-        r = self.kraken("release", "OWNER/tasks", 3, "w-dead", "giving up")
+        r = self.kraken("release", "acme/tasks", 3, "w-dead", "giving up")
         self.assertEqual(r.rc, 10, "a stolen-from worker released anyway")
         self.assertEqual(self.comment_count(3), before,
                          "the zombie posted a released marker")
@@ -88,9 +88,9 @@ class WriteAfterExpiryTests(KrakenConformanceTest):
         state = self.claim_state_file("w-dead")
         os.makedirs(os.path.dirname(state), exist_ok=True)
         with open(state, "w", encoding="utf-8") as f:
-            f.write('{"repo": "OWNER/tasks", "issue": "4", "worker": "w-dead"}\n')
+            f.write('{"repo": "acme/tasks", "issue": "4", "worker": "w-dead"}\n')
 
-        r = self.kraken("release", "OWNER/tasks", 4, "w-dead", "session ended")
+        r = self.kraken("release", "acme/tasks", 4, "w-dead", "session ended")
         self.assertEqual(r.rc, 10)
         self.assertFalse(os.path.exists(state),
                          "a refused release left its claim state behind")
@@ -103,8 +103,8 @@ class WriteAfterExpiryTests(KrakenConformanceTest):
                       "in-progress")
         self.mk_expired_lease(5, "w-slow")
 
-        r = self.kraken("deliver", "OWNER/tasks", 5, "w-slow", self.result,
-                        "https://github.com/OWNER/work/pull/10")
+        r = self.kraken("deliver", "acme/tasks", 5, "w-slow", self.result,
+                        "https://github.com/acme/work/pull/10")
         self.assertEqual(r.rc, 0, "the lease holder was refused its own delivery: %s%s"
                          % (r.out, r.err))
         self.assertTrue(self.has_label(5, "awaiting-merge"))

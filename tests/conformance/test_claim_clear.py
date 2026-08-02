@@ -13,7 +13,7 @@ class ClaimClearTests(KrakenConformanceTest):
     def test_claim_clear(self):
         self.mk_issue(7, "a task", "kraken-task", "project:app")
 
-        r = self.kraken("claim", "OWNER/tasks", 7, "w1")
+        r = self.kraken("claim", "acme/tasks", 7, "w1")
         self.assertEqual(r.rc, 0, "clean claim exit")
         self.assertEqual(r.out, "claim: claimed issue=7 worker=w1", "machine line")
 

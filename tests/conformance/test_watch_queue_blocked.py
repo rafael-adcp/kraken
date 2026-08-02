@@ -17,7 +17,7 @@ class WatchQueueBlockedTests(KrakenConformanceTest):
         self.mk_issue(2, "blocked candidate", "kraken-task", "project:app")
         self.mk_blocked_by(2, 1)
 
-        r = self.kraken("list-startable", "OWNER/tasks", "app", "--snapshot")
+        r = self.kraken("list-startable", "acme/tasks", "app", "--snapshot")
         self.assertEqual(r.rc, 0, "snapshot exit (blocked-only queue)")
         self.assertEqual(r.out, "2:held", "blocked-only queue snapshot has no startable line")
 
@@ -26,7 +26,7 @@ class WatchQueueBlockedTests(KrakenConformanceTest):
 
         # Closing the blocker flips the candidate to startable in the snapshot.
         self.set_issue_state(1, "closed")
-        r = self.kraken("list-startable", "OWNER/tasks", "app", "--snapshot")
+        r = self.kraken("list-startable", "acme/tasks", "app", "--snapshot")
         self.assertEqual(r.rc, 0, "snapshot exit (blocker closed)")
         self.assertEqual(r.out, "2:startable", "closing the blocker flips the candidate to startable")
 

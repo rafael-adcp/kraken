@@ -17,7 +17,7 @@ class ClaimThreadIndependenceTests(KrakenConformanceTest):
         self.mk_comment(7, '<!-- kraken {"type":"claim","worker":"dead-worker"} -->')
         self.mk_comment(7, '<!-- kraken {"type":"stale-claim","reason":"no activity for 7h"} -->')
 
-        r = self.kraken("claim", "OWNER/tasks", 7, "w2")
+        r = self.kraken("claim", "acme/tasks", 7, "w2")
         self.assertEqual(r.rc, 0, "claim over a reaped thread")
         self.assertEqual(r.out, "claim: claimed issue=7 worker=w2", "w2 owns the task")
 
@@ -26,7 +26,7 @@ class ClaimThreadIndependenceTests(KrakenConformanceTest):
         self.mk_issue(8, "abandoned thread", "kraken-task", "project:app")
         self.mk_comment(8, '<!-- kraken {"type":"claim","worker":"ghost"} -->')
 
-        r = self.kraken("claim", "OWNER/tasks", 8, "w3")
+        r = self.kraken("claim", "acme/tasks", 8, "w3")
         self.assertEqual(r.rc, 0, "claim over a threadful of stale markers")
         self.assertEqual(r.out, "claim: claimed issue=8 worker=w3", "w3 owns the task")
 
@@ -36,7 +36,7 @@ class ClaimThreadIndependenceTests(KrakenConformanceTest):
         self.mk_issue(9, "locked by ref only", "kraken-task", "project:app")
         self.mk_claim_ref(9, "rightful-owner")
 
-        r = self.kraken("claim", "OWNER/tasks", 9, "w4")
+        r = self.kraken("claim", "acme/tasks", 9, "w4")
         self.assertEqual(r.rc, 10, "claim against a live ref loses")
         self.assertEqual(r.out,
                          "claim: lost-cas issue=9 — another worker holds the claim ref",

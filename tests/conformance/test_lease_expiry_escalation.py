@@ -30,7 +30,7 @@ class LeaseExpiryEscalationTests(KrakenConformanceTest):
     def test_below_the_threshold_the_task_is_still_stolen(self):
         self._poisoned(1, LEASE_EXPIRY_ESCALATE - 1)
 
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w-drain")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w-drain")
         self.assertEqual(r.rc, 0, "the task was escalated too early: %s%s"
                          % (r.out, r.err))
         self.assertTrue(self.has_label(1, "in-progress"))
@@ -40,7 +40,7 @@ class LeaseExpiryEscalationTests(KrakenConformanceTest):
     def test_at_the_threshold_the_task_goes_to_the_operator(self):
         self._poisoned(2, LEASE_EXPIRY_ESCALATE)
 
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w-drain")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w-drain")
         self.assertEqual(r.rc, 3, "the drain kept stealing a task nobody finishes: %s%s"
                          % (r.out, r.err))
         self.assertTrue(self.has_label(2, "needs-decision"),
@@ -64,7 +64,7 @@ class LeaseExpiryEscalationTests(KrakenConformanceTest):
         self.mk_state_record(3, "queued", worker="w-live",
                              expiries=LEASE_EXPIRY_ESCALATE + 2)
 
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w-drain")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w-drain")
         self.assertEqual(r.rc, 3, "a live lease was disturbed: %s%s" % (r.out, r.err))
         self.assertEqual(self.claim_ref(3), held, "the live lease was replaced")
         self.assertTrue(self.has_label(3, "in-progress"))
@@ -77,7 +77,7 @@ class LeaseExpiryEscalationTests(KrakenConformanceTest):
         self.mk_issue(4, "abandoned", "kraken-task", "project:app", "in-progress")
         self.mk_expired_lease(4, "w-dead")
 
-        self.assertEqual(self.kraken("claim-next", "OWNER/tasks", "app", "w-1").rc, 0)
+        self.assertEqual(self.kraken("claim-next", "acme/tasks", "app", "w-1").rc, 0)
         self.assertEqual(self.state_record(4)["expiries"], 1,
                          "a steal did not increment the expiry count by one")
         markers = [b for b in self.comment_bodies(4)
@@ -99,7 +99,7 @@ class LeaseExpiryEscalationTests(KrakenConformanceTest):
         self.mk_state_record(5, "queued", worker="w-dead",
                              expiries=LEASE_EXPIRY_ESCALATE)
 
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w-drain")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w-drain")
         self.assertEqual(r.rc, 3, "a buried expiry history was stolen again: %s%s"
                          % (r.out, r.err))
         self.assertTrue(self.has_label(5, "needs-decision"))

@@ -20,7 +20,7 @@ class ClaimIgnoresCommentsTests(KrakenConformanceTest):
         self.mk_comment(50, '<!-- kraken {"type":"stale-claim","reason":"no activity for 7h"} -->')
 
         self.truncate_log()
-        r = self.kraken("claim", "OWNER/tasks", 50, "w1")
+        r = self.kraken("claim", "acme/tasks", 50, "w1")
         self.assertEqual(r.rc, 0, "claim succeeds regardless of the thread")
         self.assertEqual(r.out, "claim: claimed issue=50 worker=w1", "machine line")
         self.assertTrue(self.claim_ref_exists(50), "claim ref missing after the claim")

@@ -14,7 +14,7 @@ GOOD_BODY = ("### Goal\n\nEndpoint /v2/things returns cursor-paginated results.\
 
 class ValidateTaskTests(KrakenConformanceTest):
     def run_case(self, issue):
-        return self.kraken("validate", "OWNER/tasks", issue, env={"REPO": "OWNER/tasks"})
+        return self.kraken("validate", "acme/tasks", issue, env={"REPO": "acme/tasks"})
 
     def test_validate(self):
         # --- #1: missing project label -> one comment naming the label -------
