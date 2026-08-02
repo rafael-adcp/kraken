@@ -19,7 +19,7 @@ class NoteTests(KrakenConformanceTest):
         n = os.path.join(self.state, "assumptions.md")
         self._write(n, "Assuming the API is cursor-paginated.\n\n- verified in code\n")
 
-        r = self.kraken("note", "OWNER/tasks", 7, "w1", n)
+        r = self.kraken("note", "acme/tasks", 7, "w1", n)
         self.assertEqual(r.rc, 0, "note exit")
         self.assertEqual(r.out, "note: posted issue=7 worker=w1", "machine line")
 
@@ -40,7 +40,7 @@ class NoteTests(KrakenConformanceTest):
         # it on a HELD task, where a misread would be visible as a requeue.
         self.mk_issue(70, "escalated", "kraken-task", "project:app", "needs-decision")
         self.mk_comment(70, self.last_comment(7))
-        r = self.kraken("list-startable", "OWNER/tasks", "app")
+        r = self.kraken("list-startable", "acme/tasks", "app")
         self.assertEqual(r.rc, 0, "list-startable exit")
         self.assertNotIn("70\t", r.out,
                          "a worker note was misread as an operator reply and requeued the task")
@@ -48,12 +48,12 @@ class NoteTests(KrakenConformanceTest):
     def test_note_bad_invocation(self):
         self.mk_issue(8, "task", "kraken-task", "project:app", "in-progress")
 
-        r = self.kraken("note", "OWNER/tasks", 8, "w1", "/nonexistent/note.md")
+        r = self.kraken("note", "acme/tasks", 8, "w1", "/nonexistent/note.md")
         self.assertEqual(r.rc, 2, "missing body file exit")
 
         empty = os.path.join(self.state, "empty.md")
         self._write(empty, "\n\n")
-        r = self.kraken("note", "OWNER/tasks", 8, "w1", empty)
+        r = self.kraken("note", "acme/tasks", 8, "w1", empty)
         self.assertEqual(r.rc, 2, "empty body exit")
         self.assertEqual(self.comment_count(8), 0, "a rejected note must post nothing")
 

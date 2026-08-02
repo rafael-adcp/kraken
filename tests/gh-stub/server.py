@@ -783,10 +783,16 @@ class Handler(BaseHTTPRequestHandler):
     def _create_ref(self, body):
         s = self.state
         ref = body.get("ref", "")
-        # Race tests line every creator up here, right before the CAS.
-        self.knobs.cas_wait()
         state_m = re.match(r"^refs/kraken/state/([0-9]+)$", ref)
         m = re.match(r"^refs/kraken/claims/([0-9]+)(?:/([0-9]+))?$", ref)
+        if m:
+            # Race tests line the CLAIMERS up here, right before the CAS that
+            # arbitrates them — and only them. The winner goes on to write a
+            # state record (§3.1) with no racer left to meet it, so holding that
+            # create at the barrier too parked the winner for the barrier's full
+            # timeout: long enough for its own HTTP client to give up and report
+            # a transport failure the protocol never had.
+            self.knobs.cas_wait()
         if state_m:
             # A state record is created the same conflict-failing way — the
             # writer falls back to a force PATCH on 422 (§3.1), so "already

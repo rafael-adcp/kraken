@@ -27,7 +27,7 @@ class StateRecordTests(KrakenConformanceTest):
         self.mk_claim_ref(1, "w1")
         self.mk_comment(1, "some earlier chatter")
 
-        r = self.kraken("deliver", "OWNER/tasks", 1, "w1",
+        r = self.kraken("deliver", "acme/tasks", 1, "w1",
                         self._file("r.md", "done, validated\n"),
                         "https://github.com/o/r/pull/12")
         self.assertEqual(r.rc, 0, "deliver: %s%s" % (r.out, r.err))
@@ -45,7 +45,7 @@ class StateRecordTests(KrakenConformanceTest):
         self.mk_issue(2, "blocked", "kraken-task", "project:app", "in-progress")
         self.mk_claim_ref(2, "w1")
 
-        r = self.kraken("escalate", "OWNER/tasks", 2, "w1",
+        r = self.kraken("escalate", "acme/tasks", 2, "w1",
                         self._file("q.md", "which way?\n"))
         self.assertEqual(r.rc, 0, "escalate: %s%s" % (r.out, r.err))
         record = self.state_record(2)
@@ -60,7 +60,7 @@ class StateRecordTests(KrakenConformanceTest):
         self.mk_claim_ref(3, "w1")
         self.mk_state_record(3, "queued", worker="w0", expiries=2)
 
-        r = self.kraken("release", "OWNER/tasks", 3, "w1", "no docker")
+        r = self.kraken("release", "acme/tasks", 3, "w1", "no docker")
         self.assertEqual(r.rc, 0, "release: %s%s" % (r.out, r.err))
         record = self.state_record(3)
         self.assertEqual(record["state"], "queued")
@@ -72,9 +72,9 @@ class StateRecordTests(KrakenConformanceTest):
         self.mk_issue(4, "delivered then questioned", "kraken-task", "project:app")
         self.deliver_state(4, pr="https://github.com/o/r/pull/7")
         self.mk_comment(4, "one more thing")
-        self.assertEqual(self.kraken("claim", "OWNER/tasks", 4, "w2").rc, 0)
+        self.assertEqual(self.kraken("claim", "acme/tasks", 4, "w2").rc, 0)
 
-        r = self.kraken("escalate", "OWNER/tasks", 4, "w2",
+        r = self.kraken("escalate", "acme/tasks", 4, "w2",
                         self._file("q2.md", "which flag name?\n"))
         self.assertEqual(r.rc, 0, "escalate: %s%s" % (r.out, r.err))
         record = self.state_record(4)
@@ -93,7 +93,7 @@ class StateRecordTests(KrakenConformanceTest):
         for i in range(4):
             self.mk_comment(5, "chatter %d" % i)
 
-        r = self.kraken("deliver", "OWNER/tasks", 5, "w1",
+        r = self.kraken("deliver", "acme/tasks", 5, "w1",
                         self._file("r5.md", "done\n"))
         self.assertEqual(r.rc, 0, "deliver: %s%s" % (r.out, r.err))
         self.assertEqual(self.state_record(5)["comments"], self.comment_count(5),
@@ -109,7 +109,7 @@ class StateRecordTests(KrakenConformanceTest):
         self.mk_claim_ref(6, "w1")
 
         self.truncate_log()
-        self.assertEqual(self.kraken("deliver", "OWNER/tasks", 6, "w1",
+        self.assertEqual(self.kraken("deliver", "acme/tasks", 6, "w1",
                                      self._file("r6.md", "done\n")).rc, 0)
         log = self.log_lines()
         record_at = next(i for i, l in enumerate(log)
@@ -126,7 +126,7 @@ class StateRecordTests(KrakenConformanceTest):
         self.mk_issue(7, "record fails", "kraken-task", "project:app", "in-progress")
         self.mk_claim_ref(7, "w1")
 
-        r = self.kraken("deliver", "OWNER/tasks", 7, "w1",
+        r = self.kraken("deliver", "acme/tasks", 7, "w1",
                         self._file("r7.md", "done\n"),
                         fail=r"POST \S*/git/commits")
         self.assertEqual(r.rc, 20, "a failed record write must be exit 20")
@@ -142,7 +142,7 @@ class StateRecordTests(KrakenConformanceTest):
         """A claim is not a state change: the lease says the task is being
         executed, and the record says what it is BETWEEN workers (§3.1)."""
         self.mk_issue(8, "fresh", "kraken-task", "project:app")
-        self.assertEqual(self.kraken("claim", "OWNER/tasks", 8, "w1").rc, 0)
+        self.assertEqual(self.kraken("claim", "acme/tasks", 8, "w1").rc, 0)
         self.assertFalse(self.state_record_exists(8),
                          "a first claim wrote a state record")
 
@@ -151,7 +151,7 @@ class StateRecordTests(KrakenConformanceTest):
         self.mk_expired_lease(9, "w-dead")
         self.mk_state_record(9, "queued", worker="w-dead", expiries=1)
 
-        self.assertEqual(self.kraken("claim", "OWNER/tasks", 9, "w-thief").rc, 0)
+        self.assertEqual(self.kraken("claim", "acme/tasks", 9, "w-thief").rc, 0)
         record = self.state_record(9)
         self.assertEqual(record["expiries"], 2)
         self.assertEqual(record["worker"], "w-thief", "the record names its writer")
@@ -171,7 +171,7 @@ class StateRecordTests(KrakenConformanceTest):
         self.mk_issue(12, "free", "kraken-task", "project:app")
 
         # The drain claims the free task and repairs the other two on the way.
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w1")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w1")
         self.assertEqual(r.rc, 0, "claim-next: %s%s" % (r.out, r.err))
         self.assertIn("claim-next: claimed issue=12 worker=w1", r.out.split("\n"))
 
@@ -194,19 +194,19 @@ class StateRecordTests(KrakenConformanceTest):
                       "awaiting-merge")
         self.mk_comment(13, "please also rename the flag")   # said before the upgrade
 
-        startable = self.kraken("list-startable", "OWNER/tasks", "app").out
+        startable = self.kraken("list-startable", "acme/tasks", "app").out
         self.assertNotIn("13\t", startable,
                          "an unrecorded held task was handed out before its migration")
 
-        self.assertEqual(self.kraken("reap", "OWNER/tasks", "w1").rc, 0)
+        self.assertEqual(self.kraken("reap", "acme/tasks", "w1").rc, 0)
         self.assertEqual(self.state_record(13)["state"], "awaiting-merge")
 
         # The accepted edge (HISTORY.md, protocol/9): the pre-upgrade comment is
         # consumed by the migration, so it takes one more to move the task.
-        startable = self.kraken("list-startable", "OWNER/tasks", "app").out
+        startable = self.kraken("list-startable", "acme/tasks", "app").out
         self.assertNotIn("13\t", startable)
         self.mk_comment(13, "saying it again")
-        startable = self.kraken("list-startable", "OWNER/tasks", "app").out
+        startable = self.kraken("list-startable", "acme/tasks", "app").out
         self.assertIn("13\t", startable,
                       "a migrated task did not requeue on the next comment")
 
@@ -215,11 +215,11 @@ class StateRecordTests(KrakenConformanceTest):
         would re-anchor it on the current thread each time, and no requeue would
         ever be derivable."""
         self.mk_issue(14, "held", "kraken-task", "project:app", "needs-decision")
-        self.assertEqual(self.kraken("reap", "OWNER/tasks", "w1").rc, 0)
+        self.assertEqual(self.kraken("reap", "acme/tasks", "w1").rc, 0)
         first = self.state_record(14)
 
         self.mk_comment(14, "option B")
-        r = self.kraken("reap", "OWNER/tasks", "w1")
+        r = self.kraken("reap", "acme/tasks", "w1")
         self.assertEqual(r.rc, 0)
         self.assertIn("migrated=0", r.out, "the migration ran twice")
         self.assertEqual(self.state_record(14)["comments"], first["comments"],
@@ -233,7 +233,7 @@ class StateRecordTests(KrakenConformanceTest):
         self.mk_state_record(15, "awaiting-merge", worker="w1")
         self.set_issue_state(15, "closed")
 
-        r = self.kraken("reap", "OWNER/tasks", "w1")
+        r = self.kraken("reap", "acme/tasks", "w1")
         self.assertEqual(r.rc, 0, "reap: %s%s" % (r.out, r.err))
         self.assertIn("orphan_states=1", r.out)
         self.assertFalse(self.state_record_exists(15))

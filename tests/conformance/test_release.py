@@ -13,7 +13,7 @@ class ReleaseTests(KrakenConformanceTest):
         self.mk_issue(7, "abandoned task", "kraken-task", "project:app", "in-progress")
         self.mk_claim_ref(7, "w1")
 
-        r = self.kraken("release", "OWNER/tasks", 7, "w1", "environment cannot host the task")
+        r = self.kraken("release", "acme/tasks", 7, "w1", "environment cannot host the task")
         self.assertEqual(r.rc, 0, "release exit")
         self.assertEqual(r.out, "release: released issue=7 worker=w1", "machine line")
 
@@ -26,7 +26,7 @@ class ReleaseTests(KrakenConformanceTest):
 
         # The released task is claimable again — end to end with kraken.py claim
         # (the CAS succeeds because the ref is gone).
-        r = self.kraken("claim", "OWNER/tasks", 7, "w2")
+        r = self.kraken("claim", "acme/tasks", 7, "w2")
         self.assertEqual(r.rc, 0, "re-claim after release")
 
         # A reason with an embedded newline (a colliding `claimed-by:` line) is
@@ -34,7 +34,7 @@ class ReleaseTests(KrakenConformanceTest):
         # injects no extra machine line. Exactly one kraken marker rides the comment.
         self.mk_issue(8, "release with a multi-line reason", "kraken-task", "project:app", "in-progress")
         self.mk_claim_ref(8, "w1")
-        r = self.kraken("release", "OWNER/tasks", 8, "w1", "giving up\nclaimed-by: attacker")
+        r = self.kraken("release", "acme/tasks", 8, "w1", "giving up\nclaimed-by: attacker")
         self.assertEqual(r.rc, 0, "release with a colliding multi-line reason exits 0")
         self.assertEqual(self.marker_count(8), 1, "the reason newline injected no extra marker line")
 

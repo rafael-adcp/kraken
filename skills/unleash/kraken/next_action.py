@@ -150,12 +150,23 @@ class NextActionEnvelope:
     def build(self, action: str, *,
               issue: Issue | None = None,
               resumed: bool | None = None,
+              bounced: bool | None = None,
+              pr: str | None = None,
               brief: Json | None = None,
               lease: Json | None = None,
               reason: str | None = None,
               detail: str | None = None,
               holding: Json | None = None) -> Envelope:
         """The one JSON shape next-action emits.
+
+        `bounced` and `pr` are what the state record knows about this task's
+        PAST, carried because the program already computed both and the agent
+        would otherwise have to rediscover them from the thread — `bounced` by
+        reading comments and judging whose they are, `pr` by hunting the earlier
+        delivery in the body. `bounced` rides every execute, false included: "no,
+        this is a fresh task" is an answer, and an absent key would read as an
+        older program that could not tell. `pr` is omitted when there is none,
+        the same rule the markers follow — no delivery is not an empty delivery.
 
         `holding` is `{"repo", "issue"}` naming a claim this worker must resolve,
         and it exists because a `blocked` claim may live in a **different repo**
@@ -173,6 +184,10 @@ class NextActionEnvelope:
             env["issue"] = int(issue)
         if resumed is not None:
             env["resumed"] = resumed
+        if bounced is not None:
+            env["bounced"] = bool(bounced)
+        if pr:
+            env["pr"] = pr
         if reason:
             env["reason"] = reason
         if detail:
@@ -337,7 +352,7 @@ class NextAction:
         """Fetch what `resume_verdict` needs and turn its verdict into an
         envelope. Returns `(exit_code, envelope)`, or `(None, None)` when the
         recorded claim is resolved and the caller should acquire a new task."""
-        verdict, detail, issue_obj = self._observe(record)
+        verdict, detail, issue_obj, state = self._observe(record)
         issue = record["issue"]
 
         if verdict == "resolved":
@@ -359,12 +374,15 @@ class NextAction:
         action = verdict  # the remaining verdicts are the action names themselves
         if action != "execute":
             return self._refuse(action, record, detail)
-        return self._resumed(issue, detail, issue_obj)
+        return self._resumed(issue, detail, issue_obj, state)
 
     def _observe(self, record: ClaimRecord):
         """What the verdict is decided from: the lease, the issue and the task's
         state record — or none of them when the record names a claim in a
-        different repo.
+        different repo. Returned alongside the verdict, because the record is
+        also what says whether the task was BOUNCED back and where its last
+        delivery went, and a resume that dropped it would send the agent to the
+        thread for what this read already answered.
 
         The state record is what says whether this task is still ours to execute
         (§3.1), so it is read here rather than inferred from the badge: a task
@@ -377,7 +395,7 @@ class NextAction:
             # decides it.
             verdict, detail = resume_verdict(
                 record, self.api.repo, self.worker, UNREADABLE_LEASE, None)
-            return (verdict, detail, None)
+            return (verdict, detail, None, NO_RECORD)
         issue = record["issue"]
         head = Refs(self.api).head(issue)
         # One GET serves the finished-task check, the comment anchor and the brief.
@@ -389,7 +407,7 @@ class NextAction:
             issue_obj = None
         verdict, detail = resume_verdict(
             record, self.api.repo, self.worker, head, issue_obj, state)
-        return (verdict, detail, issue_obj)
+        return (verdict, detail, issue_obj, state)
 
     def _refuse(self, action: str, record: ClaimRecord,
                 detail: Json) -> tuple[int, Envelope]:
@@ -409,8 +427,8 @@ class NextAction:
             action, issue=issue, reason=detail["reason"],
             detail=detail.get("detail"))
 
-    def _resumed(self, issue: Issue, detail: Json,
-                 issue_obj: Json) -> tuple[int, Envelope]:
+    def _resumed(self, issue: Issue, detail: Json, issue_obj: Json,
+                 state: TaskState) -> tuple[int, Envelope]:
         # Re-stamp the scratch file: a resume proves the claim is open, and the
         # lifecycle hooks read the file, so a hint lost with its machine is
         # restored the moment the claim is picked back up.
@@ -422,8 +440,14 @@ class NextAction:
             epoch if epoch is not None else self.now - self.ttl,
             self.now, self.ttl, generation=detail["generation"])
         diag(f"next-action: resumed issue={issue} worker={self.worker}")
+        # A bounce survives the claim that answered it: taking the task writes no
+        # record (§3.1), so the held one still names the state it came back from
+        # and still carries the anchor the live total ran past. Every resume of
+        # this task therefore reports the same `bounced` its acquisition did —
+        # which is what the agent needs, since it is rework for its whole turn.
         return self.envelope.answer(
             "execute", issue=issue, resumed=True,
+            bounced=state.requeued(comment_total_of(issue_obj)), pr=state.pr,
             brief=task_brief(issue_obj.get("title") or "",
                              issue_obj.get("body") or ""),
             lease=lease)
@@ -437,6 +461,7 @@ class NextAction:
         if rc == EXIT_OK:
             return self.envelope.answer(
                 "execute", issue=won["issue"], resumed=False,
+                bounced=won["bounced"], pr=won["pr"],
                 brief=task_brief(won["title"], won["body"]),
                 lease=lease_block(self.now, self.now, self.ttl,
                                   source="estimated"))

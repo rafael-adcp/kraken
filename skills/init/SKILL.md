@@ -23,8 +23,9 @@ touch no issues — none read, none written.
 The `OWNER/tasks` argument is REQUIRED — the coordination repo to stand up. Missing? Do
 not guess. Ask for it and stop.
 
-If the slug matches `^OWNER/` or contains `<`/`>`, refuse: it looks like the template
-placeholder — substitute your real `owner/repo` and re-run.
+A slug that is still the doc placeholder (`OWNER/...`, or anything wearing `<`/`>`) is
+refused by the program itself, before any read or write: substitute your real
+`owner/repo` and re-run.
 
 `--project <name>` is optional. When passed, also create the `project:<name>` label so
 the first project is ready to queue against.

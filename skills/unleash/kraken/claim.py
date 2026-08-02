@@ -450,8 +450,17 @@ def acquire_next(api: Api, project: str, worker: Worker,
     one-task-at-a-time guard, §6 reconcile, then guard + CAS down the candidate
     list — as DATA rather
     than as printed output: returns `(exit_code, won)` where `won` is
-    `{"issue", "title", "body"}` on EXIT_OK, `{"issue"}` naming the already-held
-    claim on EXIT_NOT_CLEAR, and None on every other outcome.
+    `{"issue", "title", "body", "bounced", "pr"}` on EXIT_OK, `{"issue"}` naming
+    the already-held claim on EXIT_NOT_CLEAR, and None on every other outcome.
+
+    `bounced` and `pr` come off the state record this read already carried, and
+    they are here because the record is READ HERE and nowhere else afterwards:
+    a first claim writes none (§3.1), so a caller that wanted either would have
+    to fetch what this function had in hand and threw away. `bounced` is §6's
+    requeue derivation — two integers, exact — so no reader downstream has to
+    re-derive "is this task coming back" from the thread, and `pr` is where the
+    last delivery went, so rework continues on that branch instead of opening a
+    second PR beside it.
 
     `claim-next` and `next-action` are both thin renderings of this, which is
     what keeps the deterministic claim loop from drifting between them: there is
@@ -521,12 +530,17 @@ def acquire_next(api: Api, project: str, worker: Worker,
         # the same verdict as the filter that just offered the task instead of
         # refusing it — and the lease decides which generation the CAS starts
         # from, and whether this is a steal at all.
-        rc = claim_step(api, cand.number, worker,
-                        record=read.record(cand.number),
+        record = read.record(cand.number)
+        rc = claim_step(api, cand.number, worker, record=record,
                         lease=leases.get(cand.number, NO_LEASE), ttl=ttl)
         if rc == EXIT_OK:
+            # The record as it stood when the task was offered — which is also
+            # how it stands now, because a first claim writes none and a steal
+            # only bumps the expiry count (§3.1).
             return (EXIT_OK, {"issue": cand.number, "title": cand.title,
-                              "body": cand.body})
+                              "body": cand.body,
+                              "bounced": record.requeued(cand.task.comment_total),
+                              "pr": record.pr})
         if rc == EXIT_TRANSPORT:
             # State is now ambiguous — do NOT move on to another candidate while
             # a write of ours may have half-landed. Re-check before any retry.

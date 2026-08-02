@@ -16,7 +16,7 @@ class DeliverTests(KrakenConformanceTest):
         r = os.path.join(self.state, "result.md")
         self._write(r, "Added cursor pagination. Acceptance run: 12/12 green.\n")
 
-        res = self.kraken("deliver", "OWNER/tasks", 7, "w1", r, "https://github.com/owner/app/pull/9")
+        res = self.kraken("deliver", "acme/tasks", 7, "w1", r, "https://github.com/owner/app/pull/9")
         self.assertEqual(res.rc, 0, "deliver exit")
         self.assertEqual(
             res.out,
@@ -35,14 +35,14 @@ class DeliverTests(KrakenConformanceTest):
         self.mk_comment(7, "please rename the flag before merge")
         self.remove_label(7, "awaiting-merge")
 
-        res = self.kraken("claim", "OWNER/tasks", 7, "w2")
+        res = self.kraken("claim", "acme/tasks", 7, "w2")
         self.assertEqual(res.rc, 0, "re-claim after review bounce")
         self.assertEqual(res.out, "claim: claimed issue=7 worker=w2", "delivery freed the lock")
 
         # No PR URL (diff-in-comment path): no pr field, everything else identical.
         self.mk_issue(8, "patch task", "kraken-task", "project:app", "in-progress")
         self.mk_claim_ref(8, "w1")
-        res = self.kraken("deliver", "OWNER/tasks", 8, "w1", r)
+        res = self.kraken("deliver", "acme/tasks", 8, "w1", r)
         self.assertEqual(res.rc, 0, "deliver without pr exit")
         self.assertEqual(res.out, "deliver: delivered issue=8 worker=w1", "machine line without pr")
         self.assert_marker(8, '{"type":"delivered","worker":"w1"}')

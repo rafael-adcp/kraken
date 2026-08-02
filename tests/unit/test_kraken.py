@@ -425,6 +425,71 @@ class ContractCommandTests(unittest.TestCase):
         self.assertNotIn("reset-types", kraken.CONTRACT_FIELDS)
         self.assertNotIn("liveness-types", kraken.CONTRACT_FIELDS)
 
+    def test_boundary_prints_the_spec_section_verbatim(self):
+        # What a driver pastes into a subagent that will hold push access. It
+        # must be the SPEC's words, not a paraphrase: the heading proves which
+        # section, and the MUST NOT sentence is the whole point of the section.
+        lines = self._run("boundary")
+        self.assertTrue(lines[0].startswith("## 11. "),
+                        "boundary must open on PROTOCOL.md's own §11 heading: %r"
+                        % lines[:1])
+        body = "\n".join(lines)
+        self.assertIn("MUST NOT merge", body, "the prohibition did not survive")
+        self.assertNotIn("## 12.", body, "the section bled into the next one")
+
+
+class ProtocolSectionTests(unittest.TestCase):
+    """Reading one section out of the spec — the `contract boundary` half that
+    touches the filesystem."""
+
+    def test_an_unreadable_spec_yields_nothing_rather_than_prose(self):
+        # A caller pastes this into a prompt. Empty is the only answer it can
+        # tell apart from real rules, so a missing spec must not degrade into a
+        # placeholder sentence.
+        self.assertEqual(kraken.protocol_section(11, doc="/nonexistent/PROTOCOL.md"),
+                         [])
+
+    def test_an_absent_section_yields_nothing(self):
+        self.assertEqual(kraken.protocol_section(999), [])
+
+    def test_a_section_stops_at_the_next_one(self):
+        section = kraken.protocol_section(9)   # §9 Release, followed by §10
+        self.assertTrue(section[0].startswith("## 9. "))
+        self.assertNotIn("## 10.", "\n".join(section))
+        self.assertTrue(section[-1].strip(),
+                        "trailing blank lines are not part of the section")
+
+
+class PlaceholderSlugTests(unittest.TestCase):
+    """The doc placeholder, refused by the program instead of by three copies of
+    a paragraph in three SKILL.md files."""
+
+    def _main(self, *argv):
+        buf = StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            return kraken.main(list(argv)), buf.getvalue()
+
+    def test_the_template_slug_is_refused_before_anything_is_read(self):
+        for slug in ("OWNER/tasks", "<coordination-repo>", "me/<repo>"):
+            rc, out = self._main("status", slug)
+            self.assertEqual(rc, kraken.EXIT_USAGE,
+                             "%r was not refused" % slug)
+            self.assertIn("placeholder", out,
+                          "the refusal must say WHY: %r" % out)
+
+    def test_a_real_slug_is_not_refused_by_the_guard(self):
+        self.assertFalse(kraken.placeholder_slug("acme/tasks"))
+        self.assertFalse(kraken.placeholder_slug("OWNERS/tasks"))
+        self.assertTrue(kraken.placeholder_slug("OWNER/anything"))
+
+    def test_contracts_placeholder_option_is_not_the_guards_business(self):
+        # `contract` defaults --repo to <coordination-repo> ON PURPOSE — it
+        # prints doc lines and talks to nothing. The guard is keyed on the
+        # positional slug, which is the one that reaches GitHub.
+        rc, out = self._main("contract", "task-trailer")
+        self.assertEqual(rc, kraken.EXIT_OK, out)
+        self.assertIn("<coordination-repo>", out)
+
 
 class AgentAgnosticDisclaimerTests(unittest.TestCase):
     """The disclaimer names no implementation, so every conforming worker — Claude
@@ -609,10 +674,10 @@ class CommentRecordsPaginationTests(unittest.TestCase):
             calls.append((method, path))
             return 200, json.dumps([])
 
-        FakeApi("OWNER/tasks", request=fake).comment_records("42")
+        FakeApi("acme/tasks", request=fake).comment_records("42")
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], "GET")
-        self.assertIn("repos/OWNER/tasks/issues/42/comments", calls[0][1])
+        self.assertIn("repos/acme/tasks/issues/42/comments", calls[0][1])
         self.assertIn("per_page=", calls[0][1])
         self.assertIn("page=", calls[0][1])
 
@@ -727,7 +792,7 @@ class ClaimNextIterationTests(unittest.TestCase):
                          "blockedBy": {"nodes": []}}),
             state)
 
-    def _run(self, rows, claim_results):
+    def _run(self, rows, claim_results, states=None):
         # rows=None models a failed queue read, which surfaces at Queue.read.
         tasks = [c.task for c in (rows or [])]
 
@@ -745,7 +810,8 @@ class ClaimNextIterationTests(unittest.TestCase):
                 queue=FakeQueue(
                     api,
                     read=lambda now=None, ttl=None: (
-                        None if rows is None else kraken.QueueRead(tasks, {}, {})),
+                        None if rows is None
+                        else kraken.QueueRead(tasks, {}, {}, states or {})),
                     candidates=lambda p, read=None: rows),
                 claim_step=fake_claim_step)
         return rc, won, buf.getvalue()
@@ -755,7 +821,37 @@ class ClaimNextIterationTests(unittest.TestCase):
         rc, won, _ = self._run(rows, {7: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.attempted, [7])
-        self.assertEqual(won, {"issue": 7, "title": "oldest", "body": "body-7"})
+        self.assertEqual(won, {"issue": 7, "title": "oldest", "body": "body-7",
+                               "bounced": False, "pr": None})
+
+    def test_the_won_payload_carries_the_records_bounce_and_pr(self):
+        """A task with no record is a fresh one; a task whose held record the
+        thread has run past is coming BACK, and carries where it was delivered.
+
+        Both come off the record the loop already read to guard the claim, which
+        is the point: `next-action` emits them, and no reader downstream has to
+        re-derive a bounce from the thread or hunt the earlier PR in the body."""
+        rows = [self._candidate(7, "bounced back", "startable", "b7")]
+        rows[0].task.comment_total = 5
+        states = {7: kraken.TaskState(state="awaiting-merge", worker="w0",
+                                      comments=4, recorded=True,
+                                      pr="https://github.com/o/r/pull/3")}
+        _rc, won, _ = self._run(rows, {7: kraken.EXIT_OK}, states=states)
+        self.assertTrue(won["bounced"],
+                        "a comment past the record's anchor is a bounce (§6)")
+        self.assertEqual(won["pr"], "https://github.com/o/r/pull/3",
+                         "the delivery the task is coming back from was dropped")
+
+    def test_a_task_whose_record_still_holds_is_not_bounced(self):
+        # Same record, nothing said since: the anchor equals the live total, so
+        # the derivation is false and the agent is told this is not rework.
+        rows = [self._candidate(7, "fresh claim", "startable", "b7")]
+        rows[0].task.comment_total = 4
+        states = {7: kraken.TaskState(state="awaiting-merge", worker="w0",
+                                      comments=4, recorded=True)}
+        _rc, won, _ = self._run(rows, {7: kraken.EXIT_OK}, states=states)
+        self.assertFalse(won["bounced"], "nothing was said past the anchor")
+        self.assertIsNone(won["pr"], "a record with no delivery has no PR")
 
     def test_skips_held_rows_without_attempting_them(self):
         rows = [
@@ -1668,6 +1764,42 @@ class ReconcilerPlanTests(unittest.TestCase):
                  _task_node(4, ["kraken-task", "in-progress"])]
         self.assertEqual(kraken.reconcile_plan(nodes, {}, {}), [])
 
+    def test_rule4_re_anchors_a_record_whose_thread_shrank(self):
+        # §6 rule 4. The record anchored at 5 and the thread carries 3, so two
+        # comments were deleted: the anchor is now unreachable and every reply
+        # after it would be absorbed by `total > anchor`. The plan proposes the
+        # repair; nothing here decides it (the applier confirms over REST).
+        nodes = [_task_node(8, ["kraken-task", "awaiting-merge"], comment_total=3)]
+        plan = kraken.reconcile_plan(nodes, {}, self._held(8, "awaiting-merge", 5))
+        self.assertEqual(self._rules(plan), [("re-anchor", 8)])
+        self.assertIn("5", plan[0]["reason"])
+        self.assertIn("3", plan[0]["reason"])
+
+    def test_rule4_leaves_a_reachable_anchor_alone(self):
+        # Equal is the normal state of a freshly held task, and greater is a
+        # requeue — neither is a thread that shrank, and repairing either would
+        # rewrite a record every drain.
+        for total in (5, 6):
+            nodes = [_task_node(8, ["kraken-task", "awaiting-merge"],
+                                comment_total=total)]
+            self.assertEqual(
+                kraken.reconcile_plan(nodes, {}, self._held(8, "awaiting-merge", 5)),
+                [], "total=%d is not a shrunken thread" % total)
+
+    def test_rule4_ignores_a_queued_record(self):
+        # A `queued` record holds nothing, so its anchor is meaningless (§3.1)
+        # and there is no derivation for a deletion to break.
+        nodes = [_task_node(8, ["kraken-task"], comment_total=1)]
+        self.assertEqual(
+            kraken.reconcile_plan(nodes, {}, self._held(8, kraken.QUEUED, 5)), [])
+
+    def test_rule4_is_idempotent(self):
+        # After the repair the anchor IS the total, which is the case above that
+        # plans nothing — so a second pass over the repaired queue is free.
+        nodes = [_task_node(8, ["kraken-task", "awaiting-merge"], comment_total=3)]
+        repaired = {8: self._held(8, "awaiting-merge", 5)[8].re_anchored(3)}
+        self.assertEqual(kraken.reconcile_plan(nodes, {}, repaired), [])
+
     def test_an_orphan_state_record_is_swept(self):
         # A record on an issue the walk no longer carries is state over nothing —
         # the same orphan rule a leftover lock gets, so the namespace does not
@@ -1758,6 +1890,83 @@ class ReconcilerApplyTests(unittest.TestCase):
         self._apply([{"rule": "orphan-lock", "issue": 4, "reason": "x",
                       "gens": [1]}])
         self.assertEqual(self.writes, [("del-ref", 4)])
+
+    def _re_anchor_api(self, *, record, live_total):
+        """An api whose `States.of` answers `record` and whose REST comment
+        count answers `live_total` — the two reads the re-anchor rule confirms
+        itself against before it writes."""
+        def paginated(path):
+            return [{"ref": "refs/kraken/state/8", "object": {"sha": "s8"}}]
+
+        return FakeApi(
+            "o/tasks",
+            request=self.api.request,
+            paginated=paginated,
+            aliased=lambda fields: {
+                "c0": {"committedDate": "2026-01-01T00:00:00Z",
+                       "message": kraken.make_marker(record.payload())}},
+            comment_count=lambda n: live_total,
+        )
+
+    @staticmethod
+    def _plan_re_anchor(issue=8):
+        return [{"rule": "re-anchor", "issue": issue, "reason": "shrank"}]
+
+    def test_re_anchor_writes_only_the_record(self):
+        # §6 rule 4: the anchor moves and nothing else does — no comment, no
+        # label swap, no ref delete. The hold survives the repair on purpose.
+        api = self._re_anchor_api(
+            record=kraken.TaskState(state="awaiting-merge", worker="w0",
+                                    comments=5, recorded=True),
+            live_total=3)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            counts = kraken.apply_reconcile(api, self._plan_re_anchor(), "w-reaper")
+        self.assertEqual(counts["re-anchor"], 1)
+        self.assertEqual(self.writes, [("record", "refs/kraken/state/8")])
+        self.assertIn("anchor 5 -> 3", buf.getvalue())
+
+    def test_re_anchor_confirms_over_rest_before_writing(self):
+        # The walk PROPOSES; the read-back DECIDES. A GraphQL walk that failed
+        # to select `totalCount` reports 0 for every task, which would otherwise
+        # re-anchor a whole queue to zero and requeue it on the next comment.
+        api = self._re_anchor_api(
+            record=kraken.TaskState(state="awaiting-merge", worker="w0",
+                                    comments=5, recorded=True),
+            live_total=9)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            counts = kraken.apply_reconcile(api, self._plan_re_anchor(), "w-reaper")
+        self.assertEqual(counts["re-anchor"], 0, "a refuted proposal is not a repair")
+        self.assertEqual(self.writes, [], "the walk talked the reaper into a write")
+        self.assertIn("skipped", buf.getvalue())
+
+    def test_re_anchor_refuses_on_an_unreadable_count(self):
+        # Ambiguous is never a decision: an unread count is exit 20, never a 0.
+        api = self._re_anchor_api(
+            record=kraken.TaskState(state="awaiting-merge", worker="w0",
+                                    comments=5, recorded=True),
+            live_total=None)
+        buf, err = StringIO(), StringIO()
+        with redirect_stdout(buf), redirect_stderr(err):
+            counts = kraken.apply_reconcile(api, self._plan_re_anchor(), "w")
+        self.assertIsNone(counts)
+        self.assertIn("gh-failure stage=count issue=8", err.getvalue())
+        self.assertEqual(self.writes, [])
+
+    def test_re_anchor_keeps_everything_but_the_anchor(self):
+        # The state, the worker, the expiry count and the delivery URL are not
+        # the deletion's business — only the comparison was broken.
+        before = kraken.TaskState(state="awaiting-merge", worker="w0",
+                                  comments=5, expiries=2, recorded=True,
+                                  pr="https://github.com/o/r/pull/1")
+        after = before.re_anchored(3)
+        self.assertEqual(after.comments, 3)
+        self.assertEqual(
+            (after.state, after.worker, after.expiries, after.pr),
+            (before.state, before.worker, before.expiries, before.pr))
+        self.assertTrue(after.held_state, "the repair must not lift the hold")
+        self.assertFalse(after.requeued(3), "re-anchoring is not a requeue")
 
     def test_transport_failure_answers_none(self):
         api = self._api(swap=lambda n, remove=None, add=None: False)
@@ -1919,7 +2128,7 @@ class BundledAssetTests(unittest.TestCase):
 # envelope promises for it. The wire-level behaviour lives in
 # tests/conformance/test_next_action.py.
 
-def rec(issue="7", repo="OWNER/tasks", worker="w1"):
+def rec(issue="7", repo="acme/tasks", worker="w1"):
     """A claim-<worker>.json record as open_claim_record returns it."""
     return {"repo": repo, "issue": str(issue), "worker": worker}
 
@@ -1951,7 +2160,7 @@ class ResumeVerdictTests(unittest.TestCase):
     # no-ladder outcomes are objects (NO_LEASE / UNREADABLE_LEASE).
     DEFAULT = object()
 
-    def verdict(self, *, record=None, repo="OWNER/tasks", worker="w1",
+    def verdict(self, *, record=None, repo="acme/tasks", worker="w1",
                 head=DEFAULT, obj=DEFAULT, state=kraken.NO_RECORD):
         return kraken.resume_verdict(
             record or rec(), repo, worker,
@@ -2058,11 +2267,11 @@ class ResumeVerdictTests(unittest.TestCase):
         # One task at a time is repo-independent, and it is decided before any
         # read — hence the "nothing was observed" lease and no issue.
         v, detail = kraken.resume_verdict(
-            rec(repo="OWNER/other"), "OWNER/tasks", "w1",
+            rec(repo="acme/other"), "acme/tasks", "w1",
             kraken.UNREADABLE_LEASE, None)
         self.assertEqual(v, "blocked", "a claim elsewhere must block this drain")
         self.assertEqual(detail["reason"], "claim-elsewhere")
-        self.assertIn("OWNER/other#7", detail["detail"],
+        self.assertIn("acme/other#7", detail["detail"],
                       "the blocking claim is not named")
 
 
@@ -2071,20 +2280,20 @@ class NextActionEnvelopeTests(unittest.TestCase):
 
     def test_execute_carries_fully_interpolated_commands(self):
         env = kraken.next_action_envelope(
-            "execute", "OWNER/tasks", "env-1", issue=12, resumed=False,
+            "execute", "acme/tasks", "env-1", issue=12, resumed=False,
             script="/plugins/with space/kraken.py")
         self.assertEqual(set(env["then"]),
                          {"renew", "note", "escalate", "deliver", "release"},
                          "the legal next writes drifted")
         for name, command in env["then"].items():
-            self.assertIn("OWNER/tasks 12 env-1", command,
+            self.assertIn("acme/tasks 12 env-1", command,
                           "then.%s is not interpolated" % name)
             self.assertIn('"/plugins/with space/kraken.py"', command,
                           "then.%s does not quote a path containing spaces" % name)
 
     def test_verdicts_with_no_legal_write_offer_none(self):
         for action in ("idle", "abandon", "stop", "retry"):
-            env = kraken.next_action_envelope(action, "OWNER/tasks", "env-1",
+            env = kraken.next_action_envelope(action, "acme/tasks", "env-1",
                                               issue=12, reason="x")
             self.assertNotIn("then", env,
                              "%s must offer no next write — none is legal" % action)
@@ -2094,20 +2303,20 @@ class NextActionEnvelopeTests(unittest.TestCase):
         # with its issue number would name a task that does not exist, and a
         # worker acting on it would write to the wrong repo's issue.
         env = kraken.next_action_envelope(
-            "blocked", "OWNER/tasks", "env-1", reason="claim-elsewhere",
-            holding={"repo": "OWNER/other", "issue": "7"},
+            "blocked", "acme/tasks", "env-1", reason="claim-elsewhere",
+            holding={"repo": "acme/other", "issue": "7"},
             script="/plugins/kraken.py")
         self.assertNotIn("issue", env,
                          "blocked must not carry a bare top-level issue — it "
                          "would read against the repo being drained")
-        self.assertEqual(env["holding"], {"repo": "OWNER/other", "issue": 7},
+        self.assertEqual(env["holding"], {"repo": "acme/other", "issue": 7},
                          "the held claim is not named")
         # A write IS legal here — it is what resolves the block — so the commands
         # must be present and must target the HELD claim.
         for name in ("deliver", "escalate", "release"):
-            self.assertIn("OWNER/other 7 env-1", env["then"][name],
+            self.assertIn("acme/other 7 env-1", env["then"][name],
                           "then.%s does not target the held claim" % name)
-            self.assertNotIn("OWNER/tasks", env["then"][name],
+            self.assertNotIn("acme/tasks", env["then"][name],
                              "then.%s targets the drained repo, not the held "
                              "claim" % name)
 

@@ -90,10 +90,17 @@ DEPENDS_ON_RE = re.compile(r"^depends-on: *#([0-9]+)", re.MULTILINE)
 def _comment_total(node: Node) -> int:
     """`comments { totalCount }` off a queue-walk node, floored at 0.
 
-    A node that did not select the field reads as 0, which is the fail-open
-    answer: 0 makes every held record look requeued, so a walk that lost the
-    field offers tasks a worker will then find nothing to do on and escalate
-    (§6) — never one where a delivery is silently buried."""
+    A node that did not select the field reads as 0, and 0 fails CLOSED, not
+    open: the requeue derivation is `total > anchor` (§6), so 0 is below every
+    anchor a transition has ever written and a walk that lost the field reports
+    the whole queue as still held. Nothing is offered wrongly; deliveries the
+    operator has answered stay buried until the field comes back.
+
+    That direction is why §6's re-anchor repair does not act on this number: it
+    proposes off the walk and confirms over REST (`Api.comment_count`, which
+    answers None rather than 0), so a lost field costs a quiet pass, never a
+    queue re-anchored to zero. See `TaskState.requeued` for the other half —
+    the REST reader's None, which really does fail open."""
     value = (node.get("comments") or {}).get("totalCount")
     if isinstance(value, bool) or not isinstance(value, int):
         return 0

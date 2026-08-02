@@ -23,7 +23,7 @@ class ClaimNextTests(KrakenConformanceTest):
         self.mk_issue(9, "younger task", "kraken-task", "project:app")
         self.mk_body(7, "### Goal\nship it")
 
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w1")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w1")
         self.assertEqual(r.rc, 0, "clean claim-next exit")
         self.assertIn("claim-next: claimed issue=7 worker=w1", r.out.split("\n"),
                       "claim-next result line missing")
@@ -35,7 +35,7 @@ class ClaimNextTests(KrakenConformanceTest):
         self.assert_disclaimer(7, "w1")
 
         # --- 2. held-skip: #7 is now in-progress, claim-next moves to #9 -----
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w2")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w2")
         self.assertEqual(r.rc, 0, "claim-next skips held, claims the next candidate")
         self.assertIn("claim-next: claimed issue=9 worker=w2", r.out.split("\n"),
                       "expected #9 claimed after skipping held #7")
@@ -43,7 +43,7 @@ class ClaimNextTests(KrakenConformanceTest):
 
         # --- 3. honest empty: both held -> exit 3, nothing written -----------
         before = self.comment_count(7)
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w3")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w3")
         self.assertEqual(r.rc, 3, "claim-next exit on an empty queue")
         self.assertEqual(r.out, "claim-next: none project:app", "none machine line")
         self.assertEqual(self.comment_count(7), before, "no write on an empty queue")
@@ -51,7 +51,7 @@ class ClaimNextTests(KrakenConformanceTest):
         # --- 4. JSON mode: the win is a structured object (last line) --------
         self.mk_issue(12, "json task", "kraken-task", "project:jsonp")
         self.mk_body(12, "### Goal\njson body")
-        r = self.kraken("claim-next", "OWNER/tasks", "jsonp", "w-json", "--json")
+        r = self.kraken("claim-next", "acme/tasks", "jsonp", "w-json", "--json")
         self.assertEqual(r.rc, 0, "claim-next --json exit")
         payload = json.loads(r.out.split("\n")[-1])
         self.assertEqual(payload["issue"], 12, "claim-next --json issue wrong")
@@ -61,8 +61,8 @@ class ClaimNextTests(KrakenConformanceTest):
         self.mk_issue(20, "race oldest", "kraken-task", "project:race")
         self.mk_issue(22, "race younger", "kraken-task", "project:race")
         results = self.run_concurrent(
-            [("claim-next", "OWNER/tasks", "race", "w-a"),
-             ("claim-next", "OWNER/tasks", "race", "w-b")])
+            [("claim-next", "acme/tasks", "race", "w-a"),
+             ("claim-next", "acme/tasks", "race", "w-b")])
         self.assertEqual(results[0].rc, 0, "worker A won a task in the race")
         self.assertEqual(results[1].rc, 0, "worker B won a task in the race")
 

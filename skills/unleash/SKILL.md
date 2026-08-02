@@ -29,8 +29,9 @@ disagree, the spec wins.
 ```
 
 **The first three arguments are REQUIRED.** If any is missing, do not start — ask for
-it. If the `OWNER/tasks` slug matches `^OWNER/` or contains `<`/`>`, refuse: it looks
-like the template placeholder — substitute your real `owner/repo` and re-run.
+it. A slug that is still the doc placeholder (`OWNER/...`, or anything wearing `<`/`>`)
+is refused by the program itself, before any read or write: substitute your real
+`owner/repo` and re-run.
 
 - `--worker-name`: this worker's identity, carried in every claim and comment. Every
   worker authenticates as the same user, so the name is the only thing that tells
@@ -71,6 +72,12 @@ next rather than about the task:
 An `execute` envelope carries everything you need, so you never fetch the task again:
 
 - **`brief`** — `title`, `goal`, `acceptance`, `notes`, and the raw `body`.
+- **`bounced`** — `true` when the task is coming *back* to you rather than arriving
+  fresh. The program derives it; you never have to notice it yourself. What to do about
+  it is the next section.
+- **`pr`** — present only when an earlier turn on this task already delivered. It is
+  where that work lives: **continue on that branch and update that PR** rather than
+  opening a second one ([`DELIVERY.md`](DELIVERY.md)).
 - **`lease`** — `expires_at`, `seconds_remaining`, `renew_every_seconds` and
   `renew_now`. Your claim is a lease, not a lock you hold forever: stop renewing and the
   next worker takes the task over. Run `then.renew` with a one-line progress note at
@@ -89,12 +96,20 @@ envelope does not cover, `gh -R OWNER/REPO ...` is fine.
 
 **Context isolation (optional).** If your harness has subagents, run each task in a
 fresh one — the envelope is the whole brief, so the prompt is just: the envelope JSON,
-a pointer to this file (from **The loop** onward), and the *Authorization boundaries*
-section **inline and verbatim**, because a subagent that ends up rule-less while
-holding push access is the one case not worth risking on a file read. It returns a
-compact result — task number, final label, PR URL, one line — so the driver's context
-stays flat over a long drain. No subagents? Run the task inline; the isolation is an
-optimization, never part of the contract.
+a pointer to this file (from **The loop** onward), and the authorization boundaries
+**inline and verbatim**, because a subagent that ends up rule-less while holding push
+access is the one case not worth risking on a file read. Do not retype those from
+memory — paste what this prints, which is PROTOCOL.md §11 itself:
+
+```
+python3 "<skill>/kraken.py" contract boundary
+```
+
+If that command prints nothing the install is broken: **do not** improvise the rules
+from memory — say so and stop. The subagent returns a compact result — task number,
+final label, PR URL, one line — so the driver's context stays flat over a long drain.
+No subagents? Run the task inline; the isolation is an optimization, never part of the
+contract.
 
 **That read is not optional.** A subagent that cannot read the pointed file — wrong
 path, unreadable file — **aborts the task and says so**; it never proceeds on partial
@@ -105,14 +120,13 @@ that leaves the claim ref standing and the task reads as held until the lease ex
 
 ## What is yours: the judgment
 
-**First, check whether this task is coming *back* to you.** Any comment I leave puts a
-held task back in the queue — from `awaiting-merge` exactly as from `needs-decision`
-(PROTOCOL.md §6) — so a task you are handed may already have been delivered once. Read
-the thread before the Goal (`gh -R OWNER/tasks issue view <n> --comments`): if its newest
-comment is mine, **that comment is the ask** and the Goal is only background. If it asks
-for nothing actionable ("nice, thanks", "merging tomorrow"), do **not** invent rework —
-run `then.escalate` saying the delivery still stands and you cannot tell what I want
-changed. A question on the thread is the honest answer to a comment nobody can act on.
+**On `bounced: true`, read the thread before the Goal** (`gh -R OWNER/tasks issue view
+<n> --comments`). The task is coming back: any comment I leave puts a held task in the
+queue again — from `awaiting-merge` exactly as from `needs-decision` (PROTOCOL.md §6) —
+so **the newest feedback is the ask** and the Goal is only background. If it asks for
+nothing actionable ("nice, thanks", "merging tomorrow"), do **not** invent rework — run
+`then.escalate` saying the delivery still stands and you cannot tell what I want changed.
+A question on the thread is the honest answer to a comment nobody can act on.
 
 Then, inside an `execute`:
 

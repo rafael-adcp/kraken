@@ -71,7 +71,7 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         self.set_issue_state(6, "closed")
         self.mk_claim_ref(6, "old-worker", age_seconds=120)
 
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w-drain")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w-drain")
         self.assertEqual(r.rc, 0, "the drain should have claimed #3: %s" % r.err)
 
         # Rule 2 — #1 reclaimed for the operator, its lock released.
@@ -118,7 +118,7 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
                       "in-progress")
         dead = self.mk_expired_lease(1, "dead-worker")
 
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w-drain")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w-drain")
         self.assertEqual(r.rc, 0, "the drain should have stolen #1: %s%s"
                          % (r.out, r.err))
 
@@ -146,7 +146,7 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         self.mk_issue(2, "queued", "kraken-task", "project:app")
 
         self.truncate_log()
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w-drain")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w-drain")
         self.assertEqual(r.rc, 0, "claim-next exit")
 
         # Not one write touched the task the reconcile agreed with. (#2, the task
@@ -170,7 +170,7 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
                               "in-progress")
                 self.mk_claim_ref(n, "live-worker", age_hours=0)
             self.truncate_log()
-            r = self.kraken("claim-next", "OWNER/tasks", "app", "w-probe")
+            r = self.kraken("claim-next", "acme/tasks", "app", "w-probe")
             # Nothing is startable (every task is held by a live claim), which is
             # the honest empty result — and the cheapest shape to measure.
             self.assertEqual(r.rc, 3, "expected an empty queue: %s%s" % (r.out, r.err))
@@ -212,7 +212,7 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         self.mk_issue(1, "queued", "kraken-task", "project:app")
 
         self.truncate_log()
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w1")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w1")
         self.assertEqual(r.rc, 0, "claim-next exit: %s%s" % (r.out, r.err))
         idle = self._preamble()
         self.assertEqual(len(idle), 3,
@@ -229,7 +229,7 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         self.mk_issue(3, "queued", "kraken-task", "project:app")
 
         self.truncate_log()
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w2")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w2")
         self.assertEqual(r.rc, 0, "claim-next exit: %s%s" % (r.out, r.err))
         live = self._preamble()
         self.assertEqual(len(live), 4,
@@ -244,7 +244,7 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         .github/kraken.py at all, and must not refuse when it is absent."""
         self.mk_issue(1, "queued", "kraken-task", "project:app")
         self.truncate_log()
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w1")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w1")
         self.assertEqual(r.rc, 0,
                          "a drain refused against a repo with no vendored copy: %s%s"
                          % (r.out, r.err))
@@ -257,7 +257,7 @@ class ClaimNextReconcileTests(KrakenConformanceTest):
         queue, not merely cheap."""
         self.mk_issue(1, "queued", "kraken-task", "project:app")
         self.truncate_log()
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w-drain")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w-drain")
         self.assertEqual(r.rc, 0, "claim-next exit")
         self.assertNotIn("object(oid:", self.log_text(),
                          "a commit-date read was issued with no claim ref live")

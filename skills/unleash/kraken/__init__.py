@@ -49,9 +49,9 @@ from .contract import (
     ClaimRecord, CommentRecord, CommitMeta, ENTRYPOINT, EXIT_LOST, EXIT_NONE,
     EXIT_NOT_CLEAR, EXIT_OK, EXIT_TRANSPORT, EXIT_UNKNOWN_PROJECT, EXIT_USAGE,
     Envelope, Epoch, Gen, HELD_LABELS, Issue, Json, LEGACY_CLAIM_GEN, Node,
-    PLUGIN_MANIFEST, PLUGIN_VERSION_UNKNOWN, PRIORITY_LABEL, PROTOCOL_VERSION,
-    ReconcileAction, Repo, SKILL_DIR, Sha, Worker, diag,
-    diagnostics_on_stderr, plugin_version
+    PLUGIN_MANIFEST, PLUGIN_VERSION_UNKNOWN, PRIORITY_LABEL, PROTOCOL_DOC,
+    PROTOCOL_VERSION, ReconcileAction, Repo, SKILL_DIR, Sha, Worker, diag,
+    diagnostics_on_stderr, plugin_version, protocol_section
 )
 from .comments import (
     DISCLAIMER, MARKER_PREFIX, MARKER_RE, MARKER_SUFFIX, MARKER_TYPES,
@@ -120,5 +120,6 @@ from .workflow import (
     validation_body
 )
 from .cli import (
-    CONTRACT_FIELDS, build_parser, cmd_contract, main
+    CONTRACT_FIELDS, PLACEHOLDER_SLUG, build_parser, cmd_contract, main,
+    placeholder_slug
 )

@@ -21,12 +21,12 @@ class ListStartablePaginationTests(KrakenConformanceTest):
             self.mk_issue(n, "held %d" % n, "kraken-task", "project:app",
                           "needs-decision")
 
-        r = self.kraken("list-startable", "OWNER/tasks", "app")
+        r = self.kraken("list-startable", "acme/tasks", "app")
         self.assertEqual(r.rc, 0, "default mode exit (queue > 100)")
         self.assertEqual(r.out, "1\toldest startable\n2\tsecond startable\n3\tthird startable",
                          "oldest startable tasks survive a >100 queue")
 
-        snap = self.kraken("list-startable", "OWNER/tasks", "app", "--snapshot")
+        snap = self.kraken("list-startable", "acme/tasks", "app", "--snapshot")
         self.assertEqual(snap.rc, 0, "snapshot mode exit (queue > 100)")
         snap_lines = [l for l in snap.out.split("\n") if l]
         self.assertEqual(len(snap_lines), 105,

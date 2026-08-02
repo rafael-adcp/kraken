@@ -18,7 +18,7 @@ from kraken import LEASE_EXPIRY_ESCALATE
 
 class ReclaimStaleTests(KrakenConformanceTest):
     def test_reconciler_rules(self):
-        env = {"REPO": "OWNER/tasks"}
+        env = {"REPO": "acme/tasks"}
 
         # #1 UNFINISHABLE — lease expired, and the thread already records
         #    LEASE_EXPIRY_ESCALATE steals. Rule 2: reclaim + delete ref.
@@ -62,7 +62,7 @@ class ReclaimStaleTests(KrakenConformanceTest):
         self.mk_issue(7, "silent worker", "kraken-task", "project:app", "in-progress")
         expired_sha = self.mk_expired_lease(7, "silent-worker")
 
-        r = self.kraken("reap", "OWNER/tasks", env=env)
+        r = self.kraken("reap", "acme/tasks", env=env)
         self.assertEqual(r.rc, 0, "reap run: %s" % r.err)
 
         # #1 reclaimed: needs-decision, ref gone, stale-claim marker posted.

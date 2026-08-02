@@ -446,10 +446,26 @@ stops still frees its task within one TTL.
      now. It touches no label, posts no comment and deletes no ref. This is what
      migrates a queue written before the record existed, and what lets a conforming
      reader tolerate a writer that still only sets labels.
+  4. **Anchor ahead of the thread** — an open task whose record names a held state
+     and whose `comments` anchor is **greater than** the issue's live comment
+     total (comments were deleted after the transition): rewrite the record with
+     `comments` set to that live total. It touches no label, posts no comment,
+     deletes no ref, and **does not lift the hold** — re-anchoring only, because a
+     deleted comment is not an answer. A reader **SHOULD** read the total back over
+     the surface a transition anchors from (§3.1) before writing, rather than trust
+     a bulk queue read that may have failed to return the field.
+
+     The requeue derivation below is memoryless: it compares two integers and has
+     no way to know that one of them has become unreachable. Without this repair a
+     single deletion leaves the anchor permanently above the thread, and every
+     reply after it is absorbed by the comparison — the task sits held while the
+     operator believes they answered. This rule restores the comparison so the
+     **next** comment requeues; it does not recover a reply already absorbed.
 
   Rules 1 and 2 are keyed on a ref, so a task with neither is never their business,
-  whatever labels it wears; rule 3 is keyed on the absence of one, and a task whose
-  record and label already agree is nobody's business. The rules follow §5's
+  whatever labels it wears; rule 3 is keyed on the absence of a record and rule 4 on
+  a record whose anchor has outrun its thread, and a task whose record and label
+  already agree is nobody's business. The rules follow §5's
   ordering — writes first, **ref delete last** — so a reconcile interrupted part-way
   leaves the task held rather than observably free, and the next reader's rule 1
   finishes it. Every rule is idempotent, so two workers reconciling concurrently
@@ -469,6 +485,12 @@ stops still frees its task within one TTL.
   directive, or parse a body — it compares two integers, one of which rides the
   same read that lists the queue, so every reader reaches the same verdict at the
   same cost.
+
+  A thread that **shrinks below** the anchor is not a requeue, and does not become
+  one on its own: the comparison reports only that nothing is newer, and it cannot
+  tell an untouched thread from one whose comments were deleted. Rule 4 above is
+  what repairs that, by moving the anchor rather than by teaching this comparison
+  to guess.
 
   A **live lease outranks the count**: a comment on a claimed task is context for
   its worker, never a requeue. An **expired** lease outranks nothing — it holds no

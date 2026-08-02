@@ -14,7 +14,7 @@ class ListStartableCallCountTests(KrakenConformanceTest):
             self.mk_issue(n, "task %d" % n, "kraken-task", "project:app")
 
         self.truncate_log()
-        r = self.kraken("list-startable", "OWNER/tasks", "app", "--snapshot")
+        r = self.kraken("list-startable", "acme/tasks", "app", "--snapshot")
         self.assertEqual(r.rc, 0, "snapshot exit (50 free tasks)")
         startable = sum(1 for l in r.out.split("\n") if l.endswith(":startable"))
         self.assertEqual(startable, 50, "all 50 free tasks report startable")
@@ -34,7 +34,7 @@ class ListStartableCallCountTests(KrakenConformanceTest):
             self.mk_body(n, "depends-on: #900")
 
         self.truncate_log()
-        r = self.kraken("list-startable", "OWNER/tasks", "app", "--snapshot")
+        r = self.kraken("list-startable", "acme/tasks", "app", "--snapshot")
         self.assertEqual(r.rc, 0, "snapshot exit (depends-on fan-out)")
         lines = [l for l in r.out.split("\n") if l]
         self.assertEqual(len(lines), 81, "50 free + 1 open dep target + 30 fallback candidates, all reported")
@@ -67,7 +67,7 @@ class ListStartableCallCountTests(KrakenConformanceTest):
             self.mk_state_record(n, "needs-decision", worker="w1")
 
         self.truncate_log()
-        r = self.kraken("list-startable", "OWNER/tasks", "app", "--snapshot")
+        r = self.kraken("list-startable", "acme/tasks", "app", "--snapshot")
         self.assertEqual(r.rc, 0, "snapshot exit (40 free + 20 held)")
         lines = [l for l in r.out.split("\n") if l]
         self.assertEqual(sum(1 for l in lines if l.endswith(":startable")), 40,
@@ -94,7 +94,7 @@ class ListStartableCallCountTests(KrakenConformanceTest):
             self.mk_comment(n, "some chatter on the thread")
 
         self.truncate_log()
-        r = self.kraken("list-startable", "OWNER/tasks", "app", "--snapshot")
+        r = self.kraken("list-startable", "acme/tasks", "app", "--snapshot")
         self.assertEqual(r.rc, 0, "snapshot exit (30 free tasks with threads)")
         self.assertEqual(sum(1 for l in r.out.split("\n") if l.endswith(":startable")),
                          30)

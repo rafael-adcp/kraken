@@ -84,7 +84,19 @@ def reconcile_plan(
          the record its label already implies, touching no label, comment or ref.
          This is what carries a queue written before protocol/9 across the
          upgrade, and what lets this reader tolerate a writer that still only
-         sets labels. It runs once per task, because after it the record exists.
+         sets labels. It runs once per task, because after it the record exists;
+      4. **re-anchor** — an open task whose held record's `comments` anchor has
+         outrun its own thread (comments were deleted): move the anchor back
+         onto the live total, lifting nothing. §6's derivation is memoryless by
+         design — it compares two integers and cannot tell that one of them is
+         now unreachable — so without this repair a deletion buries every reply
+         that follows it, and the operator sits watching a task they answered.
+         The hold is preserved: a deleted comment is not an answer.
+
+    Rule 4 is a PROPOSAL, not a verdict: the applier confirms the shrink against
+    the same surface a transition anchors from before writing anything. The walk
+    reports a count it may have failed to select (`_comment_total` floors that
+    to 0), and a repair that trusted it would re-anchor the whole queue to zero.
 
     No rule is about the in-progress LABEL: that label is write-only (§3), so a
     wrong badge misleads nobody and misroutes nothing — it is not a repair the
@@ -137,14 +149,23 @@ def reconcile_plan(
             plan.append({"rule": "orphan-state", "issue": num,
                          "reason": "the task is no longer an open task"})
 
-    # Rule 3 is keyed on the ABSENCE of a record, so it walks the tasks.
+    # Rules 3 and 4 are keyed on the record — its absence and its anchor — so
+    # they walk the tasks. They cannot both fire on one task: a task with no
+    # record has no anchor to have outrun anything.
     for num in sorted(by_number):
         task = by_number[num]
-        if task.held and num not in states:
-            plan.append({"rule": "migrate", "issue": num,
-                         "reason": "held by a label with no state record",
-                         "state": task.held[0],
-                         "comments": task.comment_total})
+        record = states.get(num)
+        if record is None:
+            if task.held:
+                plan.append({"rule": "migrate", "issue": num,
+                             "reason": "held by a label with no state record",
+                             "state": task.held[0],
+                             "comments": task.comment_total})
+        elif record.held_state and task.comment_total < record.comments:
+            plan.append({"rule": "re-anchor", "issue": num,
+                         "reason": f"the record anchors at {record.comments} "
+                                   f"comments and the thread carries "
+                                   f"{task.comment_total}"})
 
     return plan
 
@@ -163,7 +184,8 @@ def apply_reconcile(api: Api, plan: Sequence[ReconcileAction],
     ends with the ref delete, so a crash leaves the task HELD and the next
     reader's rule 1 finishes the job — the task is never observably free while a
     reclaim is half-applied (§5's ordering rule)."""
-    counts = {"orphan-lock": 0, "orphan-state": 0, "reclaim": 0, "migrate": 0}
+    counts = {"orphan-lock": 0, "orphan-state": 0, "reclaim": 0, "migrate": 0,
+              "re-anchor": 0}
     states = States(api)
     for action in plan:
         rule, num = action["rule"], action["issue"]
@@ -213,6 +235,32 @@ def apply_reconcile(api: Api, plan: Sequence[ReconcileAction],
                 return _reconcile_failure("state", num)
             diag(f"reap: migrate issue={num} — recorded {action['state']}")
 
+        elif rule == "re-anchor":
+            # The walk PROPOSED this repair; the read-back DECIDES it, over the
+            # same REST surface a transition anchors from (§3.1) — so the number
+            # written here is comparable to the ones transitions write, and a
+            # GraphQL walk that failed to select `totalCount` (floored to 0)
+            # cannot talk the reconciler into re-anchoring a whole queue to zero.
+            total = api.comment_count(num)
+            if total is None:
+                return _reconcile_failure("count", num)
+            record = states.of(num)
+            if record.unknown:
+                return _reconcile_failure("state", num)
+            if not record.held_state or total >= record.comments:
+                # It repaired itself between the walk and here, or the walk was
+                # what was wrong. Either way the anchor is already reachable and
+                # moving it would be the write this rule exists to avoid.
+                diag(f"reap: re-anchor issue={num} — skipped, the record and "
+                     "the thread already agree")
+                continue
+            if not states.write(num, record.re_anchored(total)):
+                return _reconcile_failure("state", num)
+            # No comment, no label, no ref: the task is as held as it was, and
+            # the only thing that changed is that the NEXT reply can be seen.
+            diag(f"reap: re-anchor issue={num} — anchor {record.comments} -> "
+                 f"{total} ({action['reason']})")
+
         counts[rule] += 1
     return counts
 
@@ -244,6 +292,12 @@ def project_reconcile(plan: Sequence[ReconcileAction], tasks: list[Task],
                                         worker=worker,
                                         comments=action["comments"],
                                         recorded=True)
+            elif rule == "re-anchor" and num in states:
+                # The walk's count, where the applier wrote the read-back's —
+                # the same skew `reclaim` above carries, and it cannot matter
+                # here: a re-anchor lifts nothing, so this task classifies as
+                # held before the repair and after it, whichever count won.
+                states[num] = states[num].re_anchored(total)
         task = by_number.get(num)
         if task is None:
             continue
@@ -293,6 +347,7 @@ def cmd_reap(args: argparse.Namespace) -> int:
     print(
         f"reap: done leases={counts['leases']} reclaimed={counts['reclaim']} "
         f"orphan_locks={counts['orphan-lock']} "
-        f"orphan_states={counts['orphan-state']} migrated={counts['migrate']}"
+        f"orphan_states={counts['orphan-state']} migrated={counts['migrate']} "
+        f"re_anchored={counts['re-anchor']}"
     )
     return rc

@@ -27,7 +27,7 @@ class LeaseStealRaceTests(KrakenConformanceTest):
         dead = self.mk_expired_lease(7, "w-dead")
 
         results = self.run_concurrent(
-            [("claim", "OWNER/tasks", 7, w) for w in self.THIEVES],
+            [("claim", "acme/tasks", 7, w) for w in self.THIEVES],
             env={"GH_STUB_BARRIER": str(len(self.THIEVES))},
         )
         rcs = [r.rc for r in results]
@@ -72,8 +72,8 @@ class LeaseStealRaceTests(KrakenConformanceTest):
         self.mk_expired_lease(9, "w-slow")
 
         renew, steal = self.run_concurrent(
-            [("heartbeat", "OWNER/tasks", 9, "w-slow", "still here"),
-             ("claim", "OWNER/tasks", 9, "w-thief")],
+            [("heartbeat", "acme/tasks", 9, "w-slow", "still here"),
+             ("claim", "acme/tasks", 9, "w-thief")],
             env={"GH_STUB_CAS_BARRIER": "2"},
         )
         self.assertEqual(sorted([renew.rc, steal.rc]), [0, 10],
@@ -106,7 +106,7 @@ class LeaseStealRaceTests(KrakenConformanceTest):
         self.mk_expired_lease(8, "w-dead")
 
         results = self.run_concurrent(
-            [("claim", "OWNER/tasks", 8, w) for w in self.THIEVES],
+            [("claim", "acme/tasks", 8, w) for w in self.THIEVES],
             env={"GH_STUB_BARRIER": str(len(self.THIEVES))},
         )
         for r in results:

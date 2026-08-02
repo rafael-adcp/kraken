@@ -24,7 +24,7 @@ class WatchTransportFailureTests(KrakenConformanceTest):
         # spacing of 0: the cadence is not what is under test, and a real 60s
         # sleep would hang the suite.
         return self.kraken(
-            "watch", "OWNER/tasks", "app",
+            "watch", "acme/tasks", "app",
             env={"KRAKEN_WATCH_POLL_SECONDS": "0",
                  "KRAKEN_WATCH_MAX_FAILURES": str(max_failures)},
             fail="graphql",

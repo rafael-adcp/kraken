@@ -20,7 +20,7 @@ class StopFailureReleaseTests(KrakenConformanceTest):
     def test_stop_failure_release(self):
         # --- limit hits WITH a claim open: release + flag --------------------
         self.mk_issue(7, "limit-struck task", "kraken-task", "project:app")
-        self.kraken("claim", "OWNER/tasks", 7, "w1")
+        self.kraken("claim", "acme/tasks", 7, "w1")
         self.assertTrue(os.path.isfile(self.claim_state_file("w1")), "setup: claim did not write state file")
         before = self.comment_count(7)
 
@@ -35,7 +35,7 @@ class StopFailureReleaseTests(KrakenConformanceTest):
         self.assertTrue(os.path.isfile(self._wake_retry()), "hook did not stamp the wake-retry flag")
 
         # The released task is claimable again — end to end.
-        r = self.kraken("claim", "OWNER/tasks", 7, "w2")
+        r = self.kraken("claim", "acme/tasks", 7, "w2")
         self.assertEqual(r.rc, 0, "task re-claimable after the hook released it")
 
         # --- no claim open: no queue writes, but the flag still lands --------
@@ -51,7 +51,7 @@ class StopFailureReleaseTests(KrakenConformanceTest):
 
         # --- best-effort: a failing release never fails the hook, flag lands --
         self.mk_issue(9, "release-fails task", "kraken-task", "project:app")
-        self.kraken("claim", "OWNER/tasks", 9, "w3")
+        self.kraken("claim", "acme/tasks", 9, "w3")
         self.assertTrue(os.path.isfile(self.claim_state_file("w3")),
                         "setup: claim did not write state file for w3")
         os.remove(self._wake_retry())

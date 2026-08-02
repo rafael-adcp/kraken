@@ -24,18 +24,18 @@ class ListStartableTests(KrakenConformanceTest):
         self.mk_issue(8, "no project label", "kraken-task")
 
         # Default mode: startable only, oldest first, number<TAB>title.
-        r = self.kraken("list-startable", "OWNER/tasks", "app")
+        r = self.kraken("list-startable", "acme/tasks", "app")
         self.assertEqual(r.rc, 0, "default mode exit")
         self.assertEqual(r.out, "1\told startable\n4\tyoung startable", "default mode output")
 
         # Snapshot mode: every open task in the project, sorted by number, with state.
-        r = self.kraken("list-startable", "OWNER/tasks", "app", "--snapshot")
+        r = self.kraken("list-startable", "acme/tasks", "app", "--snapshot")
         self.assertEqual(r.rc, 0, "snapshot mode exit")
         self.assertEqual(r.out, "1:startable\n2:held\n4:startable\n5:held\n6:held",
                          "snapshot mode output")
 
         # Empty queue: exit 0, no output.
-        r = self.kraken("list-startable", "OWNER/tasks", "nothing-here")
+        r = self.kraken("list-startable", "acme/tasks", "nothing-here")
         self.assertEqual(r.rc, 0, "empty queue exit")
         self.assertEqual(r.out, "", "empty queue output")
 

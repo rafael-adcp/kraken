@@ -18,9 +18,15 @@ def render_next_action(env: Envelope) -> None:
         head += f" holding={env['holding']['repo']}#{env['holding']['issue']}"
     if env.get("resumed") is not None:
         head += f" resumed={str(env['resumed']).lower()}"
+    # Only when true: `bounced` is an alarm — this task is rework — and a line
+    # that says `bounced=false` on every fresh claim is a line nobody reads.
+    if env.get("bounced"):
+        head += " bounced=true"
     print(head)
     if env.get("detail"):
         print(f"  {env['detail']}")
+    if env.get("pr"):
+        print(f"  pr: {env['pr']}  (continue on this branch — do not open a second)")
     brief = env.get("brief")
     if brief:
         print(f"  title: {brief['title']}")

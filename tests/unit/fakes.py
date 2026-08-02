@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.abspath(SKILL_DIR))
 
 import kraken  # noqa: E402
 
-DEFAULT_REPO = "OWNER/tasks"
+DEFAULT_REPO = "acme/tasks"
 
 
 class FakeApi(kraken.Api):

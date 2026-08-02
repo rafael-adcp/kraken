@@ -28,7 +28,7 @@ class ClaimHeldTests(KrakenConformanceTest):
             self.mk_state_record(n, held, worker="w-before")
 
             self.truncate_log()
-            r = self.kraken("claim", "OWNER/tasks", n, "w1")
+            r = self.kraken("claim", "acme/tasks", n, "w1")
             self.assertEqual(r.rc, 11, "claim on %s exit" % held)
             self.assertEqual(r.out, "claim: held issue=%d label=%s" % (n, held),
                              "machine line for %s" % held)
@@ -51,7 +51,7 @@ class ClaimHeldTests(KrakenConformanceTest):
                       "awaiting-merge")
         self.mk_comment(31, "a review comment nobody has an anchor for")
 
-        r = self.kraken("claim", "OWNER/tasks", 31, "w1")
+        r = self.kraken("claim", "acme/tasks", 31, "w1")
         self.assertEqual(r.rc, 11, "an unrecorded held task was handed out")
         self.assertEqual(r.out, "claim: held issue=31 label=awaiting-merge")
 
@@ -62,7 +62,7 @@ class ClaimHeldTests(KrakenConformanceTest):
         self.mk_state_record(32, "awaiting-merge", worker="w-before")
         self.mk_comment(32, "one more thing")
 
-        r = self.kraken("claim", "OWNER/tasks", 32, "w1")
+        r = self.kraken("claim", "acme/tasks", 32, "w1")
         self.assertEqual(r.rc, 0, "the guard refused a requeued task: %s%s"
                          % (r.out, r.err))
         self.assertTrue(self.has_label(32, "in-progress"))
@@ -77,7 +77,7 @@ class ClaimHeldTests(KrakenConformanceTest):
         self.mk_claim_ref(21, "w-other", age_hours=0)
 
         self.truncate_log()
-        r = self.kraken("claim", "OWNER/tasks", 21, "w1")
+        r = self.kraken("claim", "acme/tasks", 21, "w1")
         self.assertEqual(r.rc, 10, "claim on a live lease exit")
         self.assertIn("claim: lost-cas issue=21", r.out)
         self.assertEqual(self.comment_count(21), 0, "no comment written")
@@ -94,7 +94,7 @@ class ClaimHeldTests(KrakenConformanceTest):
         self.mk_issue(23, "claimed, badge never landed", "kraken-task", "project:app")
         self.mk_claim_ref(23, "w-other", age_hours=0)
 
-        r = self.kraken("claim", "OWNER/tasks", 23, "w1")
+        r = self.kraken("claim", "acme/tasks", 23, "w1")
         self.assertEqual(r.rc, 10, "a lease with no badge failed to hold the task")
         self.assertIn("claim: lost-cas issue=23", r.out)
 
@@ -105,7 +105,7 @@ class ClaimHeldTests(KrakenConformanceTest):
         # and claims it.
         self.mk_issue(22, "stale badge", "kraken-task", "project:app",
                       "in-progress")
-        r = self.kraken("claim", "OWNER/tasks", 22, "w1")
+        r = self.kraken("claim", "acme/tasks", 22, "w1")
         self.assertEqual(r.rc, 0, "a task held by nothing was refused: %s%s"
                          % (r.out, r.err))
         self.assertTrue(self.claim_ref_exists(22), "no claim ref was created")

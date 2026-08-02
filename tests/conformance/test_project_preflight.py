@@ -21,7 +21,7 @@ class ProjectPreflightTests(KrakenConformanceTest):
         # misspelled project this worker was pointed at.
         self._seed_startable()
 
-        r = self.kraken("claim-next", "OWNER/tasks", "ap", "w1")
+        r = self.kraken("claim-next", "acme/tasks", "ap", "w1")
         self.assertEqual(r.rc, 13, "an unconfigured project must refuse the drain")
         self.assertIn("project:ap", r.out, "refusal did not name the missing label")
         self.assertIn("app", r.out, "refusal did not list the configured projects")
@@ -35,7 +35,7 @@ class ProjectPreflightTests(KrakenConformanceTest):
     def test_configured_project_drains_normally(self):
         self._seed_startable()
 
-        r = self.kraken("claim-next", "OWNER/tasks", "app", "w1")
+        r = self.kraken("claim-next", "acme/tasks", "app", "w1")
         self.assertEqual(r.rc, 0, "a configured project must drain normally")
         self.assertTrue(self.has_label(7, "in-progress"), "task not claimed")
 
@@ -45,7 +45,7 @@ class ProjectPreflightTests(KrakenConformanceTest):
         # the refusal must not swallow the honest-empty signal.
         self.mk_label("project:idle")
 
-        r = self.kraken("claim-next", "OWNER/tasks", "idle", "w1")
+        r = self.kraken("claim-next", "acme/tasks", "idle", "w1")
         self.assertEqual(r.rc, 3,
                          "an idle but configured project is an empty queue, not a refusal")
         self.assertEqual(r.out, "claim-next: none project:idle")
