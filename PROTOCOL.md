@@ -107,7 +107,7 @@ issue timeline is the log.
 
 | Label | State | Suggested color |
 | --- | --- | --- |
-| `kraken-task` | queued (when no other state label is present) | `1D76DB` blue |
+| `kraken-task` | queue membership (§1), not a state — a task wearing no other state label *shows* as queued | `1D76DB` blue |
 | `in-progress` | claimed by a worker and being executed | `FBCA04` yellow |
 | `needs-decision` | blocked on the operator's decision | `D93F0B` red |
 | `awaiting-merge` | delivered, waiting for review + merge | `0E8A16` green |
@@ -610,7 +610,12 @@ therefore no version handshake between the two sides.
 The verdict of a transition is an exit status, never text (§5.3). Matching the
 reference implementation's codes — `0` success, `10` lost CAS or lost lease, `11`
 not clear, `20` transport failure (state unknown) — is RECOMMENDED, so a driver
-written against one conforming worker can drive another.
+written against one conforming worker can drive another. Those four cover every
+transition this contract defines; a code outside them can only come from an
+ergonomic above it (below), and a driver MUST NOT read one as a transition
+verdict. The reference implementation's are `3` (nothing startable) and `13` (the
+repo has no such `project:<name>` label), both reported by the claim loop and the
+envelope rather than by any transition.
 
 An implementation MAY offer ergonomics above the wire contract, which are **not** part
 of it and which a conforming worker may ignore entirely: the reference implementation
