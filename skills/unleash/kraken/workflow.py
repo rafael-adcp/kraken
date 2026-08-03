@@ -16,6 +16,7 @@ from .comments import make_marker, parse_marker
 from .refs import Refs
 from .queue import is_empty_section, section_body
 from .render import render_init
+from .state import States
 
 # --- subcommand: init --------------------------------------------------------
 # The bootstrap `init`, single-sourced here so the skill and the program never
@@ -204,7 +205,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
     a compliant task gets none (no noise on the happy path, and the same exit
     once the operator fixes what was flagged). Debounced: a re-run whose missing
     set is unchanged posts no duplicate. Informs only — never holds, closes, or
-    relabels. Exit 0 on a clean run, 20 on gh/transport failure."""
+    relabels; the one ref it writes is the §3.1 anchor refresh its own comment
+    owes (`_refresh_anchor`), which changes no state. Exit 0 on a clean run, 20
+    on gh/transport failure."""
     api, issue = args.api, args.issue
 
     labels = api.issue_label_names(issue)
@@ -248,7 +251,55 @@ def cmd_validate(args: argparse.Namespace) -> int:
     if not api.post_comment(issue, body_to_post):
         print(f"validate: gh-failure stage=comment issue={issue}", file=sys.stderr)
         return EXIT_TRANSPORT
+
+    rc = _refresh_anchor(api, issue)
+    if rc != EXIT_OK:
+        return rc
     print(f"validate: #{issue} flagged (missing: project/Goal/Acceptance as listed)")
+    return EXIT_OK
+
+
+def _refresh_anchor(api, issue) -> int:
+    """Move the state record's comment anchor past the comment this pass just
+    posted — the PROTOCOL.md §3.1 SHOULD that any program-authored comment on a
+    task's thread owes.
+
+    Without it the validator's own comment is indistinguishable from an
+    operator's reply: §6 derives a requeue from `total > record.comments` and
+    counts every comment, so a held task the validator touches reads as bounced.
+    The next worker then claims rework nobody asked for, finds an automated
+    nag on the thread, and — correctly, per the skill — escalates it back as a
+    question. The noise costs the operator a `needs-decision` entry; the fix is
+    to stop generating it, since the count is arithmetic the program has.
+
+    `re_anchored` is exactly the right write and no more: the anchor moves, the
+    hold does not lift, the state, worker, expiry count and PR all stand. Only a
+    task that HAS a record is touched — an absent record reads as queued (§3.1)
+    and holds nothing, so there is no anchor to move and writing one would
+    invent state this pass has no business creating.
+
+    A failed read or write is reported as transport rather than swallowed: the
+    comment has landed by now, so a silent failure leaves precisely the stale
+    anchor this exists to prevent, and the run should say so.
+
+    The record is read BEFORE the count, which is the cheap order for this
+    caller: the validator fires on new and edited queue entries, and a task that
+    has never been put down has no record at all — the overwhelmingly common
+    case exits here having paid one ref read, never the issue fetch as well."""
+    states = States(api)
+    record = states.of(issue)
+    if record.unknown:
+        print(f"validate: gh-failure stage=record issue={issue}", file=sys.stderr)
+        return EXIT_TRANSPORT
+    if not record.recorded:
+        return EXIT_OK
+    total = api.comment_count(issue)
+    if total is None:
+        print(f"validate: gh-failure stage=anchor issue={issue}", file=sys.stderr)
+        return EXIT_TRANSPORT
+    if not states.write(issue, record.re_anchored(total)):
+        print(f"validate: gh-failure stage=record issue={issue}", file=sys.stderr)
+        return EXIT_TRANSPORT
     return EXIT_OK
 
 

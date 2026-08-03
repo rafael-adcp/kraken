@@ -822,7 +822,7 @@ class ClaimNextIterationTests(unittest.TestCase):
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.attempted, [7])
         self.assertEqual(won, {"issue": 7, "title": "oldest", "body": "body-7",
-                               "bounced": False, "pr": None})
+                               "bounced": False, "pr": None, "anchor": 0})
 
     def test_the_won_payload_carries_the_records_bounce_and_pr(self):
         """A task with no record is a fresh one; a task whose held record the
@@ -841,6 +841,9 @@ class ClaimNextIterationTests(unittest.TestCase):
                         "a comment past the record's anchor is a bounce (§6)")
         self.assertEqual(won["pr"], "https://github.com/o/r/pull/3",
                          "the delivery the task is coming back from was dropped")
+        self.assertEqual(won["anchor"], 4,
+                         "the anchor is where the new comments start — without "
+                         "it a reader knows the thread moved but not from where")
 
     def test_a_task_whose_record_still_holds_is_not_bounced(self):
         # Same record, nothing said since: the anchor equals the live total, so
@@ -2275,6 +2278,61 @@ class ResumeVerdictTests(unittest.TestCase):
                       "the blocking claim is not named")
 
 
+class FeedbackSinceTests(unittest.TestCase):
+    """The cut §6's requeue derivation implies: `bounced` says the thread moved
+    on, the anchor says from where, and this is the tail between them. Judgment
+    is the model's — deciding what the feedback ASKS FOR — but finding which
+    comments are new is arithmetic, and arithmetic is the program's."""
+
+    THREAD = [{"body": "goal notes", "createdAt": "t0"},
+              {"body": "assumptions", "createdAt": "t1"},
+              {"body": "delivered", "createdAt": "t2"},
+              {"body": "please rename the flag", "createdAt": "t3"}]
+
+    def _api(self, records=None):
+        thread = self.THREAD if records is None else records
+        return FakeApi("acme/tasks", comment_records=lambda i: thread)
+
+    def test_the_cut_starts_at_the_anchor(self):
+        got = kraken.feedback_since(self._api(), 12, 3)
+        self.assertEqual([c["body"] for c in got], ["please rename the flag"],
+                         "the ask is exactly what arrived past the anchor")
+
+    def test_the_cut_is_positional_and_counts_from_the_total(self):
+        """WHERE the range starts is the anchor, which is a comment TOTAL: every
+        comment counts toward it (§6), so nothing may be filtered out BEFORE the
+        slice or the index slides by one per skipped comment."""
+        got = kraken.feedback_since(self._api(), 12, 1)
+        self.assertEqual([c["body"] for c in got],
+                         ["assumptions", "delivered", "please rename the flag"],
+                         "the cut must start exactly at the anchor index")
+
+    def test_the_machines_own_comments_are_not_the_ask(self):
+        """By the time this runs the claim's own comment is on the thread. A
+        marker is what says "worker-authored" (§4), so an unfiltered tail would
+        hand a bounced task its own "Claimed this task" line as the operator's
+        ask — and the agent would do rework against a machine's boilerplate."""
+        thread = self.THREAD + [
+            {"body": kraken.compose_comment("w1", "Claimed this task.",
+                                            {"type": "claim", "worker": "w1"}),
+             "createdAt": "t4"}]
+        got = kraken.feedback_since(self._api(thread), 12, 3)
+        self.assertEqual([c["body"] for c in got], ["please rename the flag"],
+                         "a machine comment past the anchor read as the ask")
+
+    def test_an_anchor_past_the_thread_yields_nothing(self):
+        """The c13 case: the thread SHRANK below its anchor. An empty cut is
+        honest — §6's re-anchor repair is what fixes the anchor, and a reader
+        must never invent feedback by slicing from the end."""
+        self.assertEqual(kraken.feedback_since(self._api(), 12, 99), [],
+                         "a stale anchor must not produce feedback")
+
+    def test_a_failed_read_is_none_never_an_empty_cut(self):
+        api = FakeApi("acme/tasks", comment_records=lambda i: None)
+        self.assertIsNone(kraken.feedback_since(api, 12, 0),
+                          "a failed read must not pose as 'nothing was said'")
+
+
 class NextActionEnvelopeTests(unittest.TestCase):
     """The envelope is the contract the agent reads, so its shape is pinned."""
 
@@ -2319,6 +2377,24 @@ class NextActionEnvelopeTests(unittest.TestCase):
             self.assertNotIn("acme/tasks", env["then"][name],
                              "then.%s targets the drained repo, not the held "
                              "claim" % name)
+
+    def test_feedback_absent_and_empty_mean_different_things(self):
+        """The two absences are not interchangeable, so the envelope keeps them
+        apart: `[]` is "the read landed and the thread has nothing past the
+        anchor" (the stale-anchor case), while an ABSENT key is "the read did
+        not land" — the one case where the agent still owes the thread a look.
+        Collapsing them would tell a worker with a failed read that its
+        operator asked for nothing."""
+        empty = kraken.next_action_envelope(
+            "execute", "acme/tasks", "env-1", issue=12, bounced=True,
+            feedback=[])
+        self.assertEqual(empty["feedback"], [],
+                         "an empty cut is an answer and must be emitted")
+        unread = kraken.next_action_envelope(
+            "execute", "acme/tasks", "env-1", issue=12, bounced=True,
+            feedback=None)
+        self.assertNotIn("feedback", unread,
+                         "an unread thread must not pose as an empty one")
 
     def test_every_action_has_an_exit_code(self):
         self.assertEqual(set(kraken.NEXT_ACTIONS), set(kraken.NEXT_ACTION_EXIT),

@@ -27,6 +27,16 @@ def render_next_action(env: Envelope) -> None:
         print(f"  {env['detail']}")
     if env.get("pr"):
         print(f"  pr: {env['pr']}  (continue on this branch — do not open a second)")
+    # Only on a bounce, and as a COUNT: the bodies are the JSON's business, and
+    # a console line that dumped a thread would bury the verdict it sits under.
+    # An absent key on a bounced envelope is worth saying out loud — it is the
+    # one case where the agent still owes the thread a read of its own.
+    if env.get("bounced"):
+        feedback = env.get("feedback")
+        if feedback is None:
+            print("  feedback: unread — check the thread yourself")
+        else:
+            print(f"  feedback: {len(feedback)} comment(s) past the anchor")
     brief = env.get("brief")
     if brief:
         print(f"  title: {brief['title']}")
