@@ -75,6 +75,10 @@ An `execute` envelope carries everything you need, so you never fetch the task a
 - **`bounced`** — `true` when the task is coming *back* to you rather than arriving
   fresh. The program derives it; you never have to notice it yourself. What to do about
   it is the next section.
+- **`feedback`** — on a bounce, the comments that arrived since the last transition,
+  already cut for you: **that is the ask**. An empty list means the thread moved but
+  left nothing past the anchor. The key is *absent* only when the read failed — the one
+  case where you go read the thread yourself.
 - **`pr`** — present only when an earlier turn on this task already delivered. It is
   where that work lives: **continue on that branch and update that PR** rather than
   opening a second one ([`DELIVERY.md`](DELIVERY.md)).
@@ -120,13 +124,13 @@ that leaves the claim ref standing and the task reads as held until the lease ex
 
 ## What is yours: the judgment
 
-**On `bounced: true`, read the thread before the Goal** (`gh -R OWNER/tasks issue view
-<n> --comments`). The task is coming back: any comment I leave puts a held task in the
-queue again — from `awaiting-merge` exactly as from `needs-decision` (PROTOCOL.md §6) —
-so **the newest feedback is the ask** and the Goal is only background. If it asks for
-nothing actionable ("nice, thanks", "merging tomorrow"), do **not** invent rework — run
-`then.escalate` saying the delivery still stands and you cannot tell what I want changed.
-A question on the thread is the honest answer to a comment nobody can act on.
+**On `bounced: true`, read `feedback` before the Goal.** The task is coming back: any
+comment I leave puts a held task in the queue again — from `awaiting-merge` exactly as
+from `needs-decision` (PROTOCOL.md §6) — so **the newest feedback is the ask** and the
+Goal is only background. If it asks for nothing actionable ("nice, thanks", "merging
+tomorrow"), or the list came back empty, do **not** invent rework — run `then.escalate`
+saying the delivery still stands and you cannot tell what I want changed. A question on
+the thread is the honest answer to a comment nobody can act on.
 
 Then, inside an `execute`:
 

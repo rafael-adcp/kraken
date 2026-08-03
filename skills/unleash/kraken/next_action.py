@@ -8,10 +8,11 @@ import json
 import os
 
 from .contract import (
-    ClaimRecord, ENTRYPOINT, EXIT_LOST, EXIT_NONE, EXIT_NOT_CLEAR, EXIT_OK,
-    EXIT_TRANSPORT, EXIT_UNKNOWN_PROJECT, Envelope, Epoch, Gen, Issue, Json,
-    Repo, Worker, diag, diagnostics_on_stderr
+    ClaimRecord, CommentRecord, ENTRYPOINT, EXIT_LOST, EXIT_NONE,
+    EXIT_NOT_CLEAR, EXIT_OK, EXIT_TRANSPORT, EXIT_UNKNOWN_PROJECT, Envelope,
+    Epoch, Gen, Issue, Json, Repo, Worker, diag, diagnostics_on_stderr
 )
+from .comments import parse_marker
 from .transport import Api, comment_total_of
 from .lease import (
     Lease, UNREADABLE_LEASE, clear_claim_state, format_iso,
@@ -107,6 +108,38 @@ def lease_block(
     }
 
 
+def feedback_since(api: Api, issue: Issue, anchor: int,
+                   ) -> list[CommentRecord] | None:
+    """The comments that arrived AFTER the state record was written — §6's
+    requeue derivation as the words that caused it, not as a boolean the agent
+    then goes back to the thread to interpret. Returns the records in server
+    order, or None on transport failure.
+
+    Two steps, and they answer different questions. WHERE the new comments start
+    is positional: the anchor is a comment TOTAL and `comment_records` returns
+    the whole thread in that same server order, so the tail past that index is
+    the range §6 derived its verdict from — every comment counts there (§6), so
+    no filter may run before the cut without sliding it.
+
+    WHAT of that range is the ask is a different question, and the machine's own
+    comments are not it. A marker is exactly the structural signal that says
+    "worker-authored" (§4), and by the time this runs the claim's own comment is
+    already on the thread — so an unfiltered tail would hand every bounced task
+    back its own "Claimed this task" line as though the operator had written it.
+    Filtering AFTER the cut costs the range nothing: the index is already fixed.
+
+    A thread that SHRANK below its anchor yields an empty list rather than a
+    slice from the end — which is honest, and is the c13 case: the anchor is
+    stale, §6's re-anchor repair is what fixes it, and a reader must not invent
+    feedback to fill the gap. Empty is still an answer, and the caller reports
+    it as one; None is the absence that means "the read did not land"."""
+    records = api.comment_records(issue)
+    if records is None:
+        return None
+    return [c for c in records[max(0, int(anchor)):]
+            if parse_marker(c.get("body") or "") is None]
+
+
 def task_brief(title: str, body: str) -> Json:
     """The task as the agent needs it: the issue-form sections split out, plus
     the raw body for a hand-written issue that carries no headings. An empty or
@@ -152,6 +185,7 @@ class NextActionEnvelope:
               resumed: bool | None = None,
               bounced: bool | None = None,
               pr: str | None = None,
+              feedback: list[CommentRecord] | None = None,
               brief: Json | None = None,
               lease: Json | None = None,
               reason: str | None = None,
@@ -159,14 +193,24 @@ class NextActionEnvelope:
               holding: Json | None = None) -> Envelope:
         """The one JSON shape next-action emits.
 
-        `bounced` and `pr` are what the state record knows about this task's
-        PAST, carried because the program already computed both and the agent
-        would otherwise have to rediscover them from the thread — `bounced` by
-        reading comments and judging whose they are, `pr` by hunting the earlier
-        delivery in the body. `bounced` rides every execute, false included: "no,
-        this is a fresh task" is an answer, and an absent key would read as an
-        older program that could not tell. `pr` is omitted when there is none,
-        the same rule the markers follow — no delivery is not an empty delivery.
+        `bounced`, `pr` and `feedback` are what the state record knows about this
+        task's PAST, carried because the program already computed them and the
+        agent would otherwise have to rediscover them from the thread —
+        `bounced` by reading comments and judging whose they are, `pr` by hunting
+        the earlier delivery in the body. `bounced` rides every execute, false
+        included: "no, this is a fresh task" is an answer, and an absent key
+        would read as an older program that could not tell. `pr` is omitted when
+        there is none, the same rule the markers follow — no delivery is not an
+        empty delivery.
+
+        `feedback` is what `bounced` is ABOUT: the comments past the record's
+        anchor, so the ask arrives with the verdict instead of costing a fetch
+        and an eyeball judgment of which comments are new. It rides a bounced
+        execute only — a fresh task has no thread to cut — and its two absences
+        are distinct, which is why it is omitted rather than emitted empty on
+        failure: `[]` says the read landed and found nothing past the anchor (a
+        stale anchor, §6's repair case), while an ABSENT key says the read did
+        not land and the agent owes the thread a look of its own.
 
         `holding` is `{"repo", "issue"}` naming a claim this worker must resolve,
         and it exists because a `blocked` claim may live in a **different repo**
@@ -188,6 +232,8 @@ class NextActionEnvelope:
             env["bounced"] = bool(bounced)
         if pr:
             env["pr"] = pr
+        if feedback is not None:
+            env["feedback"] = list(feedback)
         if reason:
             env["reason"] = reason
         if detail:
@@ -445,12 +491,31 @@ class NextAction:
         # and still carries the anchor the live total ran past. Every resume of
         # this task therefore reports the same `bounced` its acquisition did —
         # which is what the agent needs, since it is rework for its whole turn.
+        # And because the anchor is the same, so is the cut: a resumed bounce
+        # carries the same feedback the acquisition did, rather than a shorter
+        # tail that would silently drop what the agent is meant to answer.
+        bounced = state.requeued(comment_total_of(issue_obj))
         return self.envelope.answer(
             "execute", issue=issue, resumed=True,
-            bounced=state.requeued(comment_total_of(issue_obj)), pr=state.pr,
+            bounced=bounced, pr=state.pr,
+            feedback=self._feedback(issue, bounced, state.comments),
             brief=task_brief(issue_obj.get("title") or "",
                              issue_obj.get("body") or ""),
             lease=lease)
+
+    def _feedback(self, issue: Issue, bounced: bool,
+                  anchor: int) -> list[CommentRecord] | None:
+        """The comments this bounce is about, or None when there is nothing to
+        cut or the cut could not be read.
+
+        Gated on `bounced` so the common case — a fresh task, no thread — pays
+        nothing: this is the one read `next-action` adds beyond what the claim
+        loop already did, and it is owed only when the program has just told the
+        agent the thread moved on. A failed read degrades to the older behaviour
+        (the agent goes to the thread itself), never to a wrong cut."""
+        if not bounced:
+            return None
+        return feedback_since(self.api, issue, anchor)
 
     # --- acquiring the next task ---------------------------------------------
 
@@ -462,6 +527,8 @@ class NextAction:
             return self.envelope.answer(
                 "execute", issue=won["issue"], resumed=False,
                 bounced=won["bounced"], pr=won["pr"],
+                feedback=self._feedback(won["issue"], won["bounced"],
+                                        won["anchor"]),
                 brief=task_brief(won["title"], won["body"]),
                 lease=lease_block(self.now, self.now, self.ttl,
                                   source="estimated"))

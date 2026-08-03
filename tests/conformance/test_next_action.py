@@ -122,6 +122,17 @@ class NextActionTests(KrakenConformanceTest):
                          "the earlier delivery's PR was dropped; a worker "
                          "without it opens a second, orphan PR")
 
+        # The bounce arrives with the words that caused it. `bounced` alone still
+        # cost a `gh issue view --comments` and an eyeball judgment of which
+        # comments were new — the program holds the anchor, so the cut is a list
+        # slice and belongs here, not in the agent's head.
+        self.assertIn("feedback", env,
+                      "a bounce must carry the comments it is about")
+        self.assertEqual([c["body"].strip() for c in env["feedback"]],
+                         ["almost — the pagination is off by one, please fix"],
+                         "the feedback must be exactly what arrived past the "
+                         "anchor — no earlier comment, nothing missing")
+
         # And it survives the claim: taking the task writes no record (§3.1), so
         # every resume of it reports the same verdict its acquisition did. A
         # bounce that evaporated on the first `next-action` after the claim
@@ -130,6 +141,22 @@ class NextActionTests(KrakenConformanceTest):
         self.assertTrue(again["resumed"], "setup: expected a resume")
         self.assertTrue(again["bounced"], "the bounce did not survive the claim")
         self.assertEqual(again["pr"], pr, "the resume dropped the delivery URL")
+        self.assertEqual([c["body"].strip() for c in again["feedback"]],
+                         ["almost — the pagination is off by one, please fix"],
+                         "the resume must cut from the SAME anchor — a shorter "
+                         "tail would drop what the agent is meant to answer")
+
+    def test_a_fresh_task_carries_no_feedback(self):
+        """No bounce, no thread to cut, no read paid for. `feedback` is owed by
+        a bounce and nothing else."""
+        self.mk_issue(7, "a fresh task", "kraken-task", "project:app")
+        self.mk_body(7, "### Goal\nship it")
+        _r, env = self.envelope("acme/tasks", "app", "w1")
+        self.assertEqual(env["action"], "execute", "setup claim failed")
+        self.assertFalse(env["bounced"], "setup: expected a fresh claim")
+        self.assertNotIn("feedback", env,
+                         "a fresh task must carry no feedback key — an empty "
+                         "one reads as an operator who said nothing")
 
     def test_stolen_lease_is_abandoned_without_writing(self):
         self.mk_issue(7, "task", "kraken-task", "project:app")
