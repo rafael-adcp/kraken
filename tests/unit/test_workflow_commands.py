@@ -480,6 +480,9 @@ class ValidateCommandTests(unittest.TestCase):
             "post_comment": lambda issue, body: (
                 self.posts.append((issue, body)) or True),
             "comment_records": lambda issue: [],
+            # No state ref: the default queue entry has never been put down, so
+            # the §3.1 anchor refresh finds no record and writes nothing.
+            "paginated": lambda path, **kw: [],
         }
         defaults.update(methods)
         return FakeApi("acme/tasks", **defaults)
@@ -537,6 +540,120 @@ class ValidateCommandTests(unittest.TestCase):
             api=self._api(issue_label_names=lambda i: None))
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_validate(args)
+        self.assertEqual(rc, kraken.EXIT_TRANSPORT)
+
+    # --- the §3.1 anchor refresh this pass's own comment owes ----------------
+
+    def _flagged(self, record=None, total=9, **methods):
+        """Run a validate pass over a task that WILL be flagged (no project
+        label), against a state ref that resolves to `record` through the REAL
+        `States.of` path — one matching-refs read, one batched commit read.
+        `record=None` is a task that has none. Ref writes land in `self.writes`;
+        returns the exit code."""
+        self.writes = []
+
+        def request(verb, path, body=None):
+            self.writes.append((verb, path, body))
+            # The commit create is the one write whose RESPONSE is read back
+            # (Refs.commit wants the sha it then points the ref at).
+            return (201, json.dumps({"sha": "new-sha"}))
+
+        def paginated(path, **kw):
+            if "matching-refs" in path and record is not None:
+                return [{"ref": "refs/kraken/state/1", "object": {"sha": "s1"}}]
+            return []
+
+        defaults = {
+            "issue_label_names": lambda i: ["kraken-task"],
+            "issue_body": lambda i: self.GOOD,
+            "paginated": paginated,
+            "aliased": lambda fields: {
+                "c0": {"committedDate": "2026-07-01T09:00:00Z",
+                       "message": kraken.make_marker(record.payload())}}
+            if record is not None else (lambda fields: {}),
+            "comment_count": lambda issue: total,
+            "request": request,
+        }
+        defaults.update(methods)
+        args = SimpleNamespace(repo="acme/tasks", issue="1",
+                               api=self._api(**defaults))
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            return kraken.cmd_validate(args)
+
+    def _written_record(self):
+        """The state marker this run committed, decoded — or None if it wrote
+        no commit at all."""
+        for _verb, path, body in self.writes:
+            if path.endswith("/git/commits"):
+                return kraken.parse_state_commit((body or {}).get("message", ""))
+        return None
+
+    def test_its_own_comment_does_not_read_as_an_operator_reply(self):
+        """THE point of the refresh (PROTOCOL.md §3.1). §6 derives a requeue
+        from `total > record.comments` and counts EVERY comment, so a validation
+        comment left un-anchored makes a held task read as bounced: the next
+        worker claims rework nobody asked for, finds an automated nag, and
+        escalates it back as a question the operator then has to answer."""
+        held = kraken.TaskState(state="awaiting-merge", worker="w0",
+                                comments=4, recorded=True,
+                                pr="https://github.com/o/r/pull/3")
+        rc = self._flagged(held, total=5)
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(len(self.posts), 1, "the flag itself still posts")
+        written = self._written_record()
+        self.assertIsNotNone(written, "the anchor was never refreshed")
+        self.assertEqual(written.comments, 5,
+                         "the anchor must clear this pass's own comment")
+        self.assertFalse(written.requeued(5),
+                         "after the refresh the task must NOT read as bounced")
+
+    def test_the_refresh_moves_the_anchor_and_nothing_else(self):
+        """`re_anchored`, not `moved_to`: validate informs, so the hold, the
+        worker, the expiry count and the delivery URL all stand. A refresh that
+        lifted the hold would hand an answered task back to the queue."""
+        held = kraken.TaskState(state="needs-decision", worker="w0", comments=4,
+                                expiries=2, recorded=True,
+                                pr="https://github.com/o/r/pull/3")
+        self._flagged(held, total=5)
+        written = self._written_record()
+        self.assertEqual(written.state, "needs-decision", "the hold was lifted")
+        self.assertEqual(written.worker, "w0")
+        self.assertEqual(written.expiries, 2, "the expiry count is cumulative")
+        self.assertEqual(written.pr, "https://github.com/o/r/pull/3")
+
+    def test_a_task_with_no_record_is_not_given_one(self):
+        """The common case: a new queue entry has never been put down, so there
+        is no anchor to move and no record this pass may invent."""
+        rc = self._flagged(None)
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(len(self.posts), 1, "the flag itself still posts")
+        self.assertIsNone(self._written_record(),
+                          "a task with no record must not be given one")
+
+    def test_a_compliant_task_pays_for_no_refresh(self):
+        """No comment, no anchor to clear. The refresh is owed by the POST, so
+        the happy path must not read the record at all."""
+        reads = []
+        rc = self._flagged(
+            None,
+            issue_label_names=lambda i: ["kraken-task", "project:app"],
+            paginated=lambda path, **kw: reads.append(path) or [])
+        self.assertEqual(rc, kraken.EXIT_OK)
+        self.assertEqual(self.posts, [], "a compliant task is not flagged")
+        self.assertEqual(
+            [p for p in reads if "matching-refs" in p], [],
+            "a compliant task must not pay for a state-ref read")
+
+    def test_an_unreadable_record_is_transport_not_a_silent_stale_anchor(self):
+        held = kraken.TaskState(state="awaiting-merge", worker="w0",
+                                comments=4, recorded=True)
+        rc = self._flagged(held, paginated=lambda path, **kw: None)
+        self.assertEqual(rc, kraken.EXIT_TRANSPORT)
+
+    def test_an_unreadable_count_is_transport(self):
+        held = kraken.TaskState(state="awaiting-merge", worker="w0",
+                                comments=4, recorded=True)
+        rc = self._flagged(held, comment_count=lambda issue: None)
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
 
 
