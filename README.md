@@ -322,12 +322,16 @@ queue is empty.
 
 For the GitHub Copilot CLI worker (no Monitor tool), the shipped
 [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) is the ready-made ambush loop:
-run it from a kraken checkout and it polls the queue outside the model, invoking
-`copilot` only when a task is actually startable — the same zero-token idle
-behavior as the Monitor watcher, without copying anything out of a session folder.
+launch it from the work repo's checkout (or point `--work-dir` at it) and it polls
+the queue outside the model, invoking `copilot` in that work repo only when a task
+is actually startable — the same zero-token idle behavior as the Monitor watcher,
+without copying anything out of a session folder. The contract files stay in the
+kraken checkout the script sits in; the loop hands them to `copilot` by absolute
+path.
 
 ```
-scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app
+cd /path/to/my_app
+/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app
 ```
 
 ## The operator's cheat sheet
