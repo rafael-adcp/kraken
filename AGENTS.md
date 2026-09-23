@@ -49,23 +49,37 @@ something in SKILL.md, that is a bug in SKILL.md, not a delta belonging here.
 
 ## Driving it non-interactively
 
-From a checkout of the work repo, with this `AGENTS.md` auto-loaded:
+Run `copilot` from a checkout of the **work repo** — that is where the code, the work
+branch and the draft PR happen. This file lives in the kraken checkout, not there, so
+copilot does not auto-load it: name the contract files by absolute path, and grant read
+access to the kraken checkout with `--add-dir`:
 
 ```bash
+KRAKEN=/path/to/kraken    # your kraken checkout
+cd /path/to/work-repo
 copilot -p "Act as kraken worker <worker-name>, draining project:<name> from OWNER/tasks.
-Follow AGENTS.md, SKILL.md and PROTOCOL.md. Do ONE drain pass: run kraken.py next-action,
+Your working directory is the work repo. Read and follow $KRAKEN/AGENTS.md,
+$KRAKEN/skills/unleash/SKILL.md and $KRAKEN/PROTOCOL.md, where <skill> is
+$KRAKEN/skills/unleash. Do ONE drain pass: run
+python3 \"$KRAKEN/skills/unleash/kraken.py\" next-action OWNER/tasks <name> <worker-name>,
 execute the task it hands you end to end, deliver it as a draft PR, then stop." \
-  --allow-all-tools --no-ask-user --silent
+  --add-dir "$KRAKEN" --allow-all-tools --no-ask-user --silent
 ```
 
 Wrap it in a shell loop for continuous ambush — the operator owns the cadence and the
 stop. Rather than hand-rolling that loop, use the shipped
-[`scripts/kraken-loop.sh`](scripts/kraken-loop.sh): a self-locating, argument-driven
-ambush loop you run straight from a kraken checkout (no copying it out of a session
-folder):
+[`scripts/kraken-loop.sh`](scripts/kraken-loop.sh), which builds exactly that
+invocation: a self-locating, argument-driven ambush loop (no copying it out of a
+session folder) that runs `copilot` in the directory you launch it from, or in the one
+`--work-dir` names:
 
 ```bash
-scripts/kraken-loop.sh OWNER/tasks --worker-name <worker-name> --project <name>
+cd /path/to/work-repo
+/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name <worker-name> --project <name>
+
+# or from anywhere, naming the work repo explicitly
+/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name <worker-name> --project <name> \
+  --work-dir /path/to/work-repo
 ```
 
 Each poll runs the free, read-only `list-startable` check first and only invokes
