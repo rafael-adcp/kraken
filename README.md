@@ -323,6 +323,11 @@ Want a bounded run instead — a scheduled container, a one-off drain? Pass
 --once`) still works — it just costs one full LLM turn per fire even when the
 queue is empty.
 
+Inside an interactive **GitHub Copilot CLI** session, `/kraken:unleash` stays in
+ambush too: Copilot's background shell wakes the agent when a command exits, so
+the worker arms `kraken.py watch --exit-on-wake` — a watcher that exits on its
+first wake and is re-armed after each drain — with the same zero-token idle.
+
 For the GitHub Copilot CLI worker (no Monitor tool), the shipped
 [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) is the ready-made ambush loop:
 launch it from the work repo's checkout (or point `--work-dir` at it) and it polls

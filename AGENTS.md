@@ -34,10 +34,11 @@ work ran, e.g. `kraken-copilot-1`), and a `--project` (only take `project:<name>
 SKILL.md used to assume two Claude Code facilities, and this file used to substitute for
 them. It no longer has to, because the skill now states both as harness-neutral options:
 
-- **The watcher.** SKILL.md asks for a *persistent background process* running
-  `kraken.py watch`, and names the Claude Code Monitor tool and
-  [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) as the two ways to get one. Use the
-  loop; it is the versioned home of exactly this fallback.
+- **The watcher.** SKILL.md asks for a *background process* running `kraken.py watch`.
+  Interactively (`/kraken:unleash` inside `copilot`), Copilot's `bash` tool in `async`
+  mode wakes you when a command **exits**, not per output line, so SKILL.md has you arm
+  `watch --exit-on-wake --worker <name>` and re-arm it after each drain. Headless, use
+  [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh), which polls from outside the model.
 - **Per-task context isolation.** SKILL.md calls the subagent an explicit optimization
   and says to run the task inline when the harness has none. A fresh `copilot` process
   per pass gives you the same isolation anyway.
