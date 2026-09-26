@@ -106,10 +106,24 @@ class SessionEndReleaseTests(KrakenConformanceTest):
         self.assertTrue(os.path.isfile(self.claim_state_file("wb")),
                         "sess-B's state file was removed")
 
+    def test_copilot_session_end_releases_its_own_claim(self):
+        # Copilot CLI loads the plugin's hooks.json and fires SessionEnd with the
+        # Claude-shaped payload; the claim names the session by its
+        # COPILOT_AGENT_SESSION_ID, so the ending Copilot session frees it.
+        self.mk_issue(7, "copilot-held task", "kraken-task", "project:app")
+        self.kraken("claim", "acme/tasks", 7, "copilot-1",
+                    env={"COPILOT_CLI": "1", "COPILOT_AGENT_SESSION_ID": "cop-A"})
+        self.assert_claim_survives(7, "copilot-1", event("some-claude-session"),
+                                   "another session's end released a Copilot claim")
+
+        self.run_hook(HOOK, event("cop-A"))
+        self.assertFalse(self.has_label(7, "in-progress"),
+                         "the Copilot session's end did not release its claim")
+
     def test_claim_recording_no_session_is_left_to_the_lease(self):
-        # A claim made outside Claude Code (the Copilot loop, a bare shell) names
-        # no session, so no SessionEnd can prove it owns it — the loop's own
-        # release-on-exit and the lease TTL cover it instead.
+        # A claim made outside any agent session (a bare shell) names no
+        # session, so no SessionEnd can prove it owns it — the lease TTL (and
+        # the Copilot loop's own release-on-exit) cover it instead.
         self.mk_issue(7, "copilot-held task", "kraken-task", "project:app")
         self.kraken("claim", "acme/tasks", 7, "copilot-1")
         self.assert_claim_survives(7, "copilot-1", event("some-claude-session"),

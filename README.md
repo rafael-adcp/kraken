@@ -582,9 +582,11 @@ Yes — and under `kraken-protocol/9` that includes recovery **latency**, which 
 the part that used to differ. A claim is a **lease** that expires 30 minutes
 after its last renewal, and expiry is applied by whoever reads the queue. So a
 worker that dies in any harness, in any way, frees its task within one TTL with
-nothing installed. The bundled `SessionEnd`/`StopFailure` hooks are **Claude Code
-hook events** and still never fire around a `copilot` process — they are now an
-optimization (seconds instead of minutes), not the mechanism.
+nothing installed. The bundled hooks are an optimization on top (seconds instead
+of minutes), not the mechanism — and Copilot CLI runs the `SessionEnd` one too:
+it loads the plugin's `hooks.json`, and `kraken.py claim` records the Copilot
+session (`COPILOT_AGENT_SESSION_ID`) so a Copilot session that ends gracefully
+while holding a lease hands it back on the spot, exactly like a Claude Code one.
 
 [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) carries the same optimization
 for Copilot: `kraken.py claim` records the open claim in

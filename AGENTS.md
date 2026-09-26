@@ -103,7 +103,10 @@ harness, so the recovery-latency gap between a Claude Code session and a `copilo
 process is gone.
 
 The `hooks/` (SessionEnd, StopFailure) and the loop's release-on-exit are an
-**optimization** on top of that floor, not the floor itself: `kraken.py` records the open
+**optimization** on top of that floor, not the floor itself. Copilot CLI loads the
+plugin's `hooks.json` too, so an installed plugin's SessionEnd hook releases a lease
+its own session still holds (the claim records `COPILOT_AGENT_SESSION_ID`).
+`kraken.py` records the open
 claim in `$KRAKEN_STATE_DIR/claim-<worker>.json` (default `~/.kraken/`) and every
 terminal transition removes it, so if the `copilot` process exits with that file still
 present (crash, kill, rate-limit abort) — or the loop is stopped mid-drain (Ctrl-C,

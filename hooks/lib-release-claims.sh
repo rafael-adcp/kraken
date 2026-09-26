@@ -7,8 +7,9 @@
 # Discovery: `kraken.py claim` writes $KRAKEN_STATE_DIR/claim-<worker>.json on a
 # won claim; deliver/escalate/release remove it. The release functions run
 # `kraken.py release` for every claim-*.json still present that the caller may
-# free: the Copilot loop scopes by its worker, SessionEnd by the Claude Code
-# session the claim recorded (#173), StopFailure (account-wide) frees them all.
+# free: the Copilot loop scopes by its worker, SessionEnd by the agent session
+# (Claude Code or Copilot CLI) the claim recorded (#173), StopFailure
+# (account-wide) frees them all.
 #
 # Best-effort: a failed release falls back to the lease expiring on its own
 # (PROTOCOL.md §5) — it never fails the caller. Everything here is an
@@ -66,9 +67,10 @@ release_all_claims() {
 }
 
 # release_session_claims REASON SESSION_ID — only the claims made inside that
-# Claude Code session (`kraken.py claim` records CLAUDE_CODE_SESSION_ID as
-# "session"). SessionEnd fires for every session on the host, so this is the
-# only scope that cannot free another session's live claim (#173).
+# agent session (`kraken.py claim` records CLAUDE_CODE_SESSION_ID, or under
+# Copilot CLI COPILOT_AGENT_SESSION_ID, as "session"). SessionEnd fires for
+# every session on the host, so this is the only scope that cannot free another
+# session's live claim (#173).
 release_session_claims() {
   release_claims_where "$1" session "${2:-}"
 }

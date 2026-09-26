@@ -71,6 +71,38 @@ class ClaimStateFileTests(KrakenConformanceTest):
         self.assertEqual(record.get("session"), "sess-123",
                          "claim did not record the Claude Code session")
 
+    def claimed_session(self, env):
+        self.mk_issue(7, "a task", "kraken-task", "project:app")
+        r = self.kraken("claim", "acme/tasks", 7, "w1", env=env)
+        self.assertEqual(r.rc, 0, "clean claim exit")
+        with open(self.claim_state_file("w1"), encoding="utf-8") as f:
+            return json.load(f).get("session")
+
+    def test_claim_records_the_copilot_session(self):
+        # Copilot CLI fires the same SessionEnd hook with its own session id,
+        # which its shell tool exposes as COPILOT_AGENT_SESSION_ID.
+        self.assertEqual(
+            self.claimed_session({"COPILOT_CLI": "1",
+                                  "COPILOT_AGENT_SESSION_ID": "cop-9"}),
+            "cop-9", "claim did not record the Copilot CLI session")
+
+    def test_copilot_session_wins_over_an_inherited_claude_one(self):
+        # A `copilot` launched from a Claude Code session inherits its
+        # CLAUDE_CODE_SESSION_ID; recording that would let the Claude session's
+        # end release the Copilot session's claim.
+        self.assertEqual(
+            self.claimed_session({"COPILOT_CLI": "1",
+                                  "COPILOT_AGENT_SESSION_ID": "cop-9",
+                                  "CLAUDE_CODE_SESSION_ID": "claude-parent"}),
+            "cop-9", "claim recorded the inherited Claude Code session")
+
+    def test_copilot_without_a_session_id_records_none(self):
+        # Inside Copilot an inherited Claude id is never a fallback.
+        self.assertIsNone(
+            self.claimed_session({"COPILOT_CLI": "1",
+                                  "CLAUDE_CODE_SESSION_ID": "claude-parent"}),
+            "claim recorded a session Copilot did not name")
+
 
 if __name__ == "__main__":
     unittest.main()

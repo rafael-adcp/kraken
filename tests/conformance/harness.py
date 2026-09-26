@@ -147,9 +147,10 @@ class KrakenConformanceTest(unittest.TestCase):
 
     def base_env(self, extra=None):
         env = dict(os.environ)
-        # The suite may itself run inside a Claude Code session; a claim must
-        # record a session only when a test says which one (#173).
-        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        # The suite may itself run inside a Claude Code or Copilot CLI session;
+        # a claim must record a session only when a test says which one (#173).
+        for var in ("CLAUDE_CODE_SESSION_ID", "COPILOT_CLI", "COPILOT_AGENT_SESSION_ID"):
+            env.pop(var, None)
         env["GITHUB_API_URL"] = self.api_url
         # A token from the env means kraken.py never spawns `gh auth token`.
         env["GH_TOKEN"] = "stub-token"

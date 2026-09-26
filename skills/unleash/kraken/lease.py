@@ -231,23 +231,30 @@ def claim_state_path(worker: Worker) -> str:
     return os.path.join(state_dir(), f"claim-{worker}.json")
 
 
-def claude_code_session() -> str | None:
-    """The Claude Code session this process runs in, or None outside one.
-    Claude Code sets CLAUDE_CODE_SESSION_ID for every Bash tool call; the
-    SessionEnd hook receives the same id as `session_id` on stdin."""
+def agent_session() -> str | None:
+    """The agent session this process runs in, or None outside one. Both
+    harnesses fire the bundled SessionEnd hook with the ending session's id as
+    `session_id` on stdin, and each exposes that same id to its shell tool:
+    Claude Code as CLAUDE_CODE_SESSION_ID, GitHub Copilot CLI as
+    COPILOT_AGENT_SESSION_ID (verified on 1.0.88). Inside Copilot (COPILOT_CLI
+    set) its own id wins, because a `copilot` launched from a Claude Code
+    session inherits that session's CLAUDE_CODE_SESSION_ID — recording it would
+    let the Claude session's end release a claim the Copilot session holds."""
+    if os.environ.get("COPILOT_CLI"):
+        return os.environ.get("COPILOT_AGENT_SESSION_ID") or None
     return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
 
 
 def write_claim_state(repo: Repo, issue: Issue, worker: Worker) -> None:
     """Record the open claim so the SessionEnd hook can auto-release it if the
     worker's session ends before a terminal transition. The record names the
-    Claude Code session that holds the claim, when there is one, because
-    SessionEnd fires for EVERY session on the host and must free only the
-    ending session's own claims (#173). Best-effort: a state dir we cannot
+    agent session (Claude Code or Copilot CLI) that holds the claim, when there
+    is one, because SessionEnd fires for EVERY session on the host and must
+    free only the ending session's own claims (#173). Best-effort: a state dir we cannot
     write is never worth failing a won claim over — the reaper backs us up
     regardless."""
     record = {"repo": repo, "issue": str(issue), "worker": worker}
-    session = claude_code_session()
+    session = agent_session()
     if session:
         record["session"] = session
     d = state_dir()
