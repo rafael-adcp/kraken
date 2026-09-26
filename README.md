@@ -362,7 +362,16 @@ On **Windows**, the loop is a bash script: run it from WSL or Git Bash, with
 `copilot`, `python3` and `git` installed on that side (under WSL, install Copilot
 CLI inside the distro — `npm install -g @github/copilot` — rather than calling the
 Windows one, which a Linux shell cannot launch). Everything the loop invokes then
-resolves in the same environment.
+resolves in the same environment — `gh` included: `kraken.py` reads the queue
+with `GH_TOKEN`, `GITHUB_TOKEN` or `gh auth token`, and a WSL shell does not see a
+`gh.exe` installed on Windows. Both scripts check for a token before they start.
+
+**`GH_TOKEN` and Copilot's login.** Copilot CLI also authenticates its *model*
+with `GH_TOKEN`/`GITHUB_TOKEN` when one is set (after `COPILOT_GITHUB_TOKEN`), so a
+token exported only for the queue — a classic PAT, or one without Copilot access —
+logs Copilot out of your own subscription. Prefer `gh auth login` on the worker
+machine and leave both unset; if you must export one, also set
+`COPILOT_GITHUB_TOKEN` to a token that carries Copilot access.
 
 ## The operator's cheat sheet
 
@@ -557,6 +566,15 @@ kill: 30 minutes without a renewal and the task is free for the next worker
 regardless, no hook involved. (Removing the `in-progress` label by hand does
 *nothing* here — it's a badge for you, not the lock. The lock is the claim ref,
 and only the lease's clock or an explicit release opens it.)
+
+**On GitHub Copilot CLI** the recovery is the same, the retry is not. Kraken has no
+verified Copilot event for a usage limit, so there is no `StopFailure` equivalent:
+under `scripts/kraken-loop.sh` the `copilot -p` process exits, the loop releases the
+claim at once and its next poll is the retry — nothing to do. In an interactive
+session (`scripts/kraken-copilot.sh`) the lease frees the task within its TTL, but
+the one-shot watcher already fired for the dead turn, so the session stays quiet
+until you speak: after the limit resets, send it any message (or run
+`/kraken:unleash` again) and it drains and re-arms.
 
 </details>
 

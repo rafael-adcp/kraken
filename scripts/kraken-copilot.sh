@@ -93,6 +93,7 @@ WORK_DIR="$(CDPATH= cd -- "$WORK_DIR" && pwd)" && cd "$WORK_DIR" \
   || { echo "kraken-copilot: cannot cd into $WORK_DIR" >&2; exit 1; }
 
 . "$REPO_DIR/scripts/lib-copilot-drain.sh"
+kraken_require_github_auth kraken-copilot || exit 1
 
 PLUGIN_FLAGS=()
 if ! copilot plugin list 2>/dev/null | grep -q 'kraken@'; then

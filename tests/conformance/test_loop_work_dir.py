@@ -40,9 +40,11 @@ class LoopWorkDirTests(KrakenConformanceTest):
         # A startable task, so the drain pass actually reaches `copilot`.
         self.mk_issue(7, "startable task", "kraken-task", "project:app")
 
-    def run_loop(self, *flags, cwd=ROOT, env=None):
+    def run_loop(self, *flags, cwd=ROOT, env=None, unset=()):
         full_env = self.base_env(env)
         full_env["PATH"] = self.bin_dir + os.pathsep + full_env["PATH"]
+        for var in unset:
+            full_env.pop(var, None)
         if not env or "KRAKEN_WORK_DIR" not in env:
             full_env.pop("KRAKEN_WORK_DIR", None)
         return subprocess.run(
@@ -118,6 +120,28 @@ class LoopWorkDirTests(KrakenConformanceTest):
                          "copilot ran although the work dir does not exist")
         self.assertTrue(self.has_label(7, "kraken-task"), "the queue must be untouched")
         self.assertFalse(self.has_label(7, "in-progress"), "the queue must be untouched")
+
+    # --- the queue read has to be possible, and a failed one has to show ------
+
+    def test_no_github_token_refuses_before_polling(self):
+        # No GH_TOKEN/GITHUB_TOKEN and a `gh` that cannot produce a token (not
+        # installed where the loop runs — a Windows gh.exe seen from WSL — or
+        # not logged in): every read would fail, so the loop says so and stops.
+        gh = os.path.join(self.bin_dir, "gh")
+        with open(gh, "w", encoding="utf-8") as f:
+            f.write("#!/usr/bin/env bash\nexit 1\n")
+        os.chmod(gh, os.stat(gh).st_mode | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP)
+        proc = self.run_loop("--work-dir", self.work, unset=("GH_TOKEN", "GITHUB_TOKEN"))
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("gh auth login", proc.stderr)
+        self.assertFalse(os.path.isfile(self.cwd_file), "copilot ran with no way to read the queue")
+
+    def test_a_failed_queue_read_is_not_reported_as_idle(self):
+        self._apply_knobs({"GH_STUB_FAIL": "."})
+        proc = self.run_loop("--work-dir", self.work)
+        self.assertIn("queue read failed", proc.stderr)
+        self.assertNotIn("queue idle", proc.stdout, "a failed read posed as an idle queue")
+        self.assertFalse(os.path.isfile(self.cwd_file), "copilot ran on a failed queue read")
 
 
 if __name__ == "__main__":

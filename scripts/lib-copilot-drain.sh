@@ -32,6 +32,22 @@ KRAKEN_COPILOT_FLAGS=(
   "--deny-tool=github-mcp-server(issue_write)"
 )
 
+# kraken_require_github_auth NAME — succeed when kraken.py can get a token the
+# way it looks for one (GH_TOKEN, then GITHUB_TOKEN, then `gh auth token`), or
+# say how to fix it on stderr and fail. Without one every queue read fails, and
+# a launcher that let that through would sit on what looks like an idle queue.
+# The `gh` has to be the one where this script runs: a Linux shell (WSL) does
+# not see a gh.exe installed on the Windows side.
+kraken_require_github_auth() {
+  [ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ] || return 0
+  if command -v gh >/dev/null 2>&1 && gh auth token >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "$1: no GitHub token for kraken.py — install gh here and run 'gh auth login'," \
+       "or export GH_TOKEN (see the README's note on GH_TOKEN and Copilot's own login)." >&2
+  return 1
+}
+
 # kraken_copilot_prompt TASKS PROJECT WORKER WORK_DIR KRAKEN_DIR — print the
 # drain-pass prompt. The WORK_DIR is where copilot runs (the work repo: code,
 # work branch, draft PR); KRAKEN_DIR is the kraken checkout holding the
