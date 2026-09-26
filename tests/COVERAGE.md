@@ -31,7 +31,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 
 | Clause | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| §1 coordination repo | Coordination repo **MUST** be private and **MUST NOT** hold work code | 📋 operational + ✅ pinned | `kraken.py init` creates the repo **private** (never public); `tests/conformance/test_init.py` asserts the `repo create … --private` bootstrap and the private-only contract. |
+| §1 coordination repo | Coordination repo **MUST** be private and **MUST NOT** hold work code | 📋 operational + ✅ pinned | `kraken.py init` creates the repo **private** (never public); `tests/conformance/test_init.py` asserts the `repo create … --private` bootstrap and the private-only contract, and that it is created only under the slug's own owner — a token authenticated as another account is refused before any write (#174). |
 | §1 assignees | Assignees **MUST NOT** be used to arbitrate anything | 🏗 structural | The claim is decided by the git-ref CAS (§5) — `kraken.py` never fetches or consults assignees. Pinned indirectly by `tests/conformance/test_claim_race.py` (the CAS race), `tests/conformance/test_claim_thread_independence.py`, and `tests/unit` `RefCasTests`. |
 
 ## §2 Task shape

@@ -380,11 +380,19 @@ class Api:
         status, _ = self.request("GET", f"/repos/{self.repo}")
         return 200 <= status < 300
 
+    def authenticated_login(self) -> str | None:
+        """The login the token authenticates as (`GET /user`), or None when it
+        could not be read — a transport fault, never a verdict on ownership."""
+        obj = self.json("GET", "/user")
+        login = obj.get("login") if isinstance(obj, dict) else None
+        return login if isinstance(login, str) and login else None
+
     def repo_create_private(self) -> bool:
         """Create the coordination repo PRIVATE — never public: the queue is
         instructions that run in a worker's environment with its credentials.
         Created under the authenticated user (the coordination repo is personal
-        by design)."""
+        by design) — `POST /user/repos` cannot honor the slug's owner, so init
+        proves the two agree before calling this (#174)."""
         name = self.repo.split("/", 1)[1] if "/" in self.repo else self.repo
         status, _ = self.request(
             "POST", "/user/repos", {"name": name, "private": True})

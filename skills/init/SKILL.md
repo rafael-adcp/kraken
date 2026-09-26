@@ -27,6 +27,12 @@ A slug that is still the doc placeholder (`OWNER/...`, or anything wearing `<`/`
 refused by the program itself, before any read or write: substitute your real
 `owner/repo` and re-run.
 
+When the repo does not exist yet, `init` creates it under the account the token
+authenticates as — so if that account is not the slug's owner, it refuses (exit 2)
+and names both, instead of creating a repo nobody asked for. Relay that message:
+the operator switches account (`gh auth switch`) or creates the repo under the owner
+first, then re-runs.
+
 `--project <name>` is optional. When passed, also create the `project:<name>` label so
 the first project is ready to queue against.
 

@@ -78,6 +78,29 @@ PROJECT_LABEL_DESC = (
 )
 
 
+def refuse_foreign_owner(api) -> int | None:
+    """Before init CREATES the repo: None when the token's login owns the slug,
+    else the exit code of a refusal already reported. `POST /user/repos` creates
+    under the authenticated user whatever the slug says, so a mismatch would
+    create a repo nobody asked for and then fail installing into the one they
+    did (#174). GitHub logins are case-insensitive. An unreadable login is the
+    transport failure it is, never a mismatch — but it still creates nothing."""
+    owner = api.repo.split("/", 1)[0] if "/" in api.repo else None
+    login = api.authenticated_login()
+    if login is None:
+        print("init: gh-failure stage=identity (GET /user) — cannot tell who "
+              f"{api.repo} would be created under", file=sys.stderr)
+        return EXIT_TRANSPORT
+    if owner is None or owner.lower() == login.lower():
+        return None
+    print(f"init: refusing to create {api.repo}: the token authenticates as "
+          f"'{login}', not '{owner}', and GitHub would create {login}/"
+          f"{api.repo.split('/', 1)[1]} instead. Switch to {owner} "
+          "(`gh auth switch`), or create the repo there first and re-run init.",
+          file=sys.stderr)
+    return EXIT_USAGE
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     """Stand up (or repair) a coordination repo: verify-or-create it private,
     install the bundled assets, prune the retired ones, and upsert the canonical
@@ -99,6 +122,9 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     # 1. Verify or create the repo (private).
     if not api.repo_exists():
+        refused = refuse_foreign_owner(api)
+        if refused is not None:
+            return refused
         if not api.repo_create_private():
             print(f"init: gh-failure stage=repo repo={api.repo}", file=sys.stderr)
             return EXIT_TRANSPORT

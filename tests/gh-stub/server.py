@@ -409,6 +409,11 @@ class StubState:
         return (os.path.isfile(self.path("repo", "nameWithOwner"))
                 or os.path.isfile(self.path("repo", "create.json")))
 
+    def authenticated_login(self):
+        path = self.path("user", "login")
+        login = self._read(path).strip() if os.path.isfile(path) else ""
+        return login or "acme"
+
     def create_repo(self, name, private):
         with self.knobs.lock:
             self._write(self.path("repo", "create.json"),
@@ -725,6 +730,13 @@ class Handler(BaseHTTPRequestHandler):
             s.upsert_label(unquote(m.group(1)), body.get("color", ""),
                            body.get("description", ""))
             self._send(200, {"name": unquote(m.group(1))})
+            return
+
+        # --- the authenticated user (GET /user) ---
+        # Who the token is: STATE/user/login, "acme" by default so the suite's
+        # acme/* slugs name the token's own owner.
+        if path == "/user" and method == "GET":
+            self._send(200, {"login": s.authenticated_login()})
             return
 
         # --- repo create (POST /user/repos) ---
