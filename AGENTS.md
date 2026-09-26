@@ -66,8 +66,14 @@ python3 \"$KRAKEN/skills/unleash/kraken.py\" next-action OWNER/tasks <name> <wor
 execute the task it hands you end to end, deliver it as a draft PR, then stop." \
   --add-dir "$KRAKEN" --allow-all-tools --no-ask-user --silent \
   --deny-tool='shell(gh pr merge:*)' --deny-tool='shell(gh repo delete:*)' \
-  --deny-tool='shell(gh issue close:*)'
+  --deny-tool='shell(gh issue close:*)' \
+  --deny-tool='github-mcp-server(merge_pull_request)' \
+  --deny-tool='github-mcp-server(issue_write)'
 ```
+
+For an interactive session instead — `/kraken:unleash` in a `copilot` you can talk
+to, staying in ambush — use [`scripts/kraken-copilot.sh`](scripts/kraken-copilot.sh),
+which opens it in the work repo under these same flags.
 
 The deny rules hold the authorization boundaries at the tool layer — Copilot
 applies them even over `--allow-all-tools`, so a task body ordering a merge, a

@@ -100,6 +100,20 @@ loads its three skills:
 /plugin install kraken@kraken
 ```
 
+Then launch a worker from the work repo's checkout. Copilot takes its unattended
+permissions as launch flags rather than from a settings file, so two scripts in
+a kraken checkout carry them for you — the same flags, from one source:
+
+```
+cd /path/to/my_app
+/path/to/kraken/scripts/kraken-copilot.sh OWNER/tasks --worker-name env-1 --project my_app   # interactive
+/path/to/kraken/scripts/kraken-loop.sh    OWNER/tasks --worker-name env-1 --project my_app   # headless
+```
+
+`kraken-copilot.sh` opens a Copilot session running `/kraken:unleash` that stays
+in ambush and that you can talk to; `kraken-loop.sh` runs one `copilot -p` per
+startable task, with no session to watch.
+
 > Each command in context — environments, permissions, parallelism — is
 > [the full walkthrough](#the-full-walkthrough) below.
 
@@ -241,7 +255,9 @@ reuses it through [`AGENTS.md`](AGENTS.md) with **no deltas at all**.
    (Copilot's equivalent is launching with `--allow-all-tools --no-ask-user`,
    plus deny rules that keep the authorization boundaries at the tool layer —
    `--deny-tool='shell(gh pr merge:*)'`, `'shell(gh repo delete:*)'`,
-   `'shell(gh issue close:*)'`; `scripts/kraken-loop.sh` passes all of them.)
+   `'shell(gh issue close:*)'`, and the GitHub MCP server's
+   `merge_pull_request` / `issue_write`; `scripts/kraken-copilot.sh` and
+   `scripts/kraken-loop.sh` pass all of them.)
 
    <details>
    <summary>Example allowlist for the working directory's <code>.claude/settings.json</code></summary>

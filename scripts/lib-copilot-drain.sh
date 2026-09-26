@@ -1,7 +1,8 @@
 # lib-copilot-drain.sh — the ONE definition of how a GitHub Copilot CLI
 # tentacle is asked to do a drain pass: the prompt and the permission flags.
-# Source it, don't execute it. Shared by the ambush loop (scripts/kraken-loop.sh)
-# and the agent-behavior harness (tests/agent/lib-agent.sh), so the harness
+# Source it, don't execute it. Shared by the ambush loop (scripts/kraken-loop.sh),
+# the interactive launcher (scripts/kraken-copilot.sh) and the agent-behavior
+# harness (tests/agent/lib-agent.sh), so the harness
 # judges exactly the invocation an operator runs — never a look-alike that could
 # drift from it.
 
@@ -17,11 +18,18 @@
 # these fails at the tool layer instead of relying on the model to refuse it.
 # The `:*` suffix is load-bearing: without it a rule matches only the bare
 # command, and `gh pr merge 1 --admin` runs (verified on Copilot CLI 1.0.88).
+# The built-in GitHub MCP server is a second road to the same writes, around
+# the shell: its default CLI toolset is read-only today, but an operator who
+# widens it (--enable-all-github-mcp-tools) must not widen the worker's
+# authority with it — merging stays denied, and so does issue_write, which can
+# close a task (a worker's transitions all run through kraken.py).
 KRAKEN_COPILOT_FLAGS=(
   --allow-all-tools --no-ask-user
   "--deny-tool=shell(gh pr merge:*)"
   "--deny-tool=shell(gh repo delete:*)"
   "--deny-tool=shell(gh issue close:*)"
+  "--deny-tool=github-mcp-server(merge_pull_request)"
+  "--deny-tool=github-mcp-server(issue_write)"
 )
 
 # kraken_copilot_prompt TASKS PROJECT WORKER WORK_DIR KRAKEN_DIR — print the
