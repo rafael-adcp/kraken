@@ -2,8 +2,10 @@
 # Shared helpers for the agent-behavior scenarios (tests/agent/scenarios/*.sh) —
 # source, don't execute. Where the conformance suite proves the transition
 # PROGRAM mechanically, this harness proves the SKILL's judgment: it drives a
-# real headless `claude -p` against the gh-stub and asserts on ARTIFACTS (stub
+# real headless agent — `claude -p` by default, or GitHub Copilot CLI with
+# KRAKEN_AGENT_CLI=copilot — against the gh-stub and asserts on ARTIFACTS (stub
 # labels/machine lines, work-repo git state), never transcripts (PROTOCOL.md §12).
+# The assertions are the same for both: the contract does not depend on the harness.
 # One scenario = one seeded queue + task body; the gh-stub goes first on PATH so
 # both coordination and work-repo `gh` calls resolve to it, and the work repo has
 # a real bare remote so push / default-branch checks are genuine git facts.
@@ -14,6 +16,9 @@ AGENT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$AGENT_ROOT/../.." && pwd)"
 GH_STUB="$ROOT/tests/gh-stub"
 SCRIPTS="$ROOT/skills/unleash"
+
+# Which agent CLI plays the worker: claude (default) or copilot.
+AGENT_CLI="${KRAKEN_AGENT_CLI:-claude}"
 
 WORKER="${WORKER:-t1}"
 PROJECT="${PROJECT:-x}"
@@ -29,6 +34,9 @@ WORK_BARE="$SCRATCH/work.git"     # the "remote" it pushes to
 mkdir -p "$GH_STUB_STATE/issues"
 : > "$GH_STUB_STATE/log"
 trap 'rm -rf "$SCRATCH"' EXIT
+# The run's claim-<worker>.json lives in the scratch, never in the operator's
+# ~/.kraken, where their own SessionEnd hook or ambush loop would act on it.
+export KRAKEN_STATE_DIR="$SCRATCH/kraken-state"
 
 # The gh-stub CLI must win over the real gh for the MODEL's own commands (the
 # work-repo `gh pr create`, etc.) in this run.
@@ -90,39 +98,70 @@ setup_work_repo() {
 skip_scenario() { echo "SKIP: ${SCENARIO_NAME:-scenario} ($1)"; exit 2; }
 
 # --- driving the skill headlessly ---------------------------------------------
-# run_unleash — invoke the real skill under `claude -p`, once, with the repo's
-# own plugin dir loaded so CI needs no pre-install. We assert on artifacts, never
-# on the log ($SCRATCH/agent.log — kept only for debugging a failed scenario).
-# The prompt is fixed; scenarios differ only in seeded state and task body.
-run_unleash() {
+. "$ROOT/scripts/lib-copilot-drain.sh"
+
+AGENT_TIMEOUT="${AGENT_TIMEOUT:-${CLAUDE_AGENT_TIMEOUT:-600}}"
+
+# drive_claude PROMPT_SUFFIX — the real skill under `claude -p`, once, with the
+# repo's own plugin dir loaded so CI needs no pre-install.
+drive_claude() {
   local prompt="/kraken:unleash ${COORD} --worker-name ${WORKER} --project ${PROJECT} --once"
-  local extra_ctx="${1:-}"
-  [ -n "$extra_ctx" ] && prompt="${prompt}
+  [ -n "$1" ] && prompt="${prompt}
 
-${extra_ctx}"
-
-  CLAUDE_AGENT_TIMEOUT="${CLAUDE_AGENT_TIMEOUT:-600}"
-  ( cd "$WORK_DIR" && timeout "$CLAUDE_AGENT_TIMEOUT" claude -p "$prompt" \
+$1"
+  ( cd "$WORK_DIR" && timeout "$AGENT_TIMEOUT" claude -p "$prompt" \
       --plugin-dir "$ROOT" \
       --dangerously-skip-permissions \
-      --max-turns "${CLAUDE_MAX_TURNS:-60}" ) \
-    > "$SCRATCH/agent.log" 2>&1
+      --max-turns "${CLAUDE_MAX_TURNS:-60}" )
+}
+
+# drive_copilot PROMPT_SUFFIX — one drain pass exactly as scripts/kraken-loop.sh
+# runs it (prompt and flags from lib-copilot-drain.sh), in the work repo, with
+# two harness-only differences: GH_TOKEN/GITHUB_TOKEN are stripped (Copilot CLI
+# would log the model in with the stub's fake token instead of the operator's
+# stored login; kraken.py then asks the stub's `gh auth token`), and the built-in
+# GitHub MCP server is off (it reaches real GitHub, routing around the stub).
+drive_copilot() {
+  local prompt
+  prompt="$(kraken_copilot_prompt "$COORD" "$PROJECT" "$WORKER" "$WORK_DIR" "$ROOT")"
+  [ -n "$1" ] && prompt="${prompt}
+
+$1"
+  ( cd "$WORK_DIR" && env -u GH_TOKEN -u GITHUB_TOKEN \
+      timeout "$AGENT_TIMEOUT" copilot -p "$prompt" \
+      --add-dir "$ROOT" "${KRAKEN_COPILOT_FLAGS[@]}" \
+      --disable-builtin-mcps --no-auto-update )
+}
+
+# Output that means the model never ran at all (spend/rate/auth limit) — either CLI.
+AGENT_UNAVAILABLE_RE='spend limit|rate limit|usage limit|quota|overloaded|invalid api key|authentication_error|not authenticated|please run .*login|credit balance|copilot login|no authentication information|premium request|not signed in|policy .*disabled'
+
+# run_unleash [EXTRA_CONTEXT] — one real worker pass with the $AGENT_CLI driver.
+# We assert on artifacts, never on the log ($SCRATCH/agent.log — kept only for
+# debugging a failed scenario). The prompt is fixed per driver; scenarios differ
+# only in seeded state, task body and the extra context line.
+run_unleash() {
+  case "$AGENT_CLI" in
+    claude)  drive_claude "${1:-}" > "$SCRATCH/agent.log" 2>&1 ;;
+    copilot) drive_copilot "${1:-}" > "$SCRATCH/agent.log" 2>&1 ;;
+    *) echo "lib-agent: unknown KRAKEN_AGENT_CLI '$AGENT_CLI' (claude|copilot)" >&2; exit 1 ;;
+  esac
   local rc=$?
 
   # The model never actually running (spend/rate/auth limit, or a timeout with an
   # empty transcript) is an environment SKIP, not a false FAIL — detect it from
   # the run's own output and bail BEFORE any assertion.
-  if grep -Eqi 'spend limit|rate limit|usage limit|quota|overloaded|invalid api key|authentication_error|not authenticated|please run .*login|credit balance' "$SCRATCH/agent.log"; then
-    skip_scenario "the nested claude -p could not run (spend/rate/auth limit): $(grep -Eio 'spend limit|rate limit|usage limit|quota|overloaded|invalid api key|authentication|credit balance' "$SCRATCH/agent.log" | head -n1). No judgment was exercised — re-run when the limit clears."
+  if grep -Eqi "$AGENT_UNAVAILABLE_RE" "$SCRATCH/agent.log"; then
+    skip_scenario "the nested $AGENT_CLI could not run (spend/rate/auth limit): $(grep -Eio "$AGENT_UNAVAILABLE_RE" "$SCRATCH/agent.log" | head -n1). No judgment was exercised — re-run when the limit clears."
   fi
   if [ "$rc" -eq 124 ] && [ ! -s "$SCRATCH/agent.log" ]; then
-    skip_scenario "the nested claude -p timed out before producing any output (${CLAUDE_AGENT_TIMEOUT}s). No judgment was exercised."
+    skip_scenario "the nested $AGENT_CLI timed out before producing any output (${AGENT_TIMEOUT}s). No judgment was exercised."
   fi
   # The stub logs every invocation, so an empty log means the model never reached
   # it — every `gh` hit the real gh, not the seeded queue. Environment SKIP, not a
   # FAIL; a run that reached the stub once logs something, so misjudgment still FAILs.
   if [ ! -s "$GH_STUB_STATE/log" ]; then
-    skip_scenario "the nested claude never reached the gh-stub (its invocation log is empty): the stub's dir was not in front of the real 'gh' for the nested tool shell, so the model judged against the real gh, not the seeded queue. No judgment was exercised — an environment gap, not a skill fault."
+    skip_scenario "the nested $AGENT_CLI never reached the gh-stub (its invocation log is empty): the stub's dir was not in front of the real 'gh' for the nested tool shell, so the model judged against the real gh, not the seeded queue. No judgment was exercised — an environment gap, not a skill fault."
   fi
   return "$rc"
 }
