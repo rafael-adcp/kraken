@@ -103,7 +103,9 @@ program, so there is no second copy to fall out of date.
    repo. Instead print a one-line reminder: before launching a worker, pre-allow
    the delivery commands in that environment's `.claude/settings.json` — see the
    worker-environment permissions example in `README.md`, which stays the source
-   of truth.
+   of truth. A GitHub Copilot CLI worker takes its permissions as launch flags
+   instead: point the operator at `scripts/kraken-copilot.sh` (interactive) or
+   `scripts/kraken-loop.sh` (headless) in a kraken checkout, which pass them.
 
 4. **Nothing else.** No issues are read or written; no worker is launched. Point
    the operator at `status` (the queue's console, with ready-to-paste launch

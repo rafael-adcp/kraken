@@ -100,6 +100,20 @@ loads its three skills:
 /plugin install kraken@kraken
 ```
 
+Then launch a worker from the work repo's checkout. Copilot takes its unattended
+permissions as launch flags rather than from a settings file, so two scripts in
+a kraken checkout carry them for you — the same flags, from one source:
+
+```
+cd /path/to/my_app
+/path/to/kraken/scripts/kraken-copilot.sh OWNER/tasks --worker-name env-1 --project my_app   # interactive
+/path/to/kraken/scripts/kraken-loop.sh    OWNER/tasks --worker-name env-1 --project my_app   # headless
+```
+
+`kraken-copilot.sh` opens a Copilot session running `/kraken:unleash` that stays
+in ambush and that you can talk to; `kraken-loop.sh` runs one `copilot -p` per
+startable task, with no session to watch.
+
 > Each command in context — environments, permissions, parallelism — is
 > [the full walkthrough](#the-full-walkthrough) below.
 
@@ -241,7 +255,9 @@ reuses it through [`AGENTS.md`](AGENTS.md) with **no deltas at all**.
    (Copilot's equivalent is launching with `--allow-all-tools --no-ask-user`,
    plus deny rules that keep the authorization boundaries at the tool layer —
    `--deny-tool='shell(gh pr merge:*)'`, `'shell(gh repo delete:*)'`,
-   `'shell(gh issue close:*)'`; `scripts/kraken-loop.sh` passes all of them.)
+   `'shell(gh issue close:*)'`, and the GitHub MCP server's
+   `merge_pull_request` / `issue_write`; `scripts/kraken-copilot.sh` and
+   `scripts/kraken-loop.sh` pass all of them.)
 
    <details>
    <summary>Example allowlist for the working directory's <code>.claude/settings.json</code></summary>
@@ -323,6 +339,11 @@ Want a bounded run instead — a scheduled container, a one-off drain? Pass
 --once`) still works — it just costs one full LLM turn per fire even when the
 queue is empty.
 
+Inside an interactive **GitHub Copilot CLI** session, `/kraken:unleash` stays in
+ambush too: Copilot's background shell wakes the agent when a command exits, so
+the worker arms `kraken.py watch --exit-on-wake` — a watcher that exits on its
+first wake and is re-armed after each drain — with the same zero-token idle.
+
 For the GitHub Copilot CLI worker (no Monitor tool), the shipped
 [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) is the ready-made ambush loop:
 launch it from the work repo's checkout (or point `--work-dir` at it) and it polls
@@ -341,7 +362,16 @@ On **Windows**, the loop is a bash script: run it from WSL or Git Bash, with
 `copilot`, `python3` and `git` installed on that side (under WSL, install Copilot
 CLI inside the distro — `npm install -g @github/copilot` — rather than calling the
 Windows one, which a Linux shell cannot launch). Everything the loop invokes then
-resolves in the same environment.
+resolves in the same environment — `gh` included: `kraken.py` reads the queue
+with `GH_TOKEN`, `GITHUB_TOKEN` or `gh auth token`, and a WSL shell does not see a
+`gh.exe` installed on Windows. Both scripts check for a token before they start.
+
+**`GH_TOKEN` and Copilot's login.** Copilot CLI also authenticates its *model*
+with `GH_TOKEN`/`GITHUB_TOKEN` when one is set (after `COPILOT_GITHUB_TOKEN`), so a
+token exported only for the queue — a classic PAT, or one without Copilot access —
+logs Copilot out of your own subscription. Prefer `gh auth login` on the worker
+machine and leave both unset; if you must export one, also set
+`COPILOT_GITHUB_TOKEN` to a token that carries Copilot access.
 
 ## The operator's cheat sheet
 
@@ -537,6 +567,15 @@ regardless, no hook involved. (Removing the `in-progress` label by hand does
 *nothing* here — it's a badge for you, not the lock. The lock is the claim ref,
 and only the lease's clock or an explicit release opens it.)
 
+**On GitHub Copilot CLI** the recovery is the same, the retry is not. Kraken has no
+verified Copilot event for a usage limit, so there is no `StopFailure` equivalent:
+under `scripts/kraken-loop.sh` the `copilot -p` process exits, the loop releases the
+claim at once and its next poll is the retry — nothing to do. In an interactive
+session (`scripts/kraken-copilot.sh`) the lease frees the task within its TTL, but
+the one-shot watcher already fired for the dead turn, so the session stays quiet
+until you speak: after the limit resets, send it any message (or run
+`/kraken:unleash` again) and it drains and re-arms.
+
 </details>
 
 <details>
@@ -582,9 +621,11 @@ Yes — and under `kraken-protocol/9` that includes recovery **latency**, which 
 the part that used to differ. A claim is a **lease** that expires 30 minutes
 after its last renewal, and expiry is applied by whoever reads the queue. So a
 worker that dies in any harness, in any way, frees its task within one TTL with
-nothing installed. The bundled `SessionEnd`/`StopFailure` hooks are **Claude Code
-hook events** and still never fire around a `copilot` process — they are now an
-optimization (seconds instead of minutes), not the mechanism.
+nothing installed. The bundled hooks are an optimization on top (seconds instead
+of minutes), not the mechanism — and Copilot CLI runs the `SessionEnd` one too:
+it loads the plugin's `hooks.json`, and `kraken.py claim` records the Copilot
+session (`COPILOT_AGENT_SESSION_ID`) so a Copilot session that ends gracefully
+while holding a lease hands it back on the spot, exactly like a Claude Code one.
 
 [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) carries the same optimization
 for Copilot: `kraken.py claim` records the open claim in

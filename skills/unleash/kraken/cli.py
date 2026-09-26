@@ -162,7 +162,16 @@ COMMANDS = (
 
     Command("watch", cmd_watch,
             "poll the queue, print on a startable change",
-            "repo project"),
+            "repo project",
+            (("--exit-on-wake", dict(
+                action="store_true",
+                help="exit 0 after the first wake instead of polling on, for "
+                     "a harness that notifies the agent only when a background "
+                     "command exits; re-arm it after each drain")),
+             ("--worker", dict(
+                 default=None,
+                 help="this worker's name; required with --exit-on-wake, "
+                      "which keeps the last wake's snapshot per worker")))),
 
     Command("reap", cmd_reap,
             "run the §6 reconcile stand-alone — reclaim repeatedly expired "

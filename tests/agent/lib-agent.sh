@@ -102,6 +102,24 @@ skip_scenario() { echo "SKIP: ${SCENARIO_NAME:-scenario} ($1)"; exit 2; }
 
 AGENT_TIMEOUT="${AGENT_TIMEOUT:-${CLAUDE_AGENT_TIMEOUT:-600}}"
 
+# with_timeout SECONDS CMD... — coreutils `timeout`, which macOS does not ship:
+# there, Homebrew's `gtimeout`, else perl's alarm (perl is on every macOS). Exits
+# 124 on expiry whichever did it, so callers test one code.
+with_timeout() {
+  local secs="$1" rc
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  else
+    perl -e 'alarm shift; exec @ARGV or exit 127' "$secs" "$@"
+    rc=$?
+    [ "$rc" -eq 142 ] && return 124  # 128 + SIGALRM
+    return "$rc"
+  fi
+}
+
 # drive_claude PROMPT_SUFFIX — the real skill under `claude -p`, once, with the
 # repo's own plugin dir loaded so CI needs no pre-install.
 drive_claude() {
@@ -109,7 +127,7 @@ drive_claude() {
   [ -n "$1" ] && prompt="${prompt}
 
 $1"
-  ( cd "$WORK_DIR" && timeout "$AGENT_TIMEOUT" claude -p "$prompt" \
+  ( cd "$WORK_DIR" && with_timeout "$AGENT_TIMEOUT" claude -p "$prompt" \
       --plugin-dir "$ROOT" \
       --dangerously-skip-permissions \
       --max-turns "${CLAUDE_MAX_TURNS:-60}" )
@@ -127,8 +145,8 @@ drive_copilot() {
   [ -n "$1" ] && prompt="${prompt}
 
 $1"
-  ( cd "$WORK_DIR" && env -u GH_TOKEN -u GITHUB_TOKEN \
-      timeout "$AGENT_TIMEOUT" copilot -p "$prompt" \
+  ( cd "$WORK_DIR" && with_timeout "$AGENT_TIMEOUT" \
+      env -u GH_TOKEN -u GITHUB_TOKEN copilot -p "$prompt" \
       --add-dir "$ROOT" "${KRAKEN_COPILOT_FLAGS[@]}" \
       --disable-builtin-mcps --no-auto-update )
 }

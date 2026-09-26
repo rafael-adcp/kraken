@@ -14,12 +14,16 @@
 # SessionEnd never fires there — that path is the StopFailure hook's
 # (stop-failure-release.sh). See the #60 FAQ in README.md.
 #
+# Both harnesses run it: Claude Code, and GitHub Copilot CLI, which loads this
+# plugin's hooks.json and fires SessionEnd with the same Claude-shaped payload
+# (verified on Copilot CLI 1.0.88).
+#
 # Scope: ONLY the ending session's own claims (#173). SessionEnd fires for
-# every Claude Code session on the host — a 30-second `claude -p` opened to read
-# a file included — so the hook matches the event's `session_id` against the
-# session `kraken.py claim` recorded. A claim naming no session (the Copilot
-# loop, a bare shell) or an event naming none releases nothing: the lease TTL,
-# and the loop's own release-on-exit, cover those.
+# every agent session on the host — a 30-second `claude -p` or `copilot -p`
+# opened to read a file included — so the hook matches the event's
+# `session_id` against the session `kraken.py claim` recorded. A claim naming
+# no session (a bare shell) or an event naming none releases nothing: the lease
+# TTL, and the Copilot loop's own release-on-exit, cover those.
 #
 # Best-effort: ALWAYS exits 0 (a failed release just waits out the TTL).
 set -u

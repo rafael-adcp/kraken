@@ -139,13 +139,21 @@ trap 'exit 129' HUP
 # The prompt and permission flags are single-sourced with the agent-behavior
 # harness (tests/agent/), so what it judges is exactly what this loop runs.
 . "$REPO_DIR/scripts/lib-copilot-drain.sh"
+kraken_require_github_auth kraken-loop || exit 1
 PROMPT="$(kraken_copilot_prompt "$TASKS" "$PROJECT" "$WORKER" "$WORK_DIR" "$REPO_DIR")"
 
 drain_pass() {
-  local ts startable
+  local ts startable rc
   ts="$(date -u +%H:%M:%SZ)"
-  if startable="$(python3 "$KRAKEN_PY" list-startable "$TASKS" "$PROJECT" 2>/dev/null)" \
-     && [ -n "$startable" ]; then
+  startable="$(python3 "$KRAKEN_PY" list-startable "$TASKS" "$PROJECT")"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # Never report a failed read as an idle queue: the two look identical from
+    # here, and only one of them is fine to leave running overnight.
+    echo "kraken-loop: $ts queue read failed (kraken.py exit $rc) — skipping model; check the token and the network." >&2
+    return 1
+  fi
+  if [ -n "$startable" ]; then
     echo "kraken-loop: $ts startable task(s) — running a drain pass:"
     printf '%s\n' "$startable" | sed 's/^/  /'
     # Add -s/--silent for terser logs.

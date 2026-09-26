@@ -4,6 +4,7 @@ Part of the kraken protocol package; see __init__.py."""
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -11,7 +12,7 @@ from typing import Any, Callable
 
 from .contract import EXIT_TRANSPORT, EXIT_UNKNOWN_PROJECT, Epoch
 from .transport import Api
-from .lease import wake_retry_mtime
+from .lease import state_dir, wake_retry_mtime
 from .queue import Queue
 
 # --- subcommand: watch -------------------------------------------------------
@@ -68,16 +69,63 @@ def watch_failure_action(
     return None
 
 
+def wake_snapshot_path(worker: str) -> str:
+    return os.path.join(state_dir(), f"watch-{worker}.json")
+
+
+def load_wake_snapshot(worker: str, repo: str, project: str) -> str | None:
+    """The snapshot this worker's previous `--exit-on-wake` watcher woke on, or
+    None when there is none for this repo and project. Best-effort: an
+    unreadable file just means the first startable poll wakes, as on a first
+    arm."""
+    try:
+        with open(wake_snapshot_path(worker), encoding="utf-8") as fh:
+            record = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    if record.get("repo") != repo or record.get("project") != project:
+        return None
+    snapshot = record.get("snapshot")
+    return snapshot if isinstance(snapshot, str) else None
+
+
+def save_wake_snapshot(worker: str, repo: str, project: str,
+                       snapshot: str) -> None:
+    try:
+        os.makedirs(state_dir(), exist_ok=True)
+        with open(wake_snapshot_path(worker), "w", encoding="utf-8") as fh:
+            json.dump({"repo": repo, "project": project, "snapshot": snapshot}, fh)
+            fh.write("\n")
+    except OSError:
+        pass
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
-    return watch(args.api, args.project)
+    if args.exit_on_wake and not args.worker:
+        print("kraken-watch: --exit-on-wake needs --worker <worker-name>",
+              file=sys.stderr)
+        return 2
+    return watch(args.api, args.project,
+                 exit_on_wake_as=args.worker if args.exit_on_wake else None)
 
 
 def watch(api: Api, project: str, *,
-          snapshot_reader: Callable[..., Any] | None = None) -> int:
+          snapshot_reader: Callable[..., Any] | None = None,
+          exit_on_wake_as: str | None = None) -> int:
     """The ambush loop. `snapshot_reader` defaults to the real queue snapshot and
     is injectable so the loop's own behaviour — the edge-triggered emit gate, the
     consecutive-failure warn/die ladder, the lost-wake retry — can be scripted
-    without a queue behind it. `cmd_watch` is the argv-shaped entry point."""
+    without a queue behind it. `cmd_watch` is the argv-shaped entry point.
+
+    `exit_on_wake_as` (a worker name) makes the watcher exit 0 right after its
+    first wake, for a harness whose background commands notify the agent only
+    when they exit (GitHub Copilot CLI) rather than per output line (Claude
+    Code's Monitor). The agent re-arms it after each drain, so the edge gate has
+    to survive the restart: the snapshot a wake fired on is saved per worker and
+    seeds the next watcher's `prev`, and an unchanged queue stays silent across
+    re-arms exactly as it does inside one long-lived watcher."""
     snapshot_reader = snapshot_reader or snapshot_state
     poll_seconds = int(os.environ.get("KRAKEN_WATCH_POLL_SECONDS", "60"))
     retry_seconds = int(os.environ.get("KRAKEN_WATCH_RETRY_SECONDS", "300"))
@@ -97,7 +145,8 @@ def watch(api: Api, project: str, *,
     if ok is None:
         print(message + " — arming anyway", file=sys.stderr)
 
-    prev = None
+    prev = (load_wake_snapshot(exit_on_wake_as, api.repo, project)
+            if exit_on_wake_as else None)
     # Start at "now": retries are owed only for wakes THIS watcher emitted, so
     # a stale flag from an earlier session never triggers one.
     last_emit = time.time()
@@ -146,5 +195,9 @@ def watch(api: Api, project: str, *,
                     flush=True,
                 )
                 last_emit = time.time()
+                if exit_on_wake_as:
+                    save_wake_snapshot(exit_on_wake_as, api.repo, project,
+                                       snapshot)
+                    return 0
             prev = snapshot
         time.sleep(poll_seconds)

@@ -2116,6 +2116,91 @@ class WatchFailureLoopTests(unittest.TestCase):
         self.assertIn("3", err, "the give-up line must name the failure count")
 
 
+class WatchExitOnWakeTests(unittest.TestCase):
+    """`watch --exit-on-wake`: for a harness that wakes the agent only when a
+    background command exits (GitHub Copilot CLI), the watcher exits 0 on its
+    first wake, and the agent re-arms it after each drain. The edge gate must
+    survive that restart — an unchanged queue stays silent across re-arms,
+    exactly as it does inside one long-lived watcher — so the snapshot a wake
+    fired on is kept per worker."""
+
+    def setUp(self):
+        state = tempfile.mkdtemp()
+        os.environ["KRAKEN_STATE_DIR"] = state
+        self.addCleanup(os.environ.pop, "KRAKEN_STATE_DIR", None)
+        os.environ["KRAKEN_WATCH_POLL_SECONDS"] = "0"
+        self.addCleanup(os.environ.pop, "KRAKEN_WATCH_POLL_SECONDS", None)
+
+    def _arm(self, snapshots, worker="w1", project="app",
+             repo="acme/tasks"):
+        """One armed watcher over a scripted snapshot sequence; an exhausted
+        script means it was still polling."""
+        pending = list(snapshots)
+
+        def scripted(api, project):
+            if not pending:
+                raise KeyboardInterrupt
+            return pending.pop(0)
+
+        api = FakeApi(repo, paginated=lambda path: [{"name": "project:" + project}])
+        out = StringIO()
+        with redirect_stdout(out), redirect_stderr(StringIO()):
+            try:
+                rc = kraken.watch(api, project, snapshot_reader=scripted,
+                                  exit_on_wake_as=worker)
+            except KeyboardInterrupt:
+                rc = "polling"
+        return rc, out.getvalue()
+
+    def test_first_wake_exits_zero(self):
+        rc, out = self._arm(["", "7:startable", "7:startable\n8:startable"])
+        self.assertEqual(rc, 0, "the watcher did not exit on its first wake")
+        self.assertEqual(out.count("kraken-queue:"), 1, out)
+        self.assertIn("(#7)", out)
+
+    def test_idle_queue_keeps_polling(self):
+        rc, out = self._arm(["", "7:held"])
+        self.assertEqual(rc, "polling")
+        self.assertEqual(out, "", "an idle queue woke the agent")
+
+    def test_rearm_on_an_unchanged_queue_stays_silent(self):
+        # The drain left #7 startable (say it could not take it): re-arming
+        # must not wake again on the same queue, or the agent loops for ever.
+        self._arm(["7:startable"])
+        rc, out = self._arm(["7:startable", "7:startable"])
+        self.assertEqual(rc, "polling", "a re-armed watcher woke on an unchanged queue")
+        self.assertEqual(out, "")
+
+    def test_rearm_wakes_when_the_queue_changes(self):
+        self._arm(["7:startable"])
+        rc, out = self._arm(["7:startable", "7:startable\n9:startable"])
+        self.assertEqual(rc, 0)
+        self.assertIn("(#7 #9)", out)
+
+    def test_the_kept_snapshot_is_per_worker_repo_and_project(self):
+        self._arm(["7:startable"], worker="w1")
+        for kwargs in (dict(worker="w2"), dict(project="other"),
+                       dict(repo="acme/elsewhere")):
+            rc, _ = self._arm(["7:startable"], **kwargs)
+            self.assertEqual(rc, 0, "another scope's snapshot silenced a wake: %r"
+                             % kwargs)
+
+    def test_without_the_flag_the_watcher_never_exits_on_a_wake(self):
+        api = FakeApi(paginated=lambda path: [{"name": "project:app"}])
+        pending = ["7:startable", "7:startable\n8:startable"]
+
+        def scripted(api, project):
+            if not pending:
+                raise KeyboardInterrupt
+            return pending.pop(0)
+
+        out = StringIO()
+        with redirect_stdout(out), redirect_stderr(StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                kraken.watch(api, "app", snapshot_reader=scripted)
+        self.assertEqual(out.getvalue().count("kraken-queue:"), 2)
+
+
 class BundledAssetTests(unittest.TestCase):
     """Every asset init installs must actually ship next to the module."""
 

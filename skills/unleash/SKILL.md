@@ -181,10 +181,19 @@ Run it as a **persistent background process**, however your harness provides one
 Claude Code, the Monitor tool with `persistent: true` — and if Monitor is not in your
 tool list, **load it first rather than concluding you have none**; some harnesses defer
 tool schemas, and taking the `--once` fallback here silently throws away the ambush this
-skill exists for. Elsewhere,
-[`scripts/kraken-loop.sh`](../../scripts/kraken-loop.sh), which polls and re-invokes a
-one-shot drain from outside the model. One watcher per worker, never two — skip this if
-a previous drain already armed one.
+skill exists for. In a harness whose background commands wake you only when they
+**exit** — GitHub Copilot CLI's `bash` tool in `async` mode (attached, not detached) —
+arm the one-shot shape instead, which exits `0` on its first wake:
+
+```
+python3 "<skill>/kraken.py" watch OWNER/tasks <project> --exit-on-wake --worker <worker-name>
+```
+
+Its exit *is* the wake; after that drain, **re-arm it** — it remembers the queue it
+woke on, so an unchanged queue stays silent across re-arms. Outside any agent session,
+[`scripts/kraken-loop.sh`](../../scripts/kraken-loop.sh) polls and re-invokes a one-shot
+drain from outside the model. One watcher per worker, never two — skip this if a
+previous drain already armed one.
 
 It polls every 60s and prints a `kraken-queue:` line only when the queue changes **and**
 something is startable, so an idle queue costs nothing. A failed queue read is never
@@ -193,7 +202,8 @@ while nothing can reach the repo.
 
 Armed? Confirm what is watching (repo, project, worker name, cadence) and **end your
 turn** — do not keep polling yourself. On each `kraken-queue:` event, run **The loop**
-again until `idle`, then go quiet; the watcher stays armed. Cannot arm one? Say so,
+again until `idle`, then go quiet; the watcher stays armed (the `--exit-on-wake` one
+you re-arm yourself, as above). Cannot arm one? Say so,
 offer `/loop /kraken:unleash ... --once` as the fallback, and end the turn as if
 `--once` — do not improvise a watcher. When I say stop, stop it and confirm; either way
 it dies with the session.
