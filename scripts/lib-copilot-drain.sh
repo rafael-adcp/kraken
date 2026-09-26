@@ -9,7 +9,20 @@
 # --allow-all-tools; --no-ask-user keeps the worker autonomous (a question it
 # cannot ask becomes an escalation on the queue, per SKILL.md). Callers add
 # `--add-dir <kraken checkout>` so copilot may read the contract there.
-KRAKEN_COPILOT_FLAGS=(--allow-all-tools --no-ask-user)
+#
+# The deny rules put SKILL.md's Authorization boundaries under the model rather
+# than in its hands: merging is always the human's, and a worker never deletes a
+# repo or closes a task — whatever a task body says. Copilot CLI applies deny
+# rules even over --allow-all-tools, so a prompt-injected order to do one of
+# these fails at the tool layer instead of relying on the model to refuse it.
+# The `:*` suffix is load-bearing: without it a rule matches only the bare
+# command, and `gh pr merge 1 --admin` runs (verified on Copilot CLI 1.0.88).
+KRAKEN_COPILOT_FLAGS=(
+  --allow-all-tools --no-ask-user
+  "--deny-tool=shell(gh pr merge:*)"
+  "--deny-tool=shell(gh repo delete:*)"
+  "--deny-tool=shell(gh issue close:*)"
+)
 
 # kraken_copilot_prompt TASKS PROJECT WORKER WORK_DIR KRAKEN_DIR — print the
 # drain-pass prompt. The WORK_DIR is where copilot runs (the work repo: code,

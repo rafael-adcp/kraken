@@ -238,7 +238,10 @@ reuses it through [`AGENTS.md`](AGENTS.md) with **no deltas at all**.
    toolchain installed, `gh` authenticated, and git configured. Workers run
    unattended, so the environment's agent settings must pre-allow the
    delivery commands — a permission prompt with nobody around stalls the task.
-   (Copilot's equivalent is launching with `--allow-all-tools --no-ask-user`.)
+   (Copilot's equivalent is launching with `--allow-all-tools --no-ask-user`,
+   plus deny rules that keep the authorization boundaries at the tool layer —
+   `--deny-tool='shell(gh pr merge:*)'`, `'shell(gh repo delete:*)'`,
+   `'shell(gh issue close:*)'`; `scripts/kraken-loop.sh` passes all of them.)
 
    <details>
    <summary>Example allowlist for the working directory's <code>.claude/settings.json</code></summary>

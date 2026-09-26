@@ -63,8 +63,15 @@ $KRAKEN/skills/unleash/SKILL.md and $KRAKEN/PROTOCOL.md, where <skill> is
 $KRAKEN/skills/unleash. Do ONE drain pass: run
 python3 \"$KRAKEN/skills/unleash/kraken.py\" next-action OWNER/tasks <name> <worker-name>,
 execute the task it hands you end to end, deliver it as a draft PR, then stop." \
-  --add-dir "$KRAKEN" --allow-all-tools --no-ask-user --silent
+  --add-dir "$KRAKEN" --allow-all-tools --no-ask-user --silent \
+  --deny-tool='shell(gh pr merge:*)' --deny-tool='shell(gh repo delete:*)' \
+  --deny-tool='shell(gh issue close:*)'
 ```
+
+The deny rules hold the authorization boundaries at the tool layer — Copilot
+applies them even over `--allow-all-tools`, so a task body ordering a merge, a
+repo delete or a close fails there instead of relying on the model to refuse.
+Keep the `:*`: without it a rule matches only the bare command.
 
 Wrap it in a shell loop for continuous ambush — the operator owns the cadence and the
 stop. Rather than hand-rolling that loop, use the shipped

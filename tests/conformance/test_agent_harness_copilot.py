@@ -100,6 +100,13 @@ class AgentHarnessCopilotDriverTests(KrakenConformanceTest):
                          os.path.realpath(ROOT), "--add-dir must grant the kraken checkout")
         for flag in ("--allow-all-tools", "--no-ask-user"):
             self.assertIn(flag, args, "the loop's permission flag %s is missing" % flag)
+        # Authorization boundaries as a hard floor: deny rules win even over
+        # --allow-all-tools, so a worker cannot merge, delete or close whatever
+        # a task body tells it. The `:*` suffix is load-bearing: verified against
+        # Copilot CLI 1.0.88, `shell(gh pr merge)` alone matches only the bare
+        # command and let `gh pr merge 1 --admin` run.
+        for rule in ("shell(gh pr merge:*)", "shell(gh repo delete:*)", "shell(gh issue close:*)"):
+            self.assertIn("--deny-tool=" + rule, args, "missing deny rule %s" % rule)
         # Copilot's built-in GitHub MCP server talks to real GitHub with the
         # operator's login — it must not route around the seeded stub.
         self.assertIn("--disable-builtin-mcps", args)
