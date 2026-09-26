@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Agent-behavior harness: drives headless Claude Code against the gh-stub to test
+# Agent-behavior harness: drives a headless agent — Claude Code by default, GitHub
+# Copilot CLI with KRAKEN_AGENT_CLI=copilot — against the gh-stub to test
 # the SKILL's judgment (the contract MUSTs that live in the model's behavior),
 # not just the transition program. Each scenarios/*.sh seeds one crafted queue +
-# task body, runs a real `claude -p "/kraken:unleash ... --once"`, and asserts on
+# task body, runs one real worker pass (`claude -p "/kraken:unleash ... --once"`,
+# or the Copilot drain pass scripts/kraken-loop.sh runs), and asserts on
 # ARTIFACTS (stub labels/machine lines + a real local work repo).
 #
 # REAL model runs — NOT part of the mechanical conformance suite, and wired into
 # no hook or CI. Run it by hand (`make test-agent`) when skills/ or tests/agent/
-# change. Requires: claude on PATH, ANTHROPIC_API_KEY (or logged-in CLI), jq, git —
+# change. Requires: the driven CLI on PATH and authenticated (ANTHROPIC_API_KEY /
+# COPILOT_GITHUB_TOKEN, or KRAKEN_AGENT_ASSUME_AUTH=1 for a logged-in CLI), jq, git —
 # absent any, SKIP with exit 0, never a false failure.
 #
 # Advisory scenarios (flaky by nature) are listed in ADVISORY: they run and
@@ -36,10 +39,27 @@ esac
 
 command -v jq  >/dev/null 2>&1 || skip "jq not found"
 command -v git >/dev/null 2>&1 || skip "git not found"
-command -v claude >/dev/null 2>&1 || skip "claude CLI not on PATH"
-if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ "${KRAKEN_AGENT_ASSUME_AUTH:-0}" != "1" ]; then
-  skip "ANTHROPIC_API_KEY unset (set KRAKEN_AGENT_ASSUME_AUTH=1 to run against a logged-in CLI)"
-fi
+
+# Which agent CLI plays the worker (lib-agent.sh reads the same variable).
+export KRAKEN_AGENT_CLI="${KRAKEN_AGENT_CLI:-claude}"
+case "$KRAKEN_AGENT_CLI" in
+  claude)
+    command -v claude >/dev/null 2>&1 || skip "claude CLI not on PATH"
+    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ "${KRAKEN_AGENT_ASSUME_AUTH:-0}" != "1" ]; then
+      skip "ANTHROPIC_API_KEY unset (set KRAKEN_AGENT_ASSUME_AUTH=1 to run against a logged-in CLI)"
+    fi
+    ;;
+  copilot)
+    command -v copilot >/dev/null 2>&1 || skip "copilot CLI not on PATH (npm install -g @github/copilot)"
+    # The harness strips GH_TOKEN/GITHUB_TOKEN from the run, so Copilot must
+    # authenticate from COPILOT_GITHUB_TOKEN or a stored `copilot login`.
+    if [ -z "${COPILOT_GITHUB_TOKEN:-}" ] && [ "${KRAKEN_AGENT_ASSUME_AUTH:-0}" != "1" ]; then
+      skip "COPILOT_GITHUB_TOKEN unset (set KRAKEN_AGENT_ASSUME_AUTH=1 to run against a logged-in copilot)"
+    fi
+    ;;
+  *) echo "agent-conformance: unknown KRAKEN_AGENT_CLI '$KRAKEN_AGENT_CLI' (claude|copilot)" >&2; exit 2 ;;
+esac
+echo "agent-conformance: driving $KRAKEN_AGENT_CLI"
 
 # Scenarios whose pass/fail is advisory (reported, never blocking). Override with
 # ADVISORY="..." in the environment; empty means every scenario blocks.

@@ -31,7 +31,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 
 | Clause | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| §1 coordination repo | Coordination repo **MUST** be private and **MUST NOT** hold work code | 📋 operational + ✅ pinned | `kraken.py init` creates the repo **private** (never public); `tests/conformance/test_init.py` asserts the `repo create … --private` bootstrap and the private-only contract. |
+| §1 coordination repo | Coordination repo **MUST** be private and **MUST NOT** hold work code | 📋 operational + ✅ pinned | `kraken.py init` creates the repo **private** (never public); `tests/conformance/test_init.py` asserts the `repo create … --private` bootstrap and the private-only contract, and that it is created only under the slug's own owner — a token authenticated as another account is refused before any write (#174). |
 | §1 assignees | Assignees **MUST NOT** be used to arbitrate anything | 🏗 structural | The claim is decided by the git-ref CAS (§5) — `kraken.py` never fetches or consults assignees. Pinned indirectly by `tests/conformance/test_claim_race.py` (the CAS race), `tests/conformance/test_claim_thread_independence.py`, and `tests/unit` `RefCasTests`. |
 
 ## §2 Task shape
@@ -129,7 +129,7 @@ grep -nE 'MUST|SHOULD|RECOMMENDED' PROTOCOL.md
 
 | Clause | Normative text | Status | Pinned by |
 | --- | --- | --- | --- |
-| §9 honest release | A worker abandoning a claim **MUST** release honestly: post the `released` marker, remove `in-progress`, **then** delete the claim ref (deleting the ref is what frees the task) — comment first, ref last | ✅ pinned | `tests/conformance/test_release.py` (marker + label dropped + ref deleted; re-claimable after); `tests/conformance/test_write_transition_failures.py` (ordering under gh failure); `tests/conformance/test_session_end_release.py` (SessionEnd auto-release runs `kraken.py release`); `tests/conformance/test_stop_failure_release.py` (StopFailure usage-limit auto-release runs `kraken.py release`); `tests/conformance/test_loop_fast_release.py` (the Copilot ambush loop's fast release — mid-drain death and SIGINT both run `kraken.py release`, scoped to the loop's own worker). |
+| §9 honest release | A worker abandoning a claim **MUST** release honestly: post the `released` marker, remove `in-progress`, **then** delete the claim ref (deleting the ref is what frees the task) — comment first, ref last | ✅ pinned | `tests/conformance/test_release.py` (marker + label dropped + ref deleted; re-claimable after); `tests/conformance/test_write_transition_failures.py` (ordering under gh failure); `tests/conformance/test_session_end_release.py` (SessionEnd auto-release runs `kraken.py release` — only for the ending session's own claims, never another session's or a session-less claim, #173); `tests/conformance/test_stop_failure_release.py` (StopFailure usage-limit auto-release runs `kraken.py release`); `tests/conformance/test_loop_fast_release.py` (the Copilot ambush loop's fast release — mid-drain death and SIGINT both run `kraken.py release`, scoped to the loop's own worker). |
 
 ## §10 Close and cleanup
 

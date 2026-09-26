@@ -238,7 +238,10 @@ reuses it through [`AGENTS.md`](AGENTS.md) with **no deltas at all**.
    toolchain installed, `gh` authenticated, and git configured. Workers run
    unattended, so the environment's agent settings must pre-allow the
    delivery commands — a permission prompt with nobody around stalls the task.
-   (Copilot's equivalent is launching with `--allow-all-tools --no-ask-user`.)
+   (Copilot's equivalent is launching with `--allow-all-tools --no-ask-user`,
+   plus deny rules that keep the authorization boundaries at the tool layer —
+   `--deny-tool='shell(gh pr merge:*)'`, `'shell(gh repo delete:*)'`,
+   `'shell(gh issue close:*)'`; `scripts/kraken-loop.sh` passes all of them.)
 
    <details>
    <summary>Example allowlist for the working directory's <code>.claude/settings.json</code></summary>
@@ -333,6 +336,12 @@ path.
 cd /path/to/my_app
 /path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app
 ```
+
+On **Windows**, the loop is a bash script: run it from WSL or Git Bash, with
+`copilot`, `python3` and `git` installed on that side (under WSL, install Copilot
+CLI inside the distro — `npm install -g @github/copilot` — rather than calling the
+Windows one, which a Linux shell cannot launch). Everything the loop invokes then
+resolves in the same environment.
 
 ## The operator's cheat sheet
 
@@ -549,7 +558,9 @@ self-heals: a bundled `SessionEnd` hook fires when you close the terminal or
 `/exit`, and if the worker was still holding a claim it runs `kraken.py release`
 for you — `released: <worker>` / `reason: session ended`, then drops `in-progress`,
 so the task is back on the queue in seconds instead of at the end of its lease.
-That covers a graceful end only; a usage-limit pause never fires `SessionEnd`
+It frees only the claims **that session** made (the claim records its Claude Code
+session), so closing some other `claude` window on the same machine never takes
+a live task from a worker. That covers a graceful end only; a usage-limit pause never fires `SessionEnd`
 either, but its own `StopFailure` hook releases the claim there (see the limit
 FAQ above). A hard kill / crash / power loss fires neither hook — and it does not
 matter: the **lease expires on its own** 30 minutes later and the next worker to

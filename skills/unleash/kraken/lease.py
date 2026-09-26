@@ -231,16 +231,30 @@ def claim_state_path(worker: Worker) -> str:
     return os.path.join(state_dir(), f"claim-{worker}.json")
 
 
+def claude_code_session() -> str | None:
+    """The Claude Code session this process runs in, or None outside one.
+    Claude Code sets CLAUDE_CODE_SESSION_ID for every Bash tool call; the
+    SessionEnd hook receives the same id as `session_id` on stdin."""
+    return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+
+
 def write_claim_state(repo: Repo, issue: Issue, worker: Worker) -> None:
     """Record the open claim so the SessionEnd hook can auto-release it if the
-    worker's session ends before a terminal transition. Best-effort: a state dir
-    we cannot write is never worth failing a won claim over — the reaper backs
-    us up regardless."""
+    worker's session ends before a terminal transition. The record names the
+    Claude Code session that holds the claim, when there is one, because
+    SessionEnd fires for EVERY session on the host and must free only the
+    ending session's own claims (#173). Best-effort: a state dir we cannot
+    write is never worth failing a won claim over — the reaper backs us up
+    regardless."""
+    record = {"repo": repo, "issue": str(issue), "worker": worker}
+    session = claude_code_session()
+    if session:
+        record["session"] = session
     d = state_dir()
     try:
         os.makedirs(d, exist_ok=True)
         with open(claim_state_path(worker), "w", encoding="utf-8") as fh:
-            json.dump({"repo": repo, "issue": str(issue), "worker": worker}, fh)
+            json.dump(record, fh)
             fh.write("\n")
     except OSError:
         pass

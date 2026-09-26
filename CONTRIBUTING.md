@@ -1,13 +1,15 @@
 # Contributing to Kraken
 
 Thanks for wanting to help. Kraken is a small, protocol-first tool: three
-Claude Code skills, a handful of shell scripts, and a normative spec. That
+agent skills (Claude Code plugin format; a GitHub Copilot CLI worker follows the
+same `SKILL.md` through [`AGENTS.md`](AGENTS.md)), a handful of shell scripts,
+and a normative spec. That
 shape decides how contributions work, so this page is short on purpose.
 
 ## What Kraken is (and how the repo is shaped)
 
 Kraken ships **nothing you operate** — it's the protocol between a GitHub-Issues
-task queue and the Claude Code workers that drain it. Three layers, and they
+task queue and the agent workers (Claude Code, GitHub Copilot CLI) that drain it. Three layers, and they
 have a strict hierarchy when they disagree:
 
 | Layer | Lives in | What it is |
@@ -55,12 +57,15 @@ tokens**, so it is deliberately **not** wired into any hook or CI. Run it by
 hand when you change `skills/**` or `tests/agent/**`:
 
 ```bash
-make test-agent   # KRAKEN_AGENT_ASSUME_AUTH=1 bash tests/agent/run-agent-tests.sh
+make test-agent           # on Claude Code
+make test-agent-copilot   # the same scenarios on GitHub Copilot CLI
 ```
 
-It uses your logged-in Claude Code subscription (no paid API key) and self-skips
-cleanly when it can't run for real (no `claude` on PATH, a spend/rate limit, or
-the stub can't be reached).
+It uses your logged-in Claude Code subscription (or `copilot login`; no paid API
+key) and self-skips cleanly when it can't run for real (the CLI not on PATH, a
+spend/rate limit, or the stub can't be reached). A change to `AGENTS.md`,
+`scripts/kraken-loop.sh` or `scripts/lib-copilot-drain.sh` is a Copilot-side
+change: run `make test-agent-copilot` for it.
 
 ## Pull request conventions
 

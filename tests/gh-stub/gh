@@ -86,6 +86,18 @@ if _fail and re.search(_fail, JOINED):
     sys.stderr.write("gh-stub: injected failure for: %s\n" % JOINED)
     sys.exit(1)
 
+# `gh auth token` / `gh auth status`: kraken.py spawns the former when neither
+# GH_TOKEN nor GITHUB_TOKEN is set. The agent harness's Copilot driver must run
+# with both unset — Copilot CLI would authenticate the model with them instead
+# of the operator's stored login — so the stub answers for the token itself.
+if ARGV[:1] == ["auth"]:
+    if ARGV[1:2] == ["token"]:
+        print("stub-token")
+        sys.exit(0)
+    if ARGV[1:2] == ["status"]:
+        print("github.com\n  Logged in to github.com account stub-owner (gh-stub)")
+        sys.exit(0)
+
 LOCKDIR = os.path.join(STATE, ".lock")
 
 

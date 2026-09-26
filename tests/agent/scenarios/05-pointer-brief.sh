@@ -69,7 +69,7 @@ fi
 if has_label 5 needs-decision \
    || comment_stream 5 | grep -Eiq 'diff --git|^\+\+\+ |```diff|git am|git apply|patch' \
    || has_marker 5 released; then
-  skip_scenario "nested claude -p 'git push' was sandboxed here; the skill took an honest fallback (escalate / diff-in-comment / release) instead of delivering a branch. The trailer assertion needs a real push — CI runs the real push path."
+  skip_scenario "nested $AGENT_CLI 'git push' was sandboxed here; the skill took an honest fallback (escalate / diff-in-comment / release) instead of delivering a branch. The trailer assertion needs a real push — CI runs the real push path."
 fi
 
 fail "no branch on the remote and no honest fallback (escalation / diff-in-comment / release) — the work was silently lost (labels: $(labels_of 5 | tr '\n' ' '))"

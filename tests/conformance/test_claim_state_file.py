@@ -2,6 +2,7 @@
 """The claim state file lifecycle: kraken.py claim writes
 ${KRAKEN_STATE_DIR}/claim-<worker>.json on a won claim (exit 0), and every
 terminal worker transition — deliver, escalate, release — removes it."""
+import json
 import os
 import unittest
 
@@ -21,6 +22,8 @@ class ClaimStateFileTests(KrakenConformanceTest):
             content = f.read()
         for field in ('"repo"', '"issue"', '"worker"', "acme/tasks", "w1"):
             self.assertIn(field, content, "state file missing %s" % field)
+        self.assertNotIn('"session"', content,
+                         "a claim made outside Claude Code must record no session")
 
         # --- a lost/held claim writes NO new state file (leaves w1's intact) --
         self.mk_issue(8, "held task", "kraken-task", "project:app", "in-progress")
@@ -55,6 +58,18 @@ class ClaimStateFileTests(KrakenConformanceTest):
         r = self.kraken("deliver", "acme/tasks", 10, "w1", rf, "https://x/pr/1")
         self.assertEqual(r.rc, 0, "deliver exit")
         self.assertFalse(os.path.isfile(dsf), "deliver did not remove the state file")
+
+    def test_claim_records_the_claude_code_session(self):
+        # The SessionEnd hook frees only the ending session's own claims (#173),
+        # so a claim made inside Claude Code records the session that made it.
+        self.mk_issue(7, "a task", "kraken-task", "project:app")
+        r = self.kraken("claim", "acme/tasks", 7, "w1",
+                        env={"CLAUDE_CODE_SESSION_ID": "sess-123"})
+        self.assertEqual(r.rc, 0, "clean claim exit")
+        with open(self.claim_state_file("w1"), encoding="utf-8") as f:
+            record = json.load(f)
+        self.assertEqual(record.get("session"), "sess-123",
+                         "claim did not record the Claude Code session")
 
 
 if __name__ == "__main__":

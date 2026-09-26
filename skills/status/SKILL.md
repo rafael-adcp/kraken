@@ -1,6 +1,6 @@
 ---
 name: status
-description: Read-only console of a kraken queue — everything the operator reads in one place. Runs `kraken.py status`, which computes the review queue (awaiting-merge, with PR links), the decision queue (needs-decision), what is still in flight (every live claim ref — worker name + lease age, flagging expired leases), a merged-PR-but-open-issue orphan flag, and the launch recon (project: labels), then renders that output. No writes, no label changes.
+description: Read-only console of a kraken queue — everything the operator reads in one place. Runs `kraken.py status`, which computes the review queue (awaiting-merge, with PR links), the decision queue (needs-decision), what is still in flight (every live claim ref — worker name + lease age, flagging expired leases), a merged-PR-but-open-issue orphan flag, and the launch recon (the project:<name> labels), then renders that output. No writes, no label changes.
 ---
 
 # Kraken — surface the depths

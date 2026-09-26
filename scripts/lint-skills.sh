@@ -249,6 +249,14 @@ for s in skills/*/SKILL.md; do
     fm="$(printf '%s\n' "$skill_lf" | sed -n '2,/^---$/p')"
     printf '%s\n' "$fm" | grep -qE '^name:'         || err "$s frontmatter missing name:"
     printf '%s\n' "$fm" | grep -qE '^description:'  || err "$s frontmatter missing description:"
+    # Strict YAML: an unquoted value may not contain ": " or " #" nor open with
+    # an indicator. Claude Code tolerates it; GitHub Copilot CLI drops the whole
+    # skill as unparseable ("mapping values are not allowed") — which is how
+    # /kraken:status silently went missing there.
+    bad="$(printf '%s\n' "$fm" | grep -E '^[A-Za-z_-]+:[[:space:]]+[^"'"'"'[:space:]]' \
+             | sed -E 's/^[A-Za-z_-]+:[[:space:]]+//' \
+             | grep -E ': | #|^[][{}#&*!|>%@`,?:-]' | head -1)"
+    [ -z "$bad" ] || err "$s frontmatter is not strict YAML (quote the value, or drop the ': ' / ' #'): ${bad:0:80}"
   else
     err "$s does not open with a --- frontmatter block"
   fi

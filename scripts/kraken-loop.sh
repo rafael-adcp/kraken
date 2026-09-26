@@ -18,7 +18,7 @@
 # so an idle queue never spends a token. The operator owns cadence + stop
 # (Ctrl-C); it never outlives this terminal. Run it straight from a checkout.
 #
-# Self-heal: under protocol/6 a claim is a LEASE that expires on its own, so an
+# Self-heal: under kraken-protocol/9 a claim is a LEASE that expires on its own, so an
 # abandoned task comes back within one TTL no matter how the drain died. This
 # loop just makes it immediate: if a drain dies holding a lease (copilot crash,
 # rate-limit abort, Ctrl-C), it releases on the spot via
@@ -136,14 +136,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-PROMPT="Act as kraken worker $WORKER, draining project:$PROJECT from $TASKS.
-Your working directory, $WORK_DIR, is the work repo: the code, the work branch and the
-draft PR all happen there. Your operating contract lives in the kraken checkout
-$REPO_DIR — read and follow $REPO_DIR/AGENTS.md, $REPO_DIR/skills/unleash/SKILL.md and
-$REPO_DIR/PROTOCOL.md, where <skill> is $REPO_DIR/skills/unleash. Do ONE drain pass: run
-python3 \"$KRAKEN_PY\" next-action $TASKS $PROJECT $WORKER
-and do what the envelope says — execute the task it hands you end to end, deliver it as a
-draft PR, then stop."
+# The prompt and permission flags are single-sourced with the agent-behavior
+# harness (tests/agent/), so what it judges is exactly what this loop runs.
+. "$REPO_DIR/scripts/lib-copilot-drain.sh"
+PROMPT="$(kraken_copilot_prompt "$TASKS" "$PROJECT" "$WORKER" "$WORK_DIR" "$REPO_DIR")"
 
 drain_pass() {
   local ts startable
@@ -153,7 +149,7 @@ drain_pass() {
     echo "kraken-loop: $ts startable task(s) — running a drain pass:"
     printf '%s\n' "$startable" | sed 's/^/  /'
     # Add -s/--silent for terser logs.
-    copilot -p "$PROMPT" --add-dir "$REPO_DIR" --allow-all-tools --no-ask-user
+    copilot -p "$PROMPT" --add-dir "$REPO_DIR" "${KRAKEN_COPILOT_FLAGS[@]}"
     # A lease that survived the copilot process is abandoned — nobody is left
     # to finish or renew it. Free the task now, not at the TTL.
     release_own_claim "copilot exited mid-drain"

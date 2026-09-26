@@ -79,6 +79,51 @@ class InitTests(KrakenConformanceTest):
         self.assertNotIn("PUT ", self.log_text(),
                          "a PUT was issued during a plain run where every asset already exists")
 
+    # --- #174: never create the repo under an owner the slug did not name ----
+
+    def _authenticate_as(self, login):
+        self._write(os.path.join(self.state, "user", "login"), login + "\n")
+
+    def test_init_refuses_to_create_under_another_owner(self):
+        # The token authenticates as owner-b; the operator asked for owner-a's
+        # repo, which this token cannot see. POST /user/repos would create
+        # owner-b/tasks — the repo nobody asked for.
+        self._authenticate_as("owner-b")
+        self.truncate_log()
+        r = self.kraken("init", "owner-a/tasks")
+        self.assertEqual(r.rc, 2, "an owner mismatch is an operator error (usage), got %d" % r.rc)
+        self.assertNotIn("POST /user/repos", self.log_text(),
+                         "init created a repo under the authenticated user, not the slug's owner")
+        self.assertNotIn("PUT ", self.log_text(), "init wrote an asset after refusing")
+        self.assertIn("owner-a", r.err, "the refusal must name the slug's owner")
+        self.assertIn("owner-b", r.err, "the refusal must name the authenticated user")
+        self.assertNotIn("stage=asset", r.err, "the refusal must not blame the asset install")
+
+    def test_init_owner_match_is_case_insensitive(self):
+        # GitHub logins are case-insensitive: Acme and acme are the same owner.
+        self._authenticate_as("Acme")
+        r = self.kraken("init", "acme/tasks")
+        self.assertEqual(r.rc, 0, "a case-only difference is not a mismatch: " + r.err)
+        self.assertIn("POST /user/repos", self.log_text(), "matching owner did not create the repo")
+
+    def test_init_unreadable_login_is_a_transport_failure_not_a_mismatch(self):
+        # A failed GET /user teaches nothing about ownership: report it as the
+        # transport failure it is, and still create nothing.
+        self.truncate_log()
+        r = self.kraken("init", "acme/tasks", fail="GET /user$")
+        self.assertEqual(r.rc, 20, "an unreadable login is a transport failure, got %d" % r.rc)
+        self.assertIn("stage=identity", r.err)
+        self.assertNotIn("POST /user/repos", self.log_text(),
+                         "init created a repo without knowing who it would belong to")
+
+    def test_existing_repo_needs_no_identity_check(self):
+        # A collaborator initialising a repo they can already see writes into
+        # the slug itself — nothing is created under anyone, so nothing to compare.
+        self._authenticate_as("collaborator")
+        self._write(os.path.join(self.state, "repo", "nameWithOwner"), "acme/tasks\n")
+        r = self.kraken("init", "acme/tasks")
+        self.assertEqual(r.rc, 0, "init on an existing repo refused: " + r.err)
+
     def test_init_prunes_every_retired_workflow(self):
         """Re-running init on a repo stood up by an older release is the
         migration: each retired workflow is deleted, so no server-side job keeps

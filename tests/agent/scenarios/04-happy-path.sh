@@ -12,7 +12,7 @@
 # awaiting-merge, delivered marker with pr, draft PR, work branch with trailers,
 # the deliverable really on the branch, default branch untouched).
 #
-# Some environments sandbox the nested `claude -p`'s `git push` even under
+# Some environments sandbox the nested agent's `git push` even under
 # --dangerously-skip-permissions. Then the skill can't deliver a branch and picks
 # an honest fallback (diff-in-comment §8 or escalate for push permission §7) —
 # both conforming, but neither is the branch-pushed artifact this scenario
@@ -78,7 +78,7 @@ fi
 if has_label 5 needs-decision \
    || comment_stream 5 | grep -Eiq 'diff --git|^\+\+\+ |```diff|git am|git apply|patch' \
    || has_marker 5 released; then
-  skip_scenario "nested claude -p 'git push' was sandboxed here; the skill took an honest fallback (escalate / diff-in-comment / release) instead of delivering a branch. The branch-pushed / trailers assertions need a real push — CI runs the real push path."
+  skip_scenario "nested $AGENT_CLI 'git push' was sandboxed here; the skill took an honest fallback (escalate / diff-in-comment / release) instead of delivering a branch. The branch-pushed / trailers assertions need a real push — CI runs the real push path."
 fi
 
 fail "no branch on the remote and no honest fallback (escalation / diff-in-comment / release) — the work was silently lost (labels: $(labels_of 5 | tr '\n' ' '))"

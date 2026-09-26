@@ -6,7 +6,7 @@
 # lib-release-claims.sh, so the task returns to the queue in seconds instead of
 # at the end of the lease TTL.
 #
-# This is an OPTIMIZATION, never the recovery mechanism: under protocol/6 the
+# This is an OPTIMIZATION, never the recovery mechanism: under kraken-protocol/9 the
 # claim is a lease that expires on its own (PROTOCOL.md §5), so a session that
 # fires no hook at all — a hard kill, a crash, a harness with no hook events —
 # still frees its task within one TTL. Releasing early is simply more polite to
@@ -14,12 +14,18 @@
 # SessionEnd never fires there — that path is the StopFailure hook's
 # (stop-failure-release.sh). See the #60 FAQ in README.md.
 #
-# Best-effort: ALWAYS exits 0 (a failed release just waits out the TTL); the
-# SessionEnd JSON on stdin is unused.
+# Scope: ONLY the ending session's own claims (#173). SessionEnd fires for
+# every Claude Code session on the host — a 30-second `claude -p` opened to read
+# a file included — so the hook matches the event's `session_id` against the
+# session `kraken.py claim` recorded. A claim naming no session (the Copilot
+# loop, a bare shell) or an event naming none releases nothing: the lease TTL,
+# and the loop's own release-on-exit, cover those.
+#
+# Best-effort: ALWAYS exits 0 (a failed release just waits out the TTL).
 set -u
 
 . "$(dirname "$0")/lib-release-claims.sh"
 
-release_all_claims "session ended"
+release_session_claims "session ended" "$(hook_event_session_id)"
 
 exit 0
