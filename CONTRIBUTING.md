@@ -64,8 +64,9 @@ make test-agent-copilot   # the same scenarios on GitHub Copilot CLI
 It uses your logged-in Claude Code subscription (or `copilot login`; no paid API
 key) and self-skips cleanly when it can't run for real (the CLI not on PATH, a
 spend/rate limit, or the stub can't be reached). A change to `AGENTS.md`,
-`scripts/kraken-loop.sh` or `scripts/lib-copilot-drain.sh` is a Copilot-side
-change: run `make test-agent-copilot` for it.
+`scripts/kraken-loop.sh`, `scripts/kraken-copilot.sh` or
+`scripts/lib-copilot-drain.sh` is a Copilot-side change: run
+`make test-agent-copilot` for it.
 
 ## Pull request conventions
 
