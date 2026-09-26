@@ -334,6 +334,12 @@ cd /path/to/my_app
 /path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app
 ```
 
+On **Windows**, the loop is a bash script: run it from WSL or Git Bash, with
+`copilot`, `python3` and `git` installed on that side (under WSL, install Copilot
+CLI inside the distro — `npm install -g @github/copilot` — rather than calling the
+Windows one, which a Linux shell cannot launch). Everything the loop invokes then
+resolves in the same environment.
+
 ## The operator's cheat sheet
 
 Every gesture you ever need, in one table — the tentacles handle
