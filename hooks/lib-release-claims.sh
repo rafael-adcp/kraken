@@ -75,6 +75,43 @@ release_session_claims() {
   release_claims_where "$1" session "${2:-}"
 }
 
+# release_detached FUNCTION ARG... — run one of the release functions above in
+# its own session, detached from the hook, and return at once. A harness bounds
+# how long a hook may run and kills it at the deadline: Claude Code gives
+# SessionEnd hooks 1.5s in total (a plugin's own "timeout" does not extend it,
+# verified on 2.1.283) and, under `claude -p`, kills a StopFailure hook as the
+# process exits — while a release against the real API makes ~9 calls and takes
+# seconds. Killed mid-release, a task is left half-freed (the released marker
+# posted, in-progress and the lock still held) until the TTL. Detached, the
+# release outlives the hook and whatever the harness does to it.
+# KRAKEN_HOOK_WAIT=1 waits for it instead (the conformance suite, which asserts
+# on the queue as soon as the hook returns).
+release_detached() {
+  python3 -c '
+import os, sys
+lib, argv, wait = sys.argv[1], sys.argv[2:], os.environ.get("KRAKEN_HOOK_WAIT") == "1"
+ready_r, ready_w = os.pipe()
+pid = os.fork()
+if pid == 0:
+    # A new session, out of the hook'"'"'s process group, BEFORE the hook may
+    # return: a harness that kills the group right after must miss us.
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    os.write(ready_w, b"1")
+    null = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):  # never hold the hook'"'"'s pipes: a harness waits on them
+        os.dup2(null, fd)
+    os.execvp("bash", ["bash", "-c", ". \"$0\"; \"$@\"", lib, *argv])
+os.close(ready_w)
+os.read(ready_r, 1)
+if wait:
+    os.waitpid(pid, 0)
+' "$KRAKEN_HOOKS_ROOT/hooks/lib-release-claims.sh" "$@" </dev/null >/dev/null 2>&1
+  return 0
+}
+
 # hook_event_session_id — the `session_id` of the hook event JSON on stdin, or
 # empty when stdin is not a JSON object naming one.
 hook_event_session_id() {

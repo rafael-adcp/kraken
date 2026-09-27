@@ -10,11 +10,13 @@ runs), the Bash tool under --dangerously-skip-permissions, and both lifecycle
 hooks in hooks.json: SessionEnd, and StopFailure on a rate limit, which the
 fake model triggers with a scripted HTTP 429.
 
-StopFailure is exercised in an INTERACTIVE session (a pseudo-terminal), the case
-the hook exists for: a usage limit kills the turn but not the session. Under
-`claude -p` the process exits on the failed turn and takes still-running hooks
-with it (verified on Claude Code 2.1.283: a 2-second StopFailure hook never
-finished), so there a rate-limited lease is left to its TTL.
+StopFailure is exercised both in an INTERACTIVE session (a pseudo-terminal),
+the case the hook exists for — a usage limit kills the turn but not the session
+— and under `claude -p`, where the process exits on the failed turn and kills
+hooks still running (verified on 2.1.283: a 2-second StopFailure hook never
+finished). Both hooks survive that only because they release DETACHED, and the
+SessionEnd test runs the stub at a real API's pace to hold them to it: Claude
+Code gives SessionEnd hooks 1.5s in total, and a plugin cannot raise it.
 
 Needs `claude` on PATH (npm install -g @anthropic-ai/claude-code). No login and
 no API key: the key it is handed is fake, and only the fake model sees it.
@@ -132,6 +134,9 @@ class UnleashDrainTests(ClaudeE2ETest):
 
 class PluginHookTests(ClaudeE2ETest):
     def test_session_end_hook_releases_the_sessions_claim(self):
+        # At a real API's pace the release takes seconds — longer than a
+        # harness gives a SessionEnd hook it knows nothing about.
+        self.at_real_api_speed()
         proc, requests = self.unleash([{"bash": NEXT_ACTION}, {"say": "Stopping here."}])
         self.assertEqual(proc.returncode, 0, self.detail(requests))
         self.assert_claimed_then_released("session ended", requests)
@@ -145,6 +150,17 @@ class PluginHookTests(ClaudeE2ETest):
         self.assertTrue(self.has_label(ISSUE, "in-progress"),
                         "SessionEnd released a claim it does not own" + self.detail(requests))
         self.assertTrue(os.path.exists(self.claim_state_file(WORKER)))
+
+    def test_stop_failure_headless_releases_before_the_process_exits(self):
+        # Under `claude -p` a rate-limited turn ends the process at once; the
+        # detached release must land anyway.
+        self.at_real_api_speed()
+        proc, requests = self.unleash([{"bash": NEXT_ACTION}, RATE_LIMIT])
+        self.assertNotEqual(proc.returncode, 0, "a rate-limited turn must not exit clean" + self.detail())
+        self.assertIn("429", self.transcript)
+        self.assert_claimed_then_released("usage limit", requests)
+        self.assertTrue(os.path.isfile(os.path.join(self.kraken_state_dir, "wake-retry")),
+                        "StopFailure did not stamp the wake-retry flag" + self.detail(requests))
 
     def test_stop_failure_on_rate_limit_releases_and_stamps_the_retry_flag(self):
         # The model claims, then the account hits its usage limit mid-drain: the

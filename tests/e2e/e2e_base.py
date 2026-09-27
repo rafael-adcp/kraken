@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +40,10 @@ ISSUE = 1
 BRANCH = "kraken/task-1"
 TIMEOUT = int(os.environ.get("KRAKEN_E2E_TIMEOUT", "180"))
 REQUIRED = os.environ.get("KRAKEN_E2E_REQUIRE") == "1"
+# A real GitHub API round trip, per request. The stub answers in milliseconds,
+# which hides any hook that only fits its harness's deadline on a fast API:
+# `kraken.py release` makes ~9 calls, so at this latency it takes ~3s.
+REAL_API_LATENCY = 0.3
 
 # The scripted steps every CLI's drain shares: its shell tool runs them, so they
 # are plain commands, identical whichever CLI carries them.
@@ -244,7 +249,22 @@ class E2ETest(KrakenConformanceTest):
         self.assertEqual(self.git("--git-dir", self.bare, "rev-parse", "main").stdout.strip(),
                          self.main_baseline, "the default branch moved")
 
+    def at_real_api_speed(self):
+        """Answer every stub request at REAL_API_LATENCY from now on."""
+        self.knobs.set_latency(REAL_API_LATENCY)
+        self.addCleanup(self.knobs.set_latency, 0)
+
+    def wait_released(self, timeout=30):
+        """The hooks release DETACHED, so the release may still be landing
+        after the CLI exits: wait for the lock and the label to go."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self.has_label(ISSUE, "in-progress") and not self.claim_ref_exists(ISSUE):
+                return
+            time.sleep(0.2)
+
     def assert_claimed_then_released(self, reason, requests):
+        self.wait_released()
         detail = self.detail(requests)
         self.assertIn('"type":"claim"', "\n".join(self.comment_bodies(ISSUE)),
                       "the scripted claim never landed" + detail)

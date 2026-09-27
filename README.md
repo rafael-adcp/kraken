@@ -622,6 +622,9 @@ self-heals: a bundled `SessionEnd` hook fires when you close the terminal or
 `/exit`, and if the worker was still holding a claim it runs `kraken.py release`
 for you — `released: <worker>` / `reason: session ended`, then drops `in-progress`,
 so the task is back on the queue in seconds instead of at the end of its lease.
+The hook hands the release to a detached process and returns at once: Claude Code
+gives `SessionEnd` hooks 1.5 seconds in total and a release against GitHub takes
+a few, so a release run inside the hook was cut off half-done.
 It frees only the claims **that session** made (the claim records its Claude Code
 or Copilot CLI session), so closing some other `claude` or `copilot` window on the same machine never takes
 a live task from a worker. That covers a graceful end only; a usage-limit pause never fires `SessionEnd`

@@ -116,6 +116,9 @@ class PluginHookTests(CopilotE2ETest):
     session id kraken.py recorded (#173)."""
 
     def test_session_end_hook_releases_the_sessions_claim(self):
+        # At a real API's pace the release takes seconds — longer than a
+        # harness gives a SessionEnd hook it knows nothing about.
+        self.at_real_api_speed()
         proc, requests = self.run_with_plugin([{"bash": NEXT_ACTION}, {"say": "Stopping here."}],
                                               "Do one kraken drain pass.")
         self.assertEqual(proc.returncode, 0, self.detail(requests))

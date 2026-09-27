@@ -25,11 +25,21 @@
 # no session (a bare shell) or an event naming none releases nothing: the lease
 # TTL, and the Copilot loop's own release-on-exit, cover those.
 #
+# Detached: the release runs in its own session and the hook returns at once.
+# Claude Code gives SessionEnd hooks 1.5s in total — a plugin cannot raise it —
+# and a release against the real API takes longer; killed at the deadline, the
+# task was left half-released (see release_detached).
+#
 # Best-effort: ALWAYS exits 0 (a failed release just waits out the TTL).
 set -u
+# A harness exiting signals its still-running hooks (Claude Code under `claude
+# -p` does so within milliseconds): ignore that, so the hook lives long enough
+# to hand the release off.
+trap '' HUP INT TERM
 
 . "$(dirname "$0")/lib-release-claims.sh"
 
-release_session_claims "session ended" "$(hook_event_session_id)"
+session="$(hook_event_session_id)"
+[ -z "$session" ] || release_detached release_session_claims "session ended" "$session"
 
 exit 0
