@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 
 from .contract import (
     ClaimRecord, CommentRecord, ENTRYPOINT, EXIT_LOST, EXIT_NONE,
@@ -20,34 +19,19 @@ from .lease import (
 )
 from .refs import Refs
 from .state import NO_RECORD, States, TaskState
-from .queue import is_empty_section, section_body
+from .queue import section_text
 from .render import render_next_action
-from .claim import acquire_next, claim_is_moot
+from .claim import AlreadyHolding, Claimed, acquire_next, claim_is_moot
 
 # --- subcommand: next-action -------------------------------------------------
-#
-# The driver loop, as one call. Everything a worker otherwise has to REMEMBER
-# between transitions — whether it already holds a task, whether that lease is
-# still its own, when the lease must be renewed, which writes are legal next and
-# with which arguments — is bookkeeping, and bookkeeping belongs in the program.
-# What is left for the agent is the part only it can do: read the goal, write the
-# code, write the question, write the result.
-#
-# This is a worker-side ergonomic (PROTOCOL.md §12), exactly like claim-next and
-# status: no new wire semantics and no new write. The only writes it performs are
-# the claim path's, reached through acquire_next.
-#
-# stdout is the JSON envelope and NOTHING else, so the whole computation runs
-# with `diag` routed to stderr (see diagnostics_on_stderr).
+# The driver loop as one call (§12): the bookkeeping a worker would otherwise
+# have to remember, done by the program. It writes nothing the claim path does
+# not, and its stdout is the JSON envelope alone.
 
-# The action vocabulary, single-sourced here: `kraken.py contract next-actions`
-# prints it and the skill lint checks the SKILL.md documents every one, the same
-# execute-don't-diff rule the marker types follow.
+# Single-sourced: `contract next-actions` prints it and the lint checks SKILL.md.
 NEXT_ACTIONS = ("execute", "idle", "abandon", "blocked", "stop", "retry")
 
-# action -> the exit code that carries the same verdict to a shell. They reuse
-# the established contract (§12) rather than inventing a second numbering: a
-# caller that already branches on claim-next's codes needs to learn nothing.
+# action -> the exit code carrying the same verdict, reusing claim-next's codes.
 NEXT_ACTION_EXIT = {
     "execute": EXIT_OK,
     "idle": EXIT_NONE,
@@ -60,18 +44,9 @@ NEXT_ACTION_EXIT = {
 
 def then_commands(repo: Repo, issue: Issue, worker: Worker,
                   script: str | None = None) -> dict[str, str]:
-    """The exact command lines this worker may run next, fully interpolated —
-    the entry point's absolute path, the repo, the issue and the worker name
-    already filled in, with only the parts that are the agent's to write left as
-    placeholders.
-
-    This is the point of the envelope: assembling an argv is bookkeeping, and an
-    agent that assembles one gets the path wrong, or the argument order, or the
-    worker name. The path is quoted because a plugin folder may contain spaces.
-
-    The default is `ENTRYPOINT`, not this file: the implementation lives in the
-    package, but the thing a worker RUNS is still skills/unleash/kraken.py, and
-    an envelope naming a module inside the package would not be executable."""
+    """The command lines this worker may run next, fully interpolated so the
+    agent only writes the placeholders. The path is quoted: a plugin folder may
+    contain spaces."""
     script = script or ENTRYPOINT
     base = f'python3 "{script}"'
     return {
@@ -87,16 +62,9 @@ def lease_block(
     epoch: Epoch | None, now: Epoch, ttl: int,
     generation: Gen | None = None, source: str = "claim-ref",
 ) -> Json:
-    """The renewal contract as numbers instead of as an instruction to remember:
-    when this lease dies, how long is left, and how often to renew.
-
-    `source` says where the clock came from. "claim-ref" is the authoritative
-    one — the ref's server-stamped commit date, the same anchor every reader
-    applies the TTL to (§5.1). "estimated" is the freshly-won claim, whose commit
-    was created moments ago and is timed off the local clock rather than paying a
-    re-read for it: renewal is TTL/3, so a local clock has three renewals of
-    slack before drift could matter, and the authoritative clock still decides
-    every actual expiry."""
+    """The renewal contract as numbers. `source` is "claim-ref" (the server's
+    commit date, §5.1) or "estimated" for a claim won moments ago, which skips
+    a re-read — renewal every TTL/3 leaves ample slack for drift."""
     expires = epoch + ttl
     return {
         "generation": generation,
@@ -110,29 +78,13 @@ def lease_block(
 
 def feedback_since(api: Api, issue: Issue, anchor: int,
                    ) -> list[CommentRecord] | None:
-    """The comments that arrived AFTER the state record was written — §6's
-    requeue derivation as the words that caused it, not as a boolean the agent
-    then goes back to the thread to interpret. Returns the records in server
-    order, or None on transport failure.
+    """The human comments past `anchor` — what a bounce is about — or None on
+    transport failure.
 
-    Two steps, and they answer different questions. WHERE the new comments start
-    is positional: the anchor is a comment TOTAL and `comment_records` returns
-    the whole thread in that same server order, so the tail past that index is
-    the range §6 derived its verdict from — every comment counts there (§6), so
-    no filter may run before the cut without sliding it.
-
-    WHAT of that range is the ask is a different question, and the machine's own
-    comments are not it. A marker is exactly the structural signal that says
-    "worker-authored" (§4), and by the time this runs the claim's own comment is
-    already on the thread — so an unfiltered tail would hand every bounced task
-    back its own "Claimed this task" line as though the operator had written it.
-    Filtering AFTER the cut costs the range nothing: the index is already fixed.
-
-    A thread that SHRANK below its anchor yields an empty list rather than a
-    slice from the end — which is honest, and is the c13 case: the anchor is
-    stale, §6's re-anchor repair is what fixes it, and a reader must not invent
-    feedback to fill the gap. Empty is still an answer, and the caller reports
-    it as one; None is the absence that means "the read did not land"."""
+    Cut first, filter second: the anchor is a position in the whole thread, so
+    removing worker comments (they carry a marker, §4) before the cut would
+    slide it. A thread that shrank below its anchor yields [], never a slice
+    from the end."""
     records = api.comment_records(issue)
     if records is None:
         return None
@@ -141,34 +93,20 @@ def feedback_since(api: Api, issue: Issue, anchor: int,
 
 
 def task_brief(title: str, body: str) -> Json:
-    """The task as the agent needs it: the issue-form sections split out, plus
-    the raw body for a hand-written issue that carries no headings. An empty or
-    `_No response_` section reads as "" rather than as the placeholder text."""
-    def section(name):
-        content = section_body(body, name)
-        return "" if is_empty_section(content) else content.strip()
-
+    """The issue-form sections split out, plus the raw body for a hand-written
+    issue with no headings."""
     return {
         "title": title,
-        "goal": section("Goal"),
-        "acceptance": section("Acceptance"),
-        "notes": section("Notes"),
+        "goal": section_text(body, "Goal"),
+        "acceptance": section_text(body, "Acceptance"),
+        "notes": section_text(body, "Notes"),
         "body": body,
     }
 
 
 class NextActionEnvelope:
-    """Builds next-action's answers for ONE worker draining ONE repo.
-
-    The repo, the worker and the script path are invariant for the whole call, so
-    they live in the constructor rather than trailing every answer. And `answer`
-    DERIVES the exit code from the action through `NEXT_ACTION_EXIT` instead of
-    being told it: a hand-written code beside each envelope is a copy of a row of
-    that table, which drifts rather than differs.
-
-    `action` is the verdict, `reason` a stable machine slug for it, and `detail`
-    the human sentence — so a consumer branches on the slug and a human reads
-    the sentence, never the other way round."""
+    """Builds next-action's answers for one worker draining one repo; the exit
+    code is derived from the action, never written beside it."""
 
     def __init__(self, repo: Repo, worker: Worker, script: str | None = None):
         self.repo = repo
@@ -176,8 +114,7 @@ class NextActionEnvelope:
         self.script = script
 
     def answer(self, action: str, **fields) -> tuple[int, Envelope]:
-        """The envelope AND the exit code that carries the same verdict to a
-        shell — one call, because they are one decision."""
+        """(exit code, envelope): one decision."""
         return (NEXT_ACTION_EXIT[action], self.build(action, **fields))
 
     def build(self, action: str, *,
@@ -191,38 +128,12 @@ class NextActionEnvelope:
               reason: str | None = None,
               detail: str | None = None,
               holding: Json | None = None) -> Envelope:
-        """The one JSON shape next-action emits.
+        """The one JSON shape next-action emits (fields: `contract.Envelope`).
 
-        `bounced`, `pr` and `feedback` are what the state record knows about this
-        task's PAST, carried because the program already computed them and the
-        agent would otherwise have to rediscover them from the thread —
-        `bounced` by reading comments and judging whose they are, `pr` by hunting
-        the earlier delivery in the body. `bounced` rides every execute, false
-        included: "no, this is a fresh task" is an answer, and an absent key
-        would read as an older program that could not tell. `pr` is omitted when
-        there is none, the same rule the markers follow — no delivery is not an
-        empty delivery.
-
-        `feedback` is what `bounced` is ABOUT: the comments past the record's
-        anchor, so the ask arrives with the verdict instead of costing a fetch
-        and an eyeball judgment of which comments are new. It rides a bounced
-        execute only — a fresh task has no thread to cut — and its two absences
-        are distinct, which is why it is omitted rather than emitted empty on
-        failure: `[]` says the read landed and found nothing past the anchor (a
-        stale anchor, §6's repair case), while an ABSENT key says the read did
-        not land and the agent owes the thread a look of its own.
-
-        `holding` is `{"repo", "issue"}` naming a claim this worker must resolve,
-        and it exists because a `blocked` claim may live in a **different repo**
-        than the one being drained: pairing the top-level `repo` with that
-        claim's issue number would name a task that does not exist. So `blocked`
-        reports the claim under `holding` and never as a bare top-level `issue`.
-
-        `then` is attached wherever a write is actually legal: to `execute` for
-        the task in hand, and to `blocked` for the claim that has to be resolved
-        first — built against **that** claim's repo and issue. Emitting `blocked`
-        without it would tell a worker to run a transition it has no way to
-        construct."""
+        Absences carry meaning: `bounced` rides every execute, false included;
+        `feedback` is `[]` when the read found nothing and absent when the read
+        failed. `holding` exists because a blocking claim may be in another
+        repo, so its `then` is built against that repo."""
         env = {"action": action, "repo": self.repo, "worker": self.worker}
         if issue is not None:
             env["issue"] = int(issue)
@@ -257,23 +168,14 @@ class NextActionEnvelope:
 
 def next_action_envelope(action: str, repo: Repo, worker: Worker, *,
                          script: str | None = None, **fields) -> Envelope:
-    """The envelope as a single call, for a caller that has no context object in
-    hand."""
+    """The envelope as a single call."""
     return NextActionEnvelope(repo, worker, script).build(action, **fields)
 
 
 def issue_is_finished(issue_obj: Json | None, record: TaskState = NO_RECORD,
                       ) -> bool:
-    """Whether an issue has left the state where "keep executing" makes sense:
-    closed, or already in a held state. A worker whose scratch file still names
-    such a task already finished with it — the transition landed and only the
-    local file lagged.
-
-    The held half is `claim_is_moot`, which is `holding_state`, which is §3.1:
-    the record decides, and the labels are consulted only for a task that has
-    none. Reading the labels outright would make a delivered task the operator
-    requeued by commenting look finished — the badge still says `awaiting-merge`
-    until somebody claims it — and drop a task the queue just handed back."""
+    """Closed, or in a held state per its record (§3.1) — not per its badge,
+    which still says `awaiting-merge` on a task an operator just requeued."""
     if str((issue_obj or {}).get("state", "")).upper() == "CLOSED":
         return True
     names = {lbl.get("name", "") for lbl in (issue_obj or {}).get("labels", [])}
@@ -284,35 +186,13 @@ def resume_verdict(
     record: ClaimRecord, repo: Repo, worker: Worker, head: Lease,
     issue_obj: Json | None, state: TaskState = NO_RECORD,
 ) -> tuple[str, Json]:
-    """Decide what a recorded open claim is worth, as a pure function of what was
-    observed. Returns `(verdict, detail)` where verdict is one of:
+    """What a recorded open claim is worth, as a pure function of what was
+    observed: `(verdict, detail)`, verdict being "blocked" (claim in another
+    repo), "retry" (a read did not land), "resolved" (the task already left),
+    "abandon" (the lease is not ours: write nothing, §5.3) or "execute".
 
-      - `"blocked"`  — the record names a claim in a DIFFERENT repo. Decided
-        before any read, so the caller passes `UNREADABLE_LEASE` and no issue —
-        nothing was observed; one task at a time is repo-independent (§5).
-      - `"retry"`    — a read did not land. Ambiguous is never a decision:
-        write nothing, change nothing, re-check.
-      - `"resolved"` — this worker no longer holds the task AND the task has
-        already left the queue (closed, or `needs-decision`/`awaiting-merge`).
-        The transition landed and the state file lagged, so the drain simply
-        continues to the next task.
-      - `"abandon"`  — this worker no longer holds the lease on a task that is
-        still open and unfinished: it was stolen, or the ref is gone. Write
-        NOTHING (§5.3) and say so.
-      - `"execute"`  — the lease is still ours. Resume.
-
-    Ownership is checked before the issue's own state, because the lease is the
-    lock and the labels are projection. A lease that is ours but PAST its TTL
-    still resumes: §5.3 is explicit that an expired-but-unstolen lease may
-    complete its transition — the caller is told to renew first. That is why no
-    clock reaches this function: the verdict is about WHO holds the lease, never
-    how old it is, so there is no `now`/`ttl` here to get backwards.
-
-    `state` is the task's state record (§3.1) — what decides "finished" for both
-    the not-ours and the still-ours branch. It defaults to `NO_RECORD`, which
-    falls back to the issue's labels exactly as §3.1 prescribes for a task that
-    has none, so a caller that could not read one degrades to the older
-    behaviour rather than to a wrong verdict."""
+    No clock reaches this: an expired lease that is still ours resumes (§5.3),
+    so the question is who holds it, never how old it is."""
     if record["repo"] and record["repo"] != repo:
         return ("blocked", {"reason": "claim-elsewhere",
                             "detail": f"this worker holds {record['repo']}"
@@ -329,10 +209,6 @@ def resume_verdict(
 
     if not head.held_by(worker):
         if issue_is_finished(issue_obj, state):
-            # Whether this worker's own terminal transition deleted the ref or
-            # the reconciler reclaimed it is not answerable from here — and the
-            # right move is the same either way: the task is not ours and not in
-            # the queue, so keep draining rather than report a loss.
             return ("resolved", {"reason": "already-resolved"})
         if not head.present:
             return ("abandon", {"reason": "lease-gone",
@@ -353,12 +229,8 @@ def resume_verdict(
 
 
 class NextAction:
-    """One `next-action` call: resume the claim this worker already holds, or
-    acquire the next task, and answer as an envelope.
-
-    Resuming and acquiring share the same context — api, project, worker, ttl,
-    now, script — and the same envelope factory built from it. That context is
-    what this object is: it belongs to one call, not to each half of it."""
+    """One `next-action` call: resume the claim this worker holds, or acquire
+    the next task, and answer as an envelope."""
 
     def __init__(self, api: Api, project: str, worker: Worker, *,
                  ttl: int | None = None, now: Epoch | None = None,
@@ -372,14 +244,8 @@ class NextAction:
 
     @property
     def now(self) -> Epoch:
-        """The clock every number in the `lease` block is computed against: the
-        SERVER's (§5.1), so `seconds_remaining` is time the holder actually has
-        rather than time minus this machine's skew.
-
-        Resolved at use, not in the constructor: `server_now` only knows the
-        server's clock once a response has been seen, and nothing has been
-        requested yet when this object is built. A test that passes an explicit
-        `now` still pins it."""
+        """The server's clock (§5.1), resolved at use: it is only known once a
+        response has been seen."""
         return self.api.server_now() if self._now is None else self._now
 
     def run(self) -> tuple[int, Envelope]:
@@ -402,19 +268,14 @@ class NextAction:
         issue = record["issue"]
 
         if verdict == "resolved":
-            # The claim is over. Drop the stale scratch file so the lifecycle
-            # hooks stop hinting at a claim that no longer exists, and let the
-            # caller drain on — the self-heal that saves the operator a hand
-            # `release`.
+            # The claim is over: drop the stale scratch file and drain on.
             clear_claim_state(self.worker)
             diag(f"next-action: claim resolved issue={issue} ({detail['reason']}) "
                  "— continuing the drain")
             return (None, None)
 
         if verdict == "abandon":
-            # Provably not ours: clearing local state is safe and is what unjams
-            # this worker. An AMBIGUOUS read never reaches here (it is "retry"),
-            # so no transport fault can make us drop a claim we might still hold.
+            # Provably not ours (an ambiguous read is "retry", never this).
             clear_claim_state(self.worker)
 
         action = verdict  # the remaining verdicts are the action names themselves
@@ -423,22 +284,9 @@ class NextAction:
         return self._resumed(issue, detail, issue_obj, state)
 
     def _observe(self, record: ClaimRecord):
-        """What the verdict is decided from: the lease, the issue and the task's
-        state record — or none of them when the record names a claim in a
-        different repo. Returned alongside the verdict, because the record is
-        also what says whether the task was BOUNCED back and where its last
-        delivery went, and a resume that dropped it would send the agent to the
-        thread for what this read already answered.
-
-        The state record is what says whether this task is still ours to execute
-        (§3.1), so it is read here rather than inferred from the badge: a task
-        delivered and then requeued by an operator comment wears `awaiting-merge`
-        until somebody claims it, and resuming on the badge alone dropped it.
-        Read only once the lease proves readable, because a verdict of `retry`
-        needs nothing else."""
+        """The verdict plus what it was decided from — the issue and the state
+        record, which the resumed envelope reuses for `bounced` and `pr`."""
         if record["repo"] and record["repo"] != self.api.repo:
-            # Nothing was read, and nothing needs to be: the repo mismatch
-            # decides it.
             verdict, detail = resume_verdict(
                 record, self.api.repo, self.worker, UNREADABLE_LEASE, None)
             return (verdict, detail, None, NO_RECORD)
@@ -448,20 +296,14 @@ class NextAction:
         issue_obj = None if head.unknown else self.api.issue_detail(issue)
         state = NO_RECORD if issue_obj is None else States(self.api).of(issue)
         if state.unknown:
-            # The record did not read. Ambiguous is never a decision (§3.1) —
-            # the same answer an unreadable lease or issue gets.
-            issue_obj = None
+            issue_obj = None  # ambiguous is never a decision: retry
         verdict, detail = resume_verdict(
             record, self.api.repo, self.worker, head, issue_obj, state)
         return (verdict, detail, issue_obj, state)
 
     def _refuse(self, action: str, record: ClaimRecord,
                 detail: Json) -> tuple[int, Envelope]:
-        """Every non-execute resume verdict. `blocked` names the claim under
-        `holding` (it may be in another repo, so a bare top-level issue would
-        read against the wrong one) and carries the commands that resolve it. The
-        other verdicts are about the task in this repo, and none of them makes a
-        write legal."""
+        """Every non-execute resume verdict."""
         issue = record["issue"]
         diag(f"next-action: {action} issue={issue} ({detail['reason']})")
         if action == "blocked":
@@ -475,25 +317,16 @@ class NextAction:
 
     def _resumed(self, issue: Issue, detail: Json, issue_obj: Json,
                  state: TaskState) -> tuple[int, Envelope]:
-        # Re-stamp the scratch file: a resume proves the claim is open, and the
-        # lifecycle hooks read the file, so a hint lost with its machine is
-        # restored the moment the claim is picked back up.
+        # Re-stamp the scratch file the hooks read, in case it was lost.
         write_claim_state(self.api.repo, issue, self.worker)
         epoch = detail["epoch"]
-        # An unreadable clock is an expired lease (§5.1) — fail open, toward
-        # renewing immediately, never toward assuming time is left.
+        # An unreadable clock reads as expired (§5.1): renew now.
         lease = lease_block(
             epoch if epoch is not None else self.now - self.ttl,
             self.now, self.ttl, generation=detail["generation"])
         diag(f"next-action: resumed issue={issue} worker={self.worker}")
-        # A bounce survives the claim that answered it: taking the task writes no
-        # record (§3.1), so the held one still names the state it came back from
-        # and still carries the anchor the live total ran past. Every resume of
-        # this task therefore reports the same `bounced` its acquisition did —
-        # which is what the agent needs, since it is rework for its whole turn.
-        # And because the anchor is the same, so is the cut: a resumed bounce
-        # carries the same feedback the acquisition did, rather than a shorter
-        # tail that would silently drop what the agent is meant to answer.
+        # A claim writes no record (§3.1), so a resume reports the same bounce
+        # and the same feedback its acquisition did.
         bounced = state.requeued(comment_total_of(issue_obj))
         return self.envelope.answer(
             "execute", issue=issue, resumed=True,
@@ -505,14 +338,8 @@ class NextAction:
 
     def _feedback(self, issue: Issue, bounced: bool,
                   anchor: int) -> list[CommentRecord] | None:
-        """The comments this bounce is about, or None when there is nothing to
-        cut or the cut could not be read.
-
-        Gated on `bounced` so the common case — a fresh task, no thread — pays
-        nothing: this is the one read `next-action` adds beyond what the claim
-        loop already did, and it is owed only when the program has just told the
-        agent the thread moved on. A failed read degrades to the older behaviour
-        (the agent goes to the thread itself), never to a wrong cut."""
+        """The comments a bounce is about; only read when `bounced`, so a fresh
+        task pays nothing."""
         if not bounced:
             return None
         return feedback_since(self.api, issue, anchor)
@@ -520,47 +347,39 @@ class NextAction:
     # --- acquiring the next task ---------------------------------------------
 
     def acquire(self) -> tuple[int, Envelope]:
-        """Take the next startable task, and translate the claim loop's exit code
+        """Take the next startable task, and translate the claim loop's result
         into the verdict a driver reads."""
-        rc, won = acquire_next(self.api, self.project, self.worker, ttl=self.ttl)
-        if rc == EXIT_OK:
+        got = acquire_next(self.api, self.project, self.worker, ttl=self.ttl)
+        if isinstance(got, Claimed):
             return self.envelope.answer(
-                "execute", issue=won["issue"], resumed=False,
-                bounced=won["bounced"], pr=won["pr"],
-                feedback=self._feedback(won["issue"], won["bounced"],
-                                        won["anchor"]),
-                brief=task_brief(won["title"], won["body"]),
+                "execute", issue=got.issue, resumed=False,
+                bounced=got.bounced, pr=got.pr,
+                feedback=self._feedback(got.issue, got.bounced, got.anchor),
+                brief=task_brief(got.title, got.body),
                 lease=lease_block(self.now, self.now, self.ttl,
                                   source="estimated"))
-        if rc == EXIT_NONE:
+        if isinstance(got, AlreadyHolding):
+            return self._resume_discovered(got.issue)
+        if got.exit_code == EXIT_NONE:
             return self.envelope.answer(
                 "idle", reason="queue-empty",
                 detail=f"nothing startable in project:{self.project}")
-        if rc == EXIT_UNKNOWN_PROJECT:
+        if got.exit_code == EXIT_UNKNOWN_PROJECT:
             return self.envelope.answer(
                 "stop", reason="unknown-project",
                 detail=f"the repo carries no project:{self.project} label — this "
                        "worker would filter every task out; fix the label, never "
                        "drain unscoped")
-        if rc == EXIT_NOT_CLEAR:
-            return self._resume_discovered(won)
         return self.envelope.answer(
             "retry", reason="transport",
             detail="the queue read or a claim write did not land — re-check the "
                    "task's real state before retrying")
 
-    def _resume_discovered(self, payload: Json | None) -> tuple[int, Envelope]:
-        """The acquisition's §5 guard found a claim ref of ours the local record
-        did not name — a scratch file lost with its machine, or a claim that
-        landed between the resume check and the read. The ladder is the truth,
-        so resume THAT task rather than report a dead end; `resume` re-proves
-        the lease before anything is written."""
-        held = (payload or {}).get("issue")
-        if held is None:
-            return self.envelope.answer(
-                "retry", reason="claim-open",
-                detail="the queue read says this worker holds a claim it could "
-                       "not name — re-check before retrying")
+    def _resume_discovered(self, held: Issue) -> tuple[int, Envelope]:
+        """The §5 guard found a claim ref of ours the local scratch file did not
+        name (lost with its machine, or landed after the resume check). The
+        ladder is the truth, so resume that task; `resume` re-proves the lease
+        before anything is written."""
         rc, env = self.resume({"repo": self.api.repo, "issue": str(held),
                                "worker": self.worker})
         if env is not None:
@@ -576,7 +395,7 @@ class NextAction:
 def next_action(api: Api, project: str, worker: Worker,
                 ttl: int | None = None, now: Epoch | None = None,
                 script: str | None = None) -> tuple[int, Envelope]:
-    """The driver loop's single call, as a call. Returns `(exit_code, envelope)`."""
+    """`(exit_code, envelope)` for one next-action call."""
     return NextAction(api, project, worker, ttl=ttl, now=now,
                       script=script).run()
 

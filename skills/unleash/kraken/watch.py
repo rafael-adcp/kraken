@@ -30,20 +30,15 @@ def snapshot_state(api: Api, project: str) -> str | None:
 
 def wake_retry_due(flag_mtime: float | None, last_emit: float,
                    retry_seconds: int, now: Epoch) -> bool:
-    """Whether the watcher owes a lost-wake retry: the StopFailure hook stamped
-    the wake-retry flag AFTER this watcher's last emission (that wake's turn died
-    on a usage limit) and the retry spacing has elapsed. A flag older than the
-    last emission is stale; no flag means no failed turn on record."""
+    """Whether a lost-wake retry is owed: the StopFailure hook stamped its flag
+    after our last emission (that turn died) and the spacing has elapsed."""
     if flag_mtime is None:
         return False
     return flag_mtime > last_emit and now - last_emit >= retry_seconds
 
 
-# How many consecutive failed queue reads between stderr lines (after the first),
-# and how many before the watcher gives up. At the default 60s poll that is: a
-# line at once, another every ~10 min while the outage lasts, and death after
-# ~1h. Only the ceiling is an operator knob (KRAKEN_WATCH_MAX_FAILURES; 0 keeps
-# the watcher alive through any outage, warnings included).
+# Consecutive failed reads between warnings, and before giving up (at a 60s
+# poll: ~10 min, ~1 h). KRAKEN_WATCH_MAX_FAILURES=0 never gives up.
 WATCH_WARN_EVERY = 10
 WATCH_MAX_FAILURES = 60
 
@@ -51,15 +46,9 @@ WATCH_MAX_FAILURES = 60
 def watch_failure_action(
     failures: int, warn_every: int, max_failures: int,
 ) -> str | None:
-    """What a run of `failures` consecutive failed queue reads owes the operator:
-    "die" once the ceiling is reached, "warn" on the first failure and every
-    `warn_every` after it, None in between.
-
-    A watcher whose reads fail is indistinguishable from an idle one — same
-    silence, same live process — so a transport fault has to be said out loud,
-    but spaced, or an outage would fill the log with one line per poll. Dying
-    outranks warning: past the ceiling the watcher is not listening, and a dead
-    process in the monitor is honest where a live deaf one is not."""
+    """"die" at the ceiling, "warn" on the first failure and every
+    `warn_every` after, else None. A failing watcher looks exactly like an idle
+    one, so it must say so — spaced out, and a dead process beats a deaf one."""
     if max_failures > 0 and failures >= max_failures:
         return "die"
     if failures <= 0:
@@ -75,9 +64,7 @@ def wake_snapshot_path(worker: str) -> str:
 
 def load_wake_snapshot(worker: str, repo: str, project: str) -> str | None:
     """The snapshot this worker's previous `--exit-on-wake` watcher woke on, or
-    None when there is none for this repo and project. Best-effort: an
-    unreadable file just means the first startable poll wakes, as on a first
-    arm."""
+    None. Best-effort."""
     try:
         with open(wake_snapshot_path(worker), encoding="utf-8") as fh:
             record = json.load(fh)
@@ -114,90 +101,96 @@ def cmd_watch(args: argparse.Namespace) -> int:
 def watch(api: Api, project: str, *,
           snapshot_reader: Callable[..., Any] | None = None,
           exit_on_wake_as: str | None = None) -> int:
-    """The ambush loop. `snapshot_reader` defaults to the real queue snapshot and
-    is injectable so the loop's own behaviour — the edge-triggered emit gate, the
-    consecutive-failure warn/die ladder, the lost-wake retry — can be scripted
-    without a queue behind it. `cmd_watch` is the argv-shaped entry point.
+    """The ambush loop. `snapshot_reader` is injectable for tests.
 
-    `exit_on_wake_as` (a worker name) makes the watcher exit 0 right after its
-    first wake, for a harness whose background commands notify the agent only
-    when they exit (GitHub Copilot CLI) rather than per output line (Claude
-    Code's Monitor). The agent re-arms it after each drain, so the edge gate has
-    to survive the restart: the snapshot a wake fired on is saved per worker and
-    seeds the next watcher's `prev`, and an unchanged queue stays silent across
-    re-arms exactly as it does inside one long-lived watcher."""
-    snapshot_reader = snapshot_reader or snapshot_state
-    poll_seconds = int(os.environ.get("KRAKEN_WATCH_POLL_SECONDS", "60"))
-    retry_seconds = int(os.environ.get("KRAKEN_WATCH_RETRY_SECONDS", "300"))
-    max_failures = int(
-        os.environ.get("KRAKEN_WATCH_MAX_FAILURES", str(WATCH_MAX_FAILURES))
-    )
+    `exit_on_wake_as` (a worker name) exits after the first wake, for harnesses
+    that notify only when a background command exits (Copilot CLI). The wake's
+    snapshot is saved so the re-armed watcher keeps the same edge gate."""
+    return Watcher(api, project, snapshot_reader=snapshot_reader,
+                   exit_on_wake_as=exit_on_wake_as).run()
 
-    # Same preflight as the drain, once, before the first poll: a watcher armed
-    # on a project label the repo does not carry can never emit a wake, so it is
-    # a silent no-op dressed as an ambush. A label read that merely FAILED is not
-    # a refusal — the poll loop already rides out transport faults, so warn and
-    # arm rather than killing the watcher over a startup blip.
-    ok, message = Queue(api).verify_project(project)
-    if ok is False:
-        print(message, file=sys.stderr)
-        return EXIT_UNKNOWN_PROJECT
-    if ok is None:
-        print(message + " — arming anyway", file=sys.stderr)
 
-    prev = (load_wake_snapshot(exit_on_wake_as, api.repo, project)
-            if exit_on_wake_as else None)
-    # Start at "now": retries are owed only for wakes THIS watcher emitted, so
-    # a stale flag from an earlier session never triggers one.
-    last_emit = time.time()
-    failures = 0
-    while True:
-        snapshot = snapshot_reader(api, project)
-        if snapshot is None:
-            # Fail loud. The read never landed, so `prev` stays untouched (the
-            # edge-triggered gate is not corrupted by an outage) — but silence
-            # here is exactly what an idle queue looks like, so say it.
-            failures += 1
-            action = watch_failure_action(failures, WATCH_WARN_EVERY, max_failures)
-            if action == "die":
-                print(
-                    f"kraken-watch: giving up after {failures} consecutive "
-                    f"failures reading the queue in {api.repo} — this watcher is "
-                    f"not listening; check the token and the network",
-                    file=sys.stderr, flush=True,
-                )
-                return EXIT_TRANSPORT
-            if action == "warn":
-                print(
-                    f"kraken-watch: {failures} consecutive failure(s) reading "
-                    f"the queue in {api.repo} — this worker may be offline or "
-                    f"unauthenticated, and wakes no one while it is",
-                    file=sys.stderr, flush=True,
-                )
-        else:
-            failures = 0
-            startable = [
-                line for line in snapshot.split("\n") if line.endswith(":startable")
-            ]
-            count = len(startable)
-            # Emit gate: a startable task exists AND either the queue changed or
-            # a lost-wake retry is due. No blind re-emission timer.
-            due = wake_retry_due(
-                wake_retry_mtime(), last_emit, retry_seconds, time.time()
-            )
-            if count > 0 and (snapshot != prev or due):
-                numbers = " ".join(
-                    "#" + line.split(":", 1)[0] for line in startable
-                )
-                print(
-                    f"kraken-queue: {count} startable task(s) "
-                    f"in project:{project} ({numbers})",
-                    flush=True,
-                )
-                last_emit = time.time()
-                if exit_on_wake_as:
-                    save_wake_snapshot(exit_on_wake_as, api.repo, project,
-                                       snapshot)
-                    return 0
-            prev = snapshot
-        time.sleep(poll_seconds)
+class Watcher:
+    """One ambush: poll the queue, and wake on an edge — a startable task and
+    either a changed queue or a lost wake owed a retry."""
+
+    def __init__(self, api: Api, project: str, *,
+                 snapshot_reader: Callable[..., Any] | None = None,
+                 exit_on_wake_as: str | None = None):
+        self.api = api
+        self.project = project
+        self.read_snapshot = snapshot_reader or snapshot_state
+        self.exit_on_wake_as = exit_on_wake_as
+        self.poll_seconds = int(os.environ.get("KRAKEN_WATCH_POLL_SECONDS", "60"))
+        self.retry_seconds = int(os.environ.get("KRAKEN_WATCH_RETRY_SECONDS", "300"))
+        self.max_failures = int(
+            os.environ.get("KRAKEN_WATCH_MAX_FAILURES", str(WATCH_MAX_FAILURES)))
+        self.prev: str | None = None
+        self.failures = 0
+        self.last_emit = 0.0
+
+    def run(self) -> int:
+        refused = self._preflight()
+        if refused is not None:
+            return refused
+        if self.exit_on_wake_as:
+            self.prev = load_wake_snapshot(self.exit_on_wake_as, self.api.repo,
+                                           self.project)
+        # Retries are owed only for wakes THIS watcher emitted.
+        self.last_emit = time.time()
+        while True:
+            snapshot = self.read_snapshot(self.api, self.project)
+            stop = (self._read_failed() if snapshot is None
+                    else self._observed(snapshot))
+            if stop is not None:
+                return stop
+            time.sleep(self.poll_seconds)
+
+    def _preflight(self) -> int | None:
+        # The drain's project preflight; a failed label read only warns, since
+        # the loop rides out transport faults anyway.
+        ok, message = Queue(self.api).verify_project(self.project)
+        if ok is False:
+            print(message, file=sys.stderr)
+            return EXIT_UNKNOWN_PROJECT
+        if ok is None:
+            print(message + " — arming anyway", file=sys.stderr)
+        return None
+
+    def _read_failed(self) -> int | None:
+        # `prev` stays untouched, so an outage cannot fake an edge.
+        self.failures += 1
+        action = watch_failure_action(self.failures, WATCH_WARN_EVERY,
+                                      self.max_failures)
+        if action == "die":
+            print(f"kraken-watch: giving up after {self.failures} consecutive "
+                  f"failures reading the queue in {self.api.repo} — this "
+                  f"watcher is not listening; check the token and the network",
+                  file=sys.stderr, flush=True)
+            return EXIT_TRANSPORT
+        if action == "warn":
+            print(f"kraken-watch: {self.failures} consecutive failure(s) reading "
+                  f"the queue in {self.api.repo} — this worker may be offline or "
+                  f"unauthenticated, and wakes no one while it is",
+                  file=sys.stderr, flush=True)
+        return None
+
+    def _observed(self, snapshot: str) -> int | None:
+        self.failures = 0
+        startable = [line for line in snapshot.split("\n")
+                     if line.endswith(":startable")]
+        count, prev = len(startable), self.prev
+        due = wake_retry_due(wake_retry_mtime(), self.last_emit,
+                             self.retry_seconds, time.time())
+        self.prev = snapshot
+        if not (count > 0 and (snapshot != prev or due)):
+            return None
+        numbers = " ".join("#" + line.split(":", 1)[0] for line in startable)
+        print(f"kraken-queue: {count} startable task(s) "
+              f"in project:{self.project} ({numbers})", flush=True)
+        self.last_emit = time.time()
+        if self.exit_on_wake_as:
+            save_wake_snapshot(self.exit_on_wake_as, self.api.repo,
+                               self.project, snapshot)
+            return 0
+        return None

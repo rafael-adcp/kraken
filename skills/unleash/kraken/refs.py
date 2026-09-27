@@ -10,9 +10,9 @@ from .contract import (
     CommitMeta, EXIT_LOST, EXIT_TRANSPORT, Gen, Issue, Json, LEGACY_CLAIM_GEN,
     Sha, Worker
 )
-from .comments import make_marker, parse_marker
+from .comments import make_marker
 from .transport import Api
-from .lease import Lease, NO_LEASE, UNREADABLE_LEASE, parse_iso
+from .lease import Lease, NO_LEASE, UNREADABLE_LEASE
 
 # --- claim refs: the CAS ladder, and the lease it carries --------------------
 #
@@ -32,20 +32,12 @@ from .lease import Lease, NO_LEASE, UNREADABLE_LEASE, parse_iso
 #   steal an expired G   -> create N/(G+1)
 #   renew your own G     -> create N/(G+1), then drop G
 #
-# Nothing is ever deleted to make room, which is what removes the last window in
-# the design: a thief and the live holder renewing race on the identical ref, the
-# server picks one, and the loser is told. Deleting a superseded generation is
-# garbage collection — losing that delete costs a stray ref, never a lease.
-#
-# Refs are UI-invisible, which is the whole reason the in-progress label exists:
-# it is written after the CAS so a human scanning the issue list can see the ref
-# they cannot. Nothing reads it back (§3).
+# Nothing is ever deleted to make room, so a thief and the renewing holder race
+# on the identical ref and the server picks one. Deleting a superseded generation
+# is garbage collection: losing that delete costs a stray ref, never a lease.
 
 CLAIM_REF_PREFIX = "refs/kraken/claims/"
-# The namespace both ref families live under: the claim ladder and the state
-# records (§3.1). ONE paginated matching-refs read over this prefix answers both,
-# which is what keeps a queue read at the same call count it had before records
-# existed — see `kraken_ref_items`.
+# Claims and state records (§3.1) share it, so one read answers both.
 KRAKEN_REF_NAMESPACE = "kraken/"
 # git's well-known empty-tree object, present in every repo, so an orphan commit
 # needs no prior read; create_claim_commit falls back to HEAD's tree if a host
@@ -54,14 +46,8 @@ EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
 def kraken_ref_items(api: Api) -> list[Json] | None:
-    """Every ref under `refs/kraken/`, raw, in one paginated matching-refs read —
-    or None on transport failure.
-
-    Deliberately undecoded. Two families share this namespace and each parses its
-    own names out of the payload (`Refs.all`, `States.all`), so the read happens
-    once and neither has to know the other's shape. Splitting it into a call per
-    family would have made the state record cost an extra request on every queue
-    read, including the idle poll a watcher runs once a minute."""
+    """Every ref under `refs/kraken/`, undecoded, or None on transport failure.
+    `Refs.all` and `States.all` each parse their own family out of it."""
     return api.paginated(f"/repos/{api.repo}/git/matching-refs/{KRAKEN_REF_NAMESPACE}")
 
 
@@ -72,13 +58,9 @@ def claim_ref(issue: Issue, gen: Gen) -> str:
 
 
 def parse_claim_ref(ref: str) -> tuple[Issue, Gen] | None:
-    """`(issue, generation)` for a claim ref name, or None for anything else.
-
-    Both shapes are accepted: `…/claims/12` is the protocol/5 ref, read as
-    generation 0, and `…/claims/12/3` is generation 3. Strict parsing matters
-    because GitHub's matching-refs is a plain PREFIX match — asking for
-    `kraken/claims/12` also returns `kraken/claims/120/1` — so the caller filters
-    on what this returns, never on the prefix it asked for."""
+    """`(issue, generation)` for a claim ref name, or None. `…/claims/12` is the
+    protocol/5 shape, read as generation 0. Strict because matching-refs is a
+    prefix match: `kraken/claims/12` also returns `kraken/claims/120/1`."""
     if not ref.startswith(CLAIM_REF_PREFIX):
         return None
     parts = ref[len(CLAIM_REF_PREFIX):].split("/")
@@ -90,9 +72,7 @@ def parse_claim_ref(ref: str) -> tuple[Issue, Gen] | None:
 
 
 def _parse_ref_items(items: Iterable[Json]) -> list[tuple[Issue, Gen, Sha]]:
-    """[(issue, gen, sha)] out of a matching-refs payload, dropping anything
-    that is not a claim ref — matching-refs is a prefix match, so the filter is
-    on the parsed name, never on the prefix that was asked for."""
+    """[(issue, gen, sha)] for every claim ref in a matching-refs payload."""
     out = []
     for item in items:
         if not isinstance(item, dict):
@@ -104,22 +84,9 @@ def _parse_ref_items(items: Iterable[Json]) -> list[tuple[Issue, Gen, Sha]]:
     return out
 
 
-
-
 class Refs:
-    """One repo's claim-ref namespace: the generation ladder, the CAS that
-    arbitrates it, and the lease it carries (PROTOCOL.md §4/§5).
-
-    `api` is not a parameter of each ladder operation, it is the client this
-    gateway talks through, so it lives on the object instead of leading a dozen
-    signatures.
-
-    Cheap to construct (`Refs(api)`), on purpose: a caller that already holds an
-    `api` makes one where it needs it, and nothing has to be threaded through a
-    signature to reach the ladder.
-
-    The ref NAMES are built by the module-level `claim_ref`/`parse_claim_ref`,
-    which touch no transport and stay callable without an instance."""
+    """One repo's claim-ref ladder, the CAS that arbitrates it, and the lease it
+    carries (PROTOCOL.md §4/§5). Cheap to construct where needed."""
 
     def __init__(self, api: Api):
         self.api = api
@@ -128,16 +95,8 @@ class Refs:
 
     def all(self, items: Iterable[Json] | None = None,
             ) -> dict[Issue, list[tuple[Gen, Sha]]] | None:
-        """Every live claim ref as {issue_number: [(generation, sha), …]}, in one
-        paginated matching-refs read. Returns a dict (empty when none), or None on
-        transport failure. Generations are not collapsed here: the holder is the
-        highest one, and the rest are the superseded refs a reader may collect.
-
-        `items` is an already-fetched `refs/kraken/` payload, which is how a queue
-        read gets the claim ladder and the state records (§3.1) out of one call.
-        Omitting it fetches that payload here — the ref names are parsed either
-        way, because matching-refs is a prefix match and a state ref is not a
-        claim."""
+        """Every claim ref as {issue: [(generation, sha), …]}, uncollapsed, or
+        None on transport failure. `items` reuses an already-fetched payload."""
         if items is None:
             items = kraken_ref_items(self.api)
             if items is None:
@@ -148,10 +107,8 @@ class Refs:
         return refs
 
     def of(self, issue: Issue) -> tuple[bool, list[tuple[Gen, Sha]]]:
-        """One issue's claim refs as `(ok, [(generation, sha), …])` — the sorted
-        generation ladder, empty when the task is unclaimed. `ok` is False on a
-        transport failure, and only then, so 'nobody holds it' is never confused
-        with 'the read did not land'."""
+        """`(ok, sorted ladder)` for one issue; `ok` is False only on transport
+        failure, so "unclaimed" is never confused with "unread"."""
         if not str(issue).lstrip("-").isdigit():
             return (False, [])
         items = self.api.paginated(
@@ -163,17 +120,9 @@ class Refs:
                              if i == int(issue)))
 
     def commit_meta(self, shas: Sequence[Sha]) -> CommitMeta | None:
-        """Resolve each claim commit's {committedDate, message} through the
-        batched fan-out (one aliased `object(oid:)` field per distinct SHA),
-        never one call per ref. Returns
-        {sha: {"committedDate": ..., "message": ...}}, or None on transport
-        failure — including a queue with more claims than one query may carry,
-        which `Api.aliased` splits into a call per chunk.
-
-        The alias is the SHA's INDEX in the sorted set rather than the SHA
-        itself, because a GraphQL alias must be a name and a SHA may start with
-        a digit. The numbering runs across the whole ask, not per chunk, so no
-        two chunks answer to the same `c0` when they are merged."""
+        """{sha: {committedDate, message}} in one aliased fan-out, or None on
+        transport failure. Aliases are indexes (`c0`…) because a GraphQL alias
+        must be a name and a SHA may start with a digit."""
         ordered = sorted(set(shas))
         fields = [
             f'c{i}: object(oid: "{sha}") {{ ... on Commit {{ committedDate message }} }}'
@@ -192,55 +141,29 @@ class Refs:
         return meta
 
     def head(self, issue: Issue) -> Lease:
-        """The head of one issue's lease — the read every ownership question goes
-        through: which generation holds it, whose it is, and since when.
-
-        The three outcomes are kept apart on purpose, because they demand different
-        answers, and all three are a `Lease`:
-          - a present lease — the highest generation, plus `gens`, every generation
-            present (so a caller that is releasing knows what to delete and one that
-            is advancing knows what to collect). `age`/`live` are left undecided:
-            this read knows no TTL, and ownership is what its callers ask about;
-          - `NO_LEASE` — no claim ref at all, the task is unclaimed;
-          - `UNREADABLE_LEASE` — the read did not land, so the answer is *unknown*
-            and no caller may write on the strength of it.
-        `epoch` is None when the commit carries no readable date — the same
-        fail-open the queue-wide read applies: nothing proves the holder alive."""
+        """The head of one issue's lease: the highest generation, whose it is,
+        and every generation present. `NO_LEASE` when unclaimed,
+        `UNREADABLE_LEASE` when the read did not land. Not aged: it knows no
+        TTL."""
         ok, refs = self.of(issue)
         if not ok:
             return UNREADABLE_LEASE
         if not refs:
             return NO_LEASE
-        gen, sha = refs[-1]  # sorted: the highest generation is the holder
-        meta = self.commit_meta([sha])
+        meta = self.commit_meta([max(refs)[1]])
         if meta is None:
             return UNREADABLE_LEASE
-        entry = meta.get(sha) or {}
-        payload = parse_marker(entry.get("message") or "") or {}
-        return Lease(
-            gen=gen,
-            sha=sha,
-            worker=payload.get("worker") or None,
-            epoch=parse_iso(entry.get("committedDate") or ""),
-            gens=tuple(g for g, _s in refs),
-        )
+        return Lease.from_ladder(refs, meta)
 
     def owner(self, issue: Issue) -> Worker | None:
-        """The worker named in the claim commit the ref for `issue` currently points
-        at, or None when the ref is absent or unreadable. This is how a lost CAS
-        (HTTP 422) is told apart: a 422 is a genuine loss only when the ref belongs
-        to a DIFFERENT worker; a worker re-claiming its OWN in-flight claim after a
-        network failure already owns the task (PROTOCOL.md §5's re-check caveat).
-        None (transport/absent) is treated by the caller as 'not mine', so an
-        ambiguous read never turns a real loss into a false win."""
+        """The worker holding `issue`, or None when absent or unreadable."""
         return self.head(issue).worker
 
     # --- writing the ladder ---------------------------------------------------
 
     def commit(self, payload: Json) -> Sha | None:
-        """Create the orphan commit a claim ref points at: empty tree, no parents,
-        message = the kraken marker for `payload`. The server stamps the date, so the
-        liveness clock is server-side. Returns the SHA, or None on transport failure."""
+        """The orphan commit a ref points at: empty tree, no parents, the marker
+        as message. The server stamps the date. None on transport failure."""
         for tree in (EMPTY_TREE_SHA, None):
             if tree is None:
                 tree = self._head_tree_sha()
@@ -262,15 +185,8 @@ class Refs:
         return None
 
     def create(self, issue: Issue, gen: Gen, sha: Sha) -> str:
-        """The CAS itself: create generation `gen` of issue `issue`'s claim ref.
-        Returns "won" (created — this worker is now the holder), "lost" (HTTP 422:
-        somebody else created this generation first), or "fail" (transport — state
-        unknown). The verdict is the integer status code, nothing else.
-
-        This one call arbitrates every contended operation: a first claim (gen 1), a
-        steal (holder's gen + 1) and a renewal (own gen + 1) all compete here, so a
-        thief and the holder it is stealing from race on the SAME ref name and the
-        server picks exactly one."""
+        """The CAS: create generation `gen`. "won", "lost" (422: somebody else
+        created it first) or "fail" (transport, state unknown)."""
         status, _text = self.api.request(
             "POST", f"/repos/{self.api.repo}/git/refs",
             {"ref": claim_ref(issue, gen), "sha": sha},
@@ -282,19 +198,15 @@ class Refs:
         return "fail"
 
     def delete(self, issue: Issue, gen: Gen) -> bool:
-        """Delete one generation of a claim ref. An already-missing ref (HTTP 422)
-        counts as success: it is gone either way, and the delete stays idempotent
-        under retries."""
+        """Delete one generation; already-missing (422) counts as success."""
         status, _text = self.api.request(
             "DELETE", f"/repos/{self.api.repo}/git/{claim_ref(issue, gen)}"
         )
         return 200 <= status < 300 or status == 422
 
     def drop(self, issue: Issue, gens: Iterable[Gen]) -> bool:
-        """Delete a set of generations — how a lease is released (every generation
-        of it) and how a superseded one is collected after an advance. True only if
-        all of them went; a leftover generation is untidy, never a held lease,
-        because the holder is decided by the HIGHEST generation."""
+        """Delete a set of generations; True only if all went. A leftover one is
+        untidy, never a held lease."""
         ok = True
         for gen in gens:
             if not self.delete(issue, gen):
@@ -303,16 +215,8 @@ class Refs:
 
     def advance(self, issue: Issue, gen: Gen,
                 payload: Json) -> tuple[str, Gen | None, Sha | None]:
-        """Take (or keep) the lease by creating the generation ABOVE `gen` — the one
-        contended write, shared by the steal and the renewal (PROTOCOL.md §5.2).
-
-        Returns `(verdict, gen, sha)`: "won" with the new generation and its commit,
-        "lost" when another worker created that generation first, or "fail-commit" /
-        "fail-ref" on transport — the two failures stay apart because a caller's
-        diagnostic names the stage that actually broke. Nothing is deleted here, so
-        there is no instant at which the task is unheld and no way for two workers to
-        both believe they took it: they are competing to create one identical ref
-        name, and the server admits one."""
+        """Create the generation above `gen` (§5.2): `(verdict, gen, sha)`, the
+        verdict being "won", "lost", "fail-commit" or "fail-ref"."""
         sha = self.commit(payload)
         if sha is None:
             return ("fail-commit", None, None)
@@ -324,32 +228,13 @@ class Refs:
 
     def hold(self, issue: Issue,
              worker: Worker) -> tuple[int | None, Lease, str]:
-        """The write-after-expiry check (PROTOCOL.md §5.3): prove this worker still
-        holds the lease BEFORE any write of a transition. Returns
-        `(code, head, reason)` — `code` None when the lease is ours and the caller
-        may proceed (with `head` naming the generations to release), otherwise the
-        exit code to return and the diagnostic the caller prefixes with its own
-        subcommand name.
+        """The write-after-expiry check (§5.3): prove this worker still holds
+        the lease before a transition writes anything. `(code, head, reason)`,
+        `code` None when the caller may proceed.
 
-        The refusal is REPORTED, not printed: a gateway that writes to stdout is a
-        hidden dependency on the output channel, and `next-action` owns stdout for
-        its JSON envelope. Handing the sentence back also means this needs no
-        `command` parameter to interpolate — the caller already knows its own name.
-
-        Ownership is the HIGHEST generation: a thief takes the lease by creating the
-        one above ours, so our own ref still existing proves nothing — what proves it
-        is that nobody has climbed past us.
-
-        This is what makes a short TTL safe. A worker that stalled long enough to be
-        stolen from — a suspended laptop, a rate-limit wait, a very long build — is
-        otherwise indistinguishable from a live one until it tries to deliver, and a
-        delivery written onto a task somebody else is now executing is worse than no
-        delivery at all. So: not ours, or gone, means write NOTHING and exit 10; an
-        ambiguous read means exit 20 and re-check, never a write on a guess.
-
-        A lease that is ours but past its TTL still passes: it expired, but nobody
-        took it, and finishing the transition frees it honestly — the check is about
-        who holds the lease, not how old it is."""
+        This is what makes a short TTL safe: a worker that stalled long enough
+        to be stolen from writes nothing. Ours-but-expired still passes — nobody
+        took it, and the question is who holds the lease, not its age."""
         head = self.head(issue)
         if head.unknown:
             return (EXIT_TRANSPORT, head, f"gh-failure issue={issue} stage=lease")
@@ -366,8 +251,7 @@ class Refs:
     # --- internals ------------------------------------------------------------
 
     def _head_tree_sha(self) -> Sha | None:
-        """The default branch's tree SHA — the fallback tree for hosts that reject
-        the well-known empty-tree object. None on transport failure."""
+        """HEAD's tree SHA, for hosts that reject the empty tree."""
         obj = self.api.json("GET", f"/repos/{self.api.repo}/commits/HEAD")
         if obj is None:
             return None

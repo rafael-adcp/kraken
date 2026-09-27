@@ -31,14 +31,8 @@ acyclic:
 and is what every caller — the skills, the hooks, the workflows, the conformance
 harness — invokes. It imports `cli.main` and nothing else.
 
-Exit codes are the contract between this program and whatever drives it:
-
-    0   ok
-    3   nothing to do (an empty queue is not a failure)
-    10  lost — somebody else holds the task
-    11  not clear — the task is held by a label
-    20  transport failure; state is UNKNOWN, re-check before retrying
-    64  usage
+Exit codes are the contract between this program and whatever drives it; they
+live in `contract` (EXIT_*).
 
 Everything below re-exports the package's public surface, so `import kraken`
 reaches every public name without knowing which module owns it.
@@ -50,7 +44,7 @@ from .contract import (
     EXIT_NOT_CLEAR, EXIT_OK, EXIT_TRANSPORT, EXIT_UNKNOWN_PROJECT, EXIT_USAGE,
     Envelope, Epoch, Gen, HELD_LABELS, Issue, Json, LEGACY_CLAIM_GEN, Node,
     PLUGIN_MANIFEST, PLUGIN_VERSION_UNKNOWN, PRIORITY_LABEL, PROTOCOL_DOC,
-    PROTOCOL_VERSION, ReconcileAction, Repo, SKILL_DIR, Sha, Worker, diag,
+    PROTOCOL_VERSION, Repo, SKILL_DIR, Sha, Worker, diag,
     diagnostics_on_stderr, plugin_version, protocol_section
 )
 from .comments import (
@@ -82,17 +76,20 @@ from .state import (
 )
 from .queue import (
     DEPENDS_ON_RE, NO_RESPONSE_PLACEHOLDER, Candidate, Queue, QueueRead, Task,
-    claim_meta_of, cmd_list_startable, is_empty_section, section_body
+    claim_meta_of, cmd_list_startable, is_empty_section, missing_requirements,
+    section_body, section_text
 )
 from .render import (
     render_init, render_next_action, render_status
 )
 from .reconcile import (
-    RECONCILER_WORKER, apply_reconcile, cmd_reap,
+    Migrate, OrphanLock, OrphanState, REPAIRS, RECONCILER_WORKER, ReAnchor,
+    Reclaim, Repair, RepairFailed, apply_reconcile, cmd_reap,
     project_reconcile, reconcile_pass, reconcile_plan, stale_claim_body
 )
 from .claim import (
-    ClaimAttempt, acquire_next, claim_is_moot, cmd_claim, cmd_claim_next,
+    Acquisition, AlreadyHolding, ClaimAttempt, Claimed, Drain, NoClaim,
+    acquire_next, claim_is_moot, cmd_claim, cmd_claim_next,
     cmd_heartbeat, cmd_note, lease_expired_body, open_claim_of,
     probe_lease_state, refuse_second_claim, refused_line
 )

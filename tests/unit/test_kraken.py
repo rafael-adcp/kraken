@@ -772,7 +772,7 @@ class ClaimNextIterationTests(unittest.TestCase):
 
     The subject is the ITERATION, so the two expensive collaborators — the
     candidate list and the per-candidate CAS — are passed in, and the queue read
-    behind them is an empty FakeApi. `acquire_next` answers `(rc, won)` as data;
+    behind them is an empty FakeApi. `acquire_next` answers a result object;
     how `claim-next` PRINTS that is not this class's business and is pinned
     end-to-end in tests/conformance/test_claim_next.py, against the real binary."""
 
@@ -805,7 +805,7 @@ class ClaimNextIterationTests(unittest.TestCase):
         api = FakeApi(paginated=lambda path: [{"name": "project:app"}])
         buf = StringIO()
         with redirect_stdout(buf):
-            rc, won = kraken.acquire_next(
+            won = kraken.acquire_next(
                 api, "app", "w1",
                 queue=FakeQueue(
                     api,
@@ -814,14 +814,14 @@ class ClaimNextIterationTests(unittest.TestCase):
                         else kraken.QueueRead(tasks, {}, {}, states or {})),
                     candidates=lambda p, read=None: rows),
                 claim_step=fake_claim_step)
-        return rc, won, buf.getvalue()
+        return won.exit_code, won, buf.getvalue()
 
     def test_claims_first_startable(self):
         rows = [self._candidate(7, "oldest", "startable", "body-7")]
         rc, won, _ = self._run(rows, {7: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.attempted, [7])
-        self.assertEqual(won, {"issue": 7, "title": "oldest", "body": "body-7",
+        self.assertEqual(won.as_json(), {"issue": 7, "title": "oldest", "body": "body-7",
                                "bounced": False, "pr": None, "anchor": 0})
 
     def test_the_won_payload_carries_the_records_bounce_and_pr(self):
@@ -837,11 +837,11 @@ class ClaimNextIterationTests(unittest.TestCase):
                                       comments=4, recorded=True,
                                       pr="https://github.com/o/r/pull/3")}
         _rc, won, _ = self._run(rows, {7: kraken.EXIT_OK}, states=states)
-        self.assertTrue(won["bounced"],
+        self.assertTrue(won.bounced,
                         "a comment past the record's anchor is a bounce (§6)")
-        self.assertEqual(won["pr"], "https://github.com/o/r/pull/3",
+        self.assertEqual(won.pr, "https://github.com/o/r/pull/3",
                          "the delivery the task is coming back from was dropped")
-        self.assertEqual(won["anchor"], 4,
+        self.assertEqual(won.anchor, 4,
                          "the anchor is where the new comments start — without "
                          "it a reader knows the thread moved but not from where")
 
@@ -853,8 +853,8 @@ class ClaimNextIterationTests(unittest.TestCase):
         states = {7: kraken.TaskState(state="awaiting-merge", worker="w0",
                                       comments=4, recorded=True)}
         _rc, won, _ = self._run(rows, {7: kraken.EXIT_OK}, states=states)
-        self.assertFalse(won["bounced"], "nothing was said past the anchor")
-        self.assertIsNone(won["pr"], "a record with no delivery has no PR")
+        self.assertFalse(won.bounced, "nothing was said past the anchor")
+        self.assertIsNone(won.pr, "a record with no delivery has no PR")
 
     def test_skips_held_rows_without_attempting_them(self):
         rows = [
@@ -876,7 +876,7 @@ class ClaimNextIterationTests(unittest.TestCase):
         self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.attempted, [7, 9])
         self.assertEqual(self.attempted.count(7), 1)
-        self.assertEqual(won["issue"], 9)
+        self.assertEqual(won.issue, 9)
 
     def test_skip_on_held_since_listing_moves_to_next(self):
         rows = [
@@ -890,7 +890,7 @@ class ClaimNextIterationTests(unittest.TestCase):
     def test_empty_queue_is_honest_none(self):
         rc, won, out = self._run([], {})
         self.assertEqual(rc, kraken.EXIT_NONE)
-        self.assertIsNone(won)
+        self.assertIsInstance(won, kraken.NoClaim)
         self.assertEqual(self.attempted, [])
         self.assertIn("claim-next: none project:app", out)
 
@@ -901,7 +901,7 @@ class ClaimNextIterationTests(unittest.TestCase):
         ]
         rc, won, _ = self._run(rows, {7: kraken.EXIT_LOST, 9: kraken.EXIT_NOT_CLEAR})
         self.assertEqual(rc, kraken.EXIT_NONE)
-        self.assertIsNone(won)
+        self.assertIsInstance(won, kraken.NoClaim)
         self.assertEqual(self.attempted, [7, 9])
 
     def test_transport_during_claim_stops_immediately(self):
@@ -911,14 +911,14 @@ class ClaimNextIterationTests(unittest.TestCase):
         ]
         rc, won, out = self._run(rows, {7: kraken.EXIT_TRANSPORT, 9: kraken.EXIT_OK})
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
-        self.assertIsNone(won)
+        self.assertIsInstance(won, kraken.NoClaim)
         self.assertEqual(self.attempted, [7])
         self.assertIn("state unknown", out)
 
     def test_transport_during_listing_is_twenty(self):
         rc, won, out = self._run(None, {})
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
-        self.assertIsNone(won)
+        self.assertIsInstance(won, kraken.NoClaim)
         self.assertEqual(self.attempted, [])
         self.assertIn("claim-next: gh-failure stage=list", out)
 
@@ -980,11 +980,11 @@ class ClaimNextProjectGateTests(unittest.TestCase):
         api = FakeApi(paginated=lambda path: labels)
         buf = StringIO()
         with redirect_stdout(buf):
-            rc, _won = kraken.acquire_next(
+            rc = kraken.acquire_next(
                 api, "app", "w-gate",
                 queue=FakeQueue(api,
                                 read=lambda now=None, ttl=None: kraken.QueueRead([], {}, {}),
-                                candidates=self._candidates))
+                                candidates=self._candidates)).exit_code
         return rc, buf.getvalue()
 
     def test_unknown_project_refuses_before_reading_the_queue(self):
@@ -1644,7 +1644,7 @@ class ReconcilerPlanTests(unittest.TestCase):
     missing one nor an orphan one is a repair anybody is owed."""
 
     def _rules(self, plan):
-        return sorted((a["rule"], a["issue"]) for a in plan)
+        return sorted((a.rule, a.issue) for a in plan)
 
     @staticmethod
     def _held(number, state, comments=0):
@@ -1696,8 +1696,8 @@ class ReconcilerPlanTests(unittest.TestCase):
             nodes, _leases(i1=expired_age),
             self._expiries(1, kraken.LEASE_EXPIRY_ESCALATE))
         self.assertEqual(self._rules(plan), [("reclaim", 1)])
-        self.assertTrue(plan[0]["held"], "the in-progress label must be swapped off")
-        self.assertIn(str(kraken.LEASE_EXPIRY_ESCALATE), plan[0]["reason"])
+        self.assertTrue(plan[0].held, "the in-progress label must be swapped off")
+        self.assertIn(str(kraken.LEASE_EXPIRY_ESCALATE), plan[0].reason)
 
     def test_one_expiry_below_the_threshold_still_gets_stolen(self):
         nodes = [_task_node(1, ["kraken-task", "in-progress"])]
@@ -1748,11 +1748,11 @@ class ReconcilerPlanTests(unittest.TestCase):
                  _task_node(4, ["kraken-task", "needs-decision"], comment_total=2)]
         plan = kraken.reconcile_plan(nodes, {}, {})
         self.assertEqual(self._rules(plan), [("migrate", 3), ("migrate", 4)])
-        by_issue = {a["issue"]: a for a in plan}
-        self.assertEqual(by_issue[3]["state"], "awaiting-merge")
-        self.assertEqual(by_issue[3]["comments"], 6,
+        by_issue = {a.issue: a for a in plan}
+        self.assertEqual(by_issue[3].state, "awaiting-merge")
+        self.assertEqual(by_issue[3].comments, 6,
                          "the anchor is the thread as it stands right now")
-        self.assertEqual(by_issue[4]["state"], "needs-decision")
+        self.assertEqual(by_issue[4].state, "needs-decision")
 
     def test_rule3_is_a_one_shot(self):
         # Once the record exists the rule is silent — otherwise every drain
@@ -1775,8 +1775,8 @@ class ReconcilerPlanTests(unittest.TestCase):
         nodes = [_task_node(8, ["kraken-task", "awaiting-merge"], comment_total=3)]
         plan = kraken.reconcile_plan(nodes, {}, self._held(8, "awaiting-merge", 5))
         self.assertEqual(self._rules(plan), [("re-anchor", 8)])
-        self.assertIn("5", plan[0]["reason"])
-        self.assertIn("3", plan[0]["reason"])
+        self.assertIn("5", plan[0].reason)
+        self.assertIn("3", plan[0].reason)
 
     def test_rule4_leaves_a_reachable_anchor_alone(self):
         # Equal is the normal state of a freshly held task, and greater is a
@@ -1856,9 +1856,8 @@ class ReconcilerApplyTests(unittest.TestCase):
         return counts, buf.getvalue()
 
     def test_reclaim_deletes_the_ref_last(self):
-        counts, _ = self._apply([{"rule": "reclaim", "issue": 1,
-                                  "reason": "the lease expired 3 times",
-                                  "held": True, "gens": [1]}])
+        counts, _ = self._apply([kraken.Reclaim(1, "the lease expired 3 times",
+                                                 held=True, gens=[1])])
         self.assertEqual(counts["reclaim"], 1)
         kinds = [w[0] for w in self.writes]
         self.assertEqual(kinds, ["comment", "record", "labels", "del-ref"],
@@ -1870,28 +1869,25 @@ class ReconcilerApplyTests(unittest.TestCase):
         # §6 rule 3: the label is already there and already holding, so this
         # writes down what it means and touches nothing else — no comment, no
         # label swap, no ref delete.
-        counts, _ = self._apply([{"rule": "migrate", "issue": 8, "reason": "x",
-                                  "state": "awaiting-merge", "comments": 4}])
+        counts, _ = self._apply([kraken.Migrate(8, "x", state="awaiting-merge",
+                                                 comments=4)])
         self.assertEqual(counts["migrate"], 1)
         self.assertEqual(self.writes, [("record", "refs/kraken/state/8")])
 
     def test_orphan_state_deletes_the_record(self):
-        counts, _ = self._apply([{"rule": "orphan-state", "issue": 9,
-                                  "reason": "x"}])
+        counts, _ = self._apply([kraken.OrphanState(9, "x")])
         self.assertEqual(counts["orphan-state"], 1)
         self.assertEqual(self.writes, [("del-ref", 9)])
 
     def test_reclaim_comment_carries_the_worker_disclaimer(self):
-        self._apply([{"rule": "reclaim", "issue": 1, "reason": "silent",
-                      "held": True, "gens": [1]}])
+        self._apply([kraken.Reclaim(1, "silent", held=True, gens=[1])])
         body = [w for w in self.writes if w[0] == "comment"][0][2]
         self.assertTrue(body.startswith(kraken.disclaimer("w-reaper")),
                         "a worker posts the reclaim now, so §4 attribution applies")
         self.assertIn('"type":"stale-claim"', body)
 
     def test_orphan_lock_touches_nothing_but_the_ref(self):
-        self._apply([{"rule": "orphan-lock", "issue": 4, "reason": "x",
-                      "gens": [1]}])
+        self._apply([kraken.OrphanLock(4, "x", gens=[1])])
         self.assertEqual(self.writes, [("del-ref", 4)])
 
     def _re_anchor_api(self, *, record, live_total):
@@ -1913,7 +1909,7 @@ class ReconcilerApplyTests(unittest.TestCase):
 
     @staticmethod
     def _plan_re_anchor(issue=8):
-        return [{"rule": "re-anchor", "issue": issue, "reason": "shrank"}]
+        return [kraken.ReAnchor(issue, "shrank")]
 
     def test_re_anchor_writes_only_the_record(self):
         # §6 rule 4: the anchor moves and nothing else does — no comment, no
@@ -1977,8 +1973,7 @@ class ReconcilerApplyTests(unittest.TestCase):
         with redirect_stdout(buf), redirect_stderr(err):
             counts = kraken.apply_reconcile(
                 api,
-                [{"rule": "reclaim", "issue": 5, "reason": "x", "held": True,
-                  "gens": [1]}], "w")
+                [kraken.Reclaim(5, "x", held=True, gens=[1])], "w")
         self.assertIsNone(counts)
         self.assertIn("gh-failure stage=labels issue=5", err.getvalue())
 
@@ -1987,9 +1982,8 @@ class ReconcilerApplyTests(unittest.TestCase):
         tasks = [_task_node(1, ["kraken-task", "in-progress"]),
                  _task_node(5, ["kraken-task"])]
         leases = _leases(i1=10, i5=10, i6=10)
-        plan = [{"rule": "reclaim", "issue": 1, "reason": "x", "held": True,
-                 "gens": [1]},
-                {"rule": "orphan-lock", "issue": 6, "reason": "x", "gens": [1]}]
+        plan = [kraken.Reclaim(1, "x", held=True, gens=[1]),
+                kraken.OrphanLock(6, "x", gens=[1])]
         kraken.project_reconcile(plan, tasks, leases)
         self.assertEqual(sorted(leases), [5],
                          "reclaimed/orphan leases must be dropped")
@@ -2222,7 +2216,7 @@ def rec(issue="7", repo="acme/tasks", worker="w1"):
 
 
 def ref_head(worker="w1", epoch=1000.0, gen=1):
-    """What claim_ref_head hands resume_verdict: ownership and the clock, with
+    """What Refs.head hands resume_verdict: ownership and the clock, with
     the expiry verdict left undecided (no TTL is known at that read)."""
     return kraken.Lease(gen=gen, sha="abc", worker=worker, epoch=epoch,
                         gens=tuple(range(1, gen + 1)))
@@ -2406,7 +2400,7 @@ class FeedbackSinceTests(unittest.TestCase):
                          "a machine comment past the anchor read as the ask")
 
     def test_an_anchor_past_the_thread_yields_nothing(self):
-        """The c13 case: the thread SHRANK below its anchor. An empty cut is
+        """The thread SHRANK below its anchor. An empty cut is
         honest — §6's re-anchor repair is what fixes the anchor, and a reader
         must never invent feedback by slicing from the end."""
         self.assertEqual(kraken.feedback_since(self._api(), 12, 99), [],

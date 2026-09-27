@@ -1,4 +1,4 @@
-"""Standing a coordination repo up, and the passes its workflows invoke.
+"""Standing a coordination repo up, and its hygiene passes: validate, cleanup.
 
 Part of the kraken protocol package; see __init__.py."""
 from __future__ import annotations
@@ -14,37 +14,27 @@ from .contract import (
 )
 from .comments import make_marker, parse_marker
 from .refs import Refs
-from .queue import is_empty_section, section_body
+from .queue import missing_requirements
 from .render import render_init
 from .state import States
 
 # --- subcommand: init --------------------------------------------------------
-# The bootstrap `init`, single-sourced here so the skill and the program never
-# disagree on the asset set or the label canon.
 
 def bundled_asset(name: str) -> str:
-    """The raw bytes of a bundled asset shipped in this skill's folder — what
-    `init` commits into the coordination repo."""
+    """The raw bytes of an asset shipped in this skill's folder."""
     with open(os.path.join(SKILL_DIR, name), "rb") as fh:
         return fh.read()
 
 
-# Each bundled asset init commits: (bundled filename, destination path in the
-# coordination repo, create commit message). The coordination repo executes
-# nothing, so this is a single file: the issue form that shapes a task on the
-# way in.
+# (bundled filename, destination in the coordination repo, commit message).
 INIT_ASSETS = (
     ("task-template.yml", ".github/ISSUE_TEMPLATE/task.yml",
      "chore: add kraken task template"),
 )
 
-# Assets an earlier kraken release installed and this protocol revision retired.
-# `init` DELETES each one it finds: a cron left running against retired semantics
-# keeps mutating labels behind every worker's back, which is strictly worse than
-# a missing file. The second element is a sentinel that must appear in the file's
-# bytes for the delete to happen — proof the file is kraken's own install and not
-# something the operator wrote at the same path, so a hand-written workflow is
-# never destroyed by a bootstrap command.
+# Assets earlier releases installed and `init` now deletes: a retired cron would
+# keep mutating labels behind the workers' backs. The sentinel must appear in the
+# file, so a hand-written file at the same path is never deleted.
 OBSOLETE_ASSETS = (
     (".github/workflows/reclaim-stale.yml", b"for kraken. Installed by"),
     (".github/workflows/requeue-on-reply.yml", b"for kraken. Installed by"),
@@ -53,15 +43,8 @@ OBSOLETE_ASSETS = (
     (".github/kraken.py", b"kraken.py \xe2\x80\x94 the bundled worker-side transitions"),
 )
 
-# The canonical state-machine labels — (name, color, description). The labels UI
-# IS kraken's dashboard, so colors trace the flow left to right: blue queued ->
-# yellow working -> red needs-you / green ready-to-land. The authoritative home
-# for PROTOCOL.md §3's SHOULD colors; init upserts with --force.
-#
-# A description names the STATE, never the delivery form. §8 puts the `pr` field
-# on the delivered marker "when there is one" — a work repo that takes no push
-# is delivered as a diff on the thread instead — so a label promising a draft PR
-# would make a delivery the protocol supports read as one that went wrong.
+# (name, color, description): the home of §3's SHOULD colors. Descriptions name
+# the state, never the delivery form — a delivery without a PR is legal (§8).
 CANONICAL_LABELS = (
     ("kraken-task", "1D76DB", "A unit of work for a kraken worker — the queue"),
     ("in-progress", "FBCA04", "Claimed by a worker and being executed"),
@@ -79,12 +62,8 @@ PROJECT_LABEL_DESC = (
 
 
 def refuse_foreign_owner(api) -> int | None:
-    """Before init CREATES the repo: None when the token's login owns the slug,
-    else the exit code of a refusal already reported. `POST /user/repos` creates
-    under the authenticated user whatever the slug says, so a mismatch would
-    create a repo nobody asked for and then fail installing into the one they
-    did (#174). GitHub logins are case-insensitive. An unreadable login is the
-    transport failure it is, never a mismatch — but it still creates nothing."""
+    """None when the token's login owns the slug, else the exit code of a
+    reported refusal. `POST /user/repos` ignores the slug's owner (#174)."""
     owner = api.repo.split("/", 1)[0] if "/" in api.repo else None
     login = api.authenticated_login()
     if login is None:
@@ -102,36 +81,43 @@ def refuse_foreign_owner(api) -> int | None:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    """Stand up (or repair) a coordination repo: verify-or-create it private,
-    install the bundled assets, prune the retired ones, and upsert the canonical
-    labels. Create-only: an asset that already exists is left exactly as it is,
-    hand edits included — nothing in the coordination repo is executed, so a file
-    that differs from the bundled copy is the operator's business, not a hazard
-    to police. Re-running init on an older coordination
-    repo is also its MIGRATION: assets this protocol revision retired are deleted
-    (OBSOLETE_ASSETS). Idempotent; touches no issues. Exit 0 on success, 20 on
-    any gh/transport failure."""
-    api, project = args.api, args.project
+    """Stand up (or repair, or migrate) a coordination repo: create it private,
+    install assets create-only, prune retired ones, upsert the labels.
+    Idempotent; touches no issues."""
+    api = args.api
     report = {
         "repo": api.repo,
         "repo_status": "exists",
         "assets": [],
         "labels": [],
-        "project": project or None,
+        "project": args.project or None,
     }
+    for step in (_ensure_repo, _install_assets, _prune_assets, _upsert_labels):
+        rc = step(api, report)
+        if rc is not None:
+            return rc
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_init(report))
+    return EXIT_OK
 
-    # 1. Verify or create the repo (private).
-    if not api.repo_exists():
-        refused = refuse_foreign_owner(api)
-        if refused is not None:
-            return refused
-        if not api.repo_create_private():
-            print(f"init: gh-failure stage=repo repo={api.repo}", file=sys.stderr)
-            return EXIT_TRANSPORT
-        report["repo_status"] = "created"
 
-    # 2. Install the bundled assets, create-only — an existing file is reported
-    #    and left alone.
+def _ensure_repo(api, report: dict) -> int | None:
+    if api.repo_exists():
+        return None
+    refused = refuse_foreign_owner(api)
+    if refused is not None:
+        return refused
+    if not api.repo_create_private():
+        print(f"init: gh-failure stage=repo repo={api.repo}", file=sys.stderr)
+        return EXIT_TRANSPORT
+    report["repo_status"] = "created"
+    return None
+
+
+def _install_assets(api, report: dict) -> int | None:
+    # Create-only: an existing file, hand edits included, is left alone.
     for name, dest, message in INIT_ASSETS:
         try:
             bundled = bundled_asset(name)
@@ -147,43 +133,39 @@ def cmd_init(args: argparse.Namespace) -> int:
         else:
             status = "present"
         report["assets"].append({"path": dest, "status": status})
+    return None
 
-    # 3. Prune the assets an earlier release installed and this revision retired,
-    #    so re-running init is also the migration path for a coordination repo
-    #    that was stood up before them.
+
+def _prune_assets(api, report: dict) -> int | None:
     for dest, sentinel in OBSOLETE_ASSETS:
         current, sha = api.get_content_meta(dest)
         if current is None or sha is None or sentinel not in current:
             continue  # absent, unreadable, or not ours to delete
         if not api.delete_content(dest, sha,
-                                 f"chore: remove retired kraken asset {dest}"):
+                                  f"chore: remove retired kraken asset {dest}"):
             print(f"init: gh-failure stage=prune path={dest}", file=sys.stderr)
             return EXIT_TRANSPORT
         report["assets"].append({"path": dest, "status": "removed"})
+    return None
 
-    # 4. Upsert the canonical labels (+ the project label when scoped).
+
+def _upsert_labels(api, report: dict) -> int | None:
     labels = list(CANONICAL_LABELS)
-    if project:
-        labels.append((f"project:{project}", PROJECT_LABEL_COLOR, PROJECT_LABEL_DESC))
+    if report["project"]:
+        labels.append((f"project:{report['project']}", PROJECT_LABEL_COLOR,
+                       PROJECT_LABEL_DESC))
     for lname, color, desc in labels:
         if not api.label_upsert(lname, color, desc):
             print(f"init: gh-failure stage=label label={lname}", file=sys.stderr)
             return EXIT_TRANSPORT
         report["labels"].append(lname)
-
-    if args.json:
-        print(json.dumps(report, indent=2))
-    else:
-        print(render_init(report))
-    return EXIT_OK
+    return None
 
 
-# The issue-form headings the bundled task-template produces, and the placeholder
-# GitHub renders for a blank field. Section detection keys on these.
+# What tags the validator's own comment, so a re-run can find it.
 VALIDATION_MARKER = {"type": "validation"}
 
-# The actionable items the validator lists, one per missing requirement. Single
-# copy so the message stays consistent between the workflow and its tests.
+# One actionable item per missing requirement.
 VALIDATE_PROJECT_MISSING = (
     "- Add a `project:<name>` label. Workers are scoped to one project and never "
     "see a task without it, so an unlabeled task sits invisible in the queue forever."
@@ -197,12 +179,15 @@ VALIDATE_ACCEPTANCE_MISSING = (
     "executable, observable proof the Goal was met — a worker must run it for real "
     "before delivering."
 )
+VALIDATE_MESSAGES = {
+    "project label": VALIDATE_PROJECT_MISSING,
+    "Goal": VALIDATE_GOAL_MISSING,
+    "Acceptance": VALIDATE_ACCEPTANCE_MISSING,
+}
 
 
 def validation_body(missing: Sequence[str]) -> str:
-    """The one actionable comment the validator posts, tagged with the protocol/3
-    validation marker so the debounce can find its own prior comment. It informs
-    only — never blocks, closes, or relabels the task."""
+    """The validator's one comment. It informs only."""
     return "\n\n".join([
         "> 🐙 **Kraken task validator** — this task isn't ready for a worker to pick up yet.",
         "Please fix the following so it can be claimed (this gate only informs; "
@@ -213,8 +198,7 @@ def validation_body(missing: Sequence[str]) -> str:
 
 
 def latest_validation_comment(records: Sequence[CommentRecord]) -> str | None:
-    """The body of the newest prior validation comment (carrying the validation
-    marker) in the thread, or None when none exists — the debounce anchor."""
+    """The newest prior validation comment's body, or None."""
     latest = None
     for rec in records:  # server order: keep the newest match
         body = rec.get("body") or ""
@@ -225,15 +209,9 @@ def latest_validation_comment(records: Sequence[CommentRecord]) -> str | None:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    """Flag a queue entry missing its project label, Goal, or Acceptance
-    (validate-task.yml). Reads the issue's live labels and body, and on any
-    missing requirement posts ONE actionable comment naming exactly what to fix;
-    a compliant task gets none (no noise on the happy path, and the same exit
-    once the operator fixes what was flagged). Debounced: a re-run whose missing
-    set is unchanged posts no duplicate. Informs only — never holds, closes, or
-    relabels; the one ref it writes is the §3.1 anchor refresh its own comment
-    owes (`_refresh_anchor`), which changes no state. Exit 0 on a clean run, 20
-    on gh/transport failure."""
+    """Flag a queue entry missing its project label, Goal or Acceptance with
+    one actionable comment; debounced, so an unchanged verdict posts nothing.
+    Informs only: it never holds, closes or relabels."""
     api, issue = args.api, args.issue
 
     labels = api.issue_label_names(issue)
@@ -249,13 +227,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(f"validate: gh-failure stage=body issue={issue}", file=sys.stderr)
         return EXIT_TRANSPORT
 
-    missing = []
-    if not any(lbl.startswith("project:") for lbl in labels):
-        missing.append(VALIDATE_PROJECT_MISSING)
-    if is_empty_section(section_body(body, "Goal")):
-        missing.append(VALIDATE_GOAL_MISSING)
-    if is_empty_section(section_body(body, "Acceptance")):
-        missing.append(VALIDATE_ACCEPTANCE_MISSING)
+    missing = [VALIDATE_MESSAGES[requirement]
+               for requirement in missing_requirements(labels, body)]
 
     if not missing:
         print(f"validate: #{issue} is compliant — no-op")
@@ -286,32 +259,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 def _refresh_anchor(api, issue) -> int:
-    """Move the state record's comment anchor past the comment this pass just
-    posted — the PROTOCOL.md §3.1 SHOULD that any program-authored comment on a
-    task's thread owes.
-
-    Without it the validator's own comment is indistinguishable from an
-    operator's reply: §6 derives a requeue from `total > record.comments` and
-    counts every comment, so a held task the validator touches reads as bounced.
-    The next worker then claims rework nobody asked for, finds an automated
-    nag on the thread, and — correctly, per the skill — escalates it back as a
-    question. The noise costs the operator a `needs-decision` entry; the fix is
-    to stop generating it, since the count is arithmetic the program has.
-
-    `re_anchored` is exactly the right write and no more: the anchor moves, the
-    hold does not lift, the state, worker, expiry count and PR all stand. Only a
-    task that HAS a record is touched — an absent record reads as queued (§3.1)
-    and holds nothing, so there is no anchor to move and writing one would
-    invent state this pass has no business creating.
-
-    A failed read or write is reported as transport rather than swallowed: the
-    comment has landed by now, so a silent failure leaves precisely the stale
-    anchor this exists to prevent, and the run should say so.
-
-    The record is read BEFORE the count, which is the cheap order for this
-    caller: the validator fires on new and edited queue entries, and a task that
-    has never been put down has no record at all — the overwhelmingly common
-    case exits here having paid one ref read, never the issue fetch as well."""
+    """Move the record's anchor past the comment just posted (§3.1), or §6
+    would read the validator's own comment as an operator's reply and requeue
+    a held task. A task with no record has no anchor to move."""
     states = States(api)
     record = states.of(issue)
     if record.unknown:
@@ -330,24 +280,14 @@ def _refresh_anchor(api, issue) -> int:
 
 
 def is_identity_label(name: str) -> bool:
-    """A label cleanup MUST preserve on a closed task: the task-type label
-    (kraken-task) and its project routing label (project:<name>). Everything else
-    — every state-machine label (in-progress / needs-decision / awaiting-merge)
-    and any unrelated label — is stripped, so a closed issue reads clean and
-    label-based queue filters never match dead state (PROTOCOL.md §10)."""
+    """A label cleanup keeps on a closed task (§10): kraken-task and
+    project:<name>."""
     return name == "kraken-task" or name.startswith("project:")
 
 
 def cmd_cleanup(args: argparse.Namespace) -> int:
-    """Strip every non-identity label off a CLOSED kraken-task issue except
-    kraken-task itself and its project:<name> label (cleanup-closed.yml). Closing
-    a task (the PR's `Closes` line, or a manual close) otherwise leaves whatever
-    state-machine label it carried — awaiting-merge, needs-decision, even a stale
-    in-progress — attached forever, so label-based filters keep matching dead
-    state. A no-op when nothing but identity labels remain. The close event gates
-    the workflow; this reads the issue's live labels and removes the rest, one at
-    a time (idempotent — each removal targets a label the read just returned).
-    Exit 0 on success, 20 on any gh/transport failure."""
+    """Strip every non-identity label and every claim ref off a closed task, so
+    label filters never match dead state. Idempotent."""
     api, issue = args.api, args.issue
 
     labels = api.issue_label_names(issue)
@@ -368,10 +308,6 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
             return EXIT_TRANSPORT
         stripped += 1
 
-    # A closed task must not leave its lock behind: a crashed worker's lease
-    # could linger past the close, and so could a generation a steal failed to
-    # collect — drop every one of them. Idempotent: an already-absent ref counts
-    # as deleted, and a task with no lease reads as an empty ladder.
     ok, refs = Refs(api).of(issue)
     if not ok or not Refs(api).drop(issue, [g for g, _s in refs]):
         print(f"cleanup: gh-failure stage=ref issue={issue}", file=sys.stderr)

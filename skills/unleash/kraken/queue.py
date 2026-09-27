@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import re
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping
 
 from .contract import (
     CommitMeta, EXIT_OK, EXIT_TRANSPORT, Epoch, HELD_LABELS, Issue, Json,
@@ -23,34 +23,9 @@ from .state import (
     NO_RECORD, States, TaskState, holding_state, state_view
 )
 
-# --- subcommand: list-startable ---------------------------------------------
-#
-# Queue fetch and blocked-by check are batched through GraphQL, so an idle poll
-# costs a queue-size-independent number of round trips. GraphQL's
-# `issues(labels: [...])` is a UNION (unlike REST's AND), so we filter server-side
-# on the single "kraken-task" label and match the project label client-side.
-
-
-
-# --- the requeue derivation (PROTOCOL.md §6) ---------------------------------
-# When anything is said on a held task's thread, the task rejoins the queue. That
-# is a property of the record and the comment count, readable at any time, so it
-# is DERIVED on the read rather than mutated onto the task: no workflow, no label
-# write, and no window where the queue disagrees with the thread.
-#
-# The whole derivation is `total > record.comments` (§3.1, `TaskState.requeued`).
-# The transition wrote down what the thread carried when it put the task down,
-# and the walk brings back what it carries now. One integer against another: no
-# comment is fetched, no author classified, no body opened.
-#
-# The rule is the SAME for both held states, and the counter makes it symmetric
-# for free: neither state has anything to read.
-
 # --- the issue-form body -----------------------------------------------------
-# Pure string readers, kept free of `Task`: the same two are applied to a body
-# read straight off REST — `validate` reads one issue, `task_brief` reads the
-# issue a resume verdict fetched — where no queue walk and therefore no `Task`
-# exists.
+# Free functions rather than `Task` methods: `validate` and `task_brief` apply
+# them to bodies read straight off REST, where no `Task` exists.
 
 NO_RESPONSE_PLACEHOLDER = "_No response_"
 
@@ -82,25 +57,32 @@ def is_empty_section(content: str) -> bool:
     return joined == "" or joined == NO_RESPONSE_PLACEHOLDER
 
 
+def section_text(body: str, heading: str) -> str:
+    """The trimmed content under `### HEADING`, "" when blank or absent."""
+    content = section_body(body, heading)
+    return "" if is_empty_section(content) else content.strip()
+
+
+def missing_requirements(labels: Iterable[str], body: str) -> list[str]:
+    """What makes a queue entry dead on arrival (§2.1): any of "project label",
+    "Goal", "Acceptance". Empty when a worker can start it."""
+    missing = []
+    if not any(name.startswith("project:") for name in labels):
+        missing.append("project label")
+    for heading in ("Goal", "Acceptance"):
+        if not section_text(body, heading):
+            missing.append(heading)
+    return missing
+
+
 # --- one task, as the startable filter sees it -------------------------------
 
 DEPENDS_ON_RE = re.compile(r"^depends-on: *#([0-9]+)", re.MULTILINE)
 
 
 def _comment_total(node: Node) -> int:
-    """`comments { totalCount }` off a queue-walk node, floored at 0.
-
-    A node that did not select the field reads as 0, and 0 fails CLOSED, not
-    open: the requeue derivation is `total > anchor` (§6), so 0 is below every
-    anchor a transition has ever written and a walk that lost the field reports
-    the whole queue as still held. Nothing is offered wrongly; deliveries the
-    operator has answered stay buried until the field comes back.
-
-    That direction is why §6's re-anchor repair does not act on this number: it
-    proposes off the walk and confirms over REST (`Api.comment_count`, which
-    answers None rather than 0), so a lost field costs a quiet pass, never a
-    queue re-anchored to zero. See `TaskState.requeued` for the other half —
-    the REST reader's None, which really does fail open."""
+    """`comments { totalCount }` off a walk node. A missing field reads as 0,
+    which fails CLOSED: 0 is below every anchor, so nothing is requeued."""
     value = (node.get("comments") or {}).get("totalCount")
     if isinstance(value, bool) or not isinstance(value, int):
         return 0
@@ -108,16 +90,8 @@ def _comment_total(node: Node) -> int:
 
 
 class Task:
-    """One open kraken-task issue, as the queue walk returned it — and the only
-    thing above the walk that knows what a GraphQL issue node looks like.
-
-    The wire shape is decoded ONCE, here, in the constructor. That is what keeps
-    the one mutation honest: `reclaim` edits a label set rather than rebuilding
-    `{"nodes": [{"name": …}]}` for the next reader to decode again.
-
-    Mutable on purpose, and only in the one way a queue read actually mutates a
-    task: an applied reconcile is folded back in (`reclaim`). Everything else is
-    a query."""
+    """One open kraken-task issue from the queue walk. The GraphQL node is
+    decoded here and nowhere else."""
 
     def __init__(self, node: Node):
         self.number: Issue = node["number"]
@@ -128,11 +102,6 @@ class Task:
             lbl.get("name", "")
             for lbl in (node.get("labels") or {}).get("nodes") or []
         }
-        # How many comments the thread carries RIGHT NOW. The requeue derivation
-        # compares it against the count the state record froze at the last
-        # transition (§3.1), and that is the entire use: no body, no author, no
-        # window. One scalar the walk brings back for every task, which is why
-        # the derivation costs no call of its own.
         self.comment_total: int = _comment_total(node)
         self._blockers: list[Json] = list(
             (node.get("blockedBy") or {}).get("nodes") or [])
@@ -150,9 +119,7 @@ class Task:
 
     @property
     def held(self) -> tuple[str, ...]:
-        """The HELD labels this task wears, in HELD_LABELS order. A projection
-        (§3), and read in exactly one decision: `holding`, for a task that has no
-        state record to answer with."""
+        """The held labels this task wears, in HELD_LABELS order."""
         return tuple(h for h in HELD_LABELS if h in self.labels)
 
     # --- what the record says -------------------------------------------------
@@ -162,76 +129,34 @@ class Task:
         return states.get(self.number, NO_RECORD)
 
     def holding(self, states: Mapping[Issue, TaskState]) -> str | None:
-        """The state that is holding this task — `needs-decision`,
-        `awaiting-merge`, or None when nothing is. The one question the startable
-        filter, the claim guard and the console all ask, answered in one place so
-        the three cannot drift.
-
-        Where a record exists it decides, and the held LABELS are not consulted
-        at all: the record names the state and its `comments` anchor says whether
-        the thread has moved on since (§6). Where none exists the label is
-        honored — that is the protocol/9 fallback that makes a queue written by
-        an older revision safe to read, and it derives no requeue, because there
-        is no count to compare against. §6's rule 3 turns such a task into a
-        record on the first reconcile, and the requeue works from then on.
-
-        The LEASE is not this question. A live lease holds a task whatever its
-        record says, and `Task.state` asks that separately — keeping them apart
-        is what lets a claimed task's record go on saying `awaiting-merge` from
-        the delivery that was bounced back, without the console counting it
-        twice."""
+        """The state holding this task, or None (see `holding_state`). The lease
+        is a separate question, asked by `state`."""
         return holding_state(self.record(states), self.comment_total, self.labels)
 
     # --- what the body says ---------------------------------------------------
 
     @property
     def depends_on(self) -> Issue | None:
-        """The `depends-on: #N` target declared in the body, or None. This is the
-        TEXT fallback: GitHub's native blocked-by link supersedes it and is read
-        off the queue walk, so it is only consulted for a task with no link."""
+        """The `depends-on: #N` target in the body, or None — the fallback for a
+        task with no native blocked-by link."""
         m = DEPENDS_ON_RE.search(self.body)
         return int(m.group(1)) if m else None
 
-    def section(self, heading: str) -> str:
-        """The trimmed content under `### HEADING`, "" when blank or absent."""
-        content = section_body(self.body, heading)
-        return "" if is_empty_section(content) else content.strip()
-
     @property
     def missing(self) -> list[str]:
-        """What makes this queue entry dead on arrival (PROTOCOL.md §2.1): no
-        `project:<name>` label (invisible to every worker), or an empty/absent
-        Goal or Acceptance section (a worker claims it, then stalls). Empty for a
-        task a worker can actually start."""
-        missing = []
-        if not self.projects:
-            missing.append("project label")
-        if not self.section("Goal"):
-            missing.append("Goal")
-        if not self.section("Acceptance"):
-            missing.append("Acceptance")
-        return missing
+        """What makes this entry dead on arrival (§2.1)."""
+        return missing_requirements(self.labels, self.body)
 
     # --- the startable verdict ------------------------------------------------
 
     def state(self, live: dict[Issue, Sha],
               states: Mapping[Issue, TaskState]) -> str | None:
-        """This task's startable/held verdict against the live-lease view and the
-        state records — or None when the answer depends on the `depends-on`
-        target's state, which the caller resolves for the whole page in one
-        batched call.
+        """"held" or "startable" — or None when it hangs on a `depends-on`
+        target, which the caller resolves for the whole page at once.
 
-        Held means: a **record** naming an operator-facing state the thread has
-        not moved past (`holding`) OR a **live lease** (the lock). Those are the
-        only two kinds of hold there are, and they do not overlap: `in-progress`
-        is write-only (§3), so the lease answers for it and a task wearing a
-        stale badge with no live lease is offered like any other. An EXPIRED
-        lease holds nothing either (§5): the task is offered, and the claim that
-        follows steals the lease.
-
-        A held record is not the last word: a task with a comment newer than the
-        record is requeued by derivation (§6) and rejoins the candidates — it
-        still has to clear its dependencies like any other."""
+        Only two things hold a task: a record `holding` it, or a live lease. The
+        `in-progress` label is write-only (§3) and an expired lease holds
+        nothing (§5)."""
         if self.holding(states) is not None or self.number in live:
             return "held"
         if self._blockers:
@@ -243,23 +168,13 @@ class Task:
     # --- the one mutation a queue read performs -------------------------------
 
     def reclaim(self) -> None:
-        """Fold an APPLIED reclaim back in: the label swap `apply_reconcile` just
-        wrote, and nothing more, so the drain that reconciled classifies the
-        reconciled state without paying for a second fetch."""
+        """Fold an applied reclaim's label swap back into this read."""
         self.labels = (self.labels - {"in-progress"}) | {"needs-decision"}
 
 
 @dataclasses.dataclass(frozen=True)
 class Candidate:
-    """One task the startable filter classified: the task, and the verdict.
-
-    It carries the whole `Task` rather than a copy of a few of its fields, so a
-    reader that needs more than the verdict — `acquire_next` reaching the requeue
-    derivation, say — asks `cand.task` instead of keeping a second
-    `{number: node}` index beside the candidate list.
-
-    `state` is None only while the classification is still waiting on the batched
-    `depends-on` resolution; every candidate `Queue.candidates` returns has one."""
+    """One classified task: the task, and its verdict."""
 
     task: Task
     state: str | None
@@ -278,8 +193,7 @@ class Candidate:
 
     @property
     def startable(self) -> bool:
-        """Whether a worker may attempt to claim this. The guard and the CAS
-        decide ownership either way — this is the offer, not the verdict."""
+        """An offer to attempt a claim; the CAS decides ownership."""
         return self.state == "startable"
 
 
@@ -301,12 +215,9 @@ def cmd_list_startable(args: argparse.Namespace) -> int:
 def claim_meta_of(
     sha: Sha, commit_meta: CommitMeta,
 ) -> tuple[Worker | None, str | None, str | None]:
-    """Decode one claim ref's commit into (worker, msg, anchor_iso) — the
-    marker payload plus the server-stamped committedDate. This is the ONE
-    liveness read `status` and the reaper share: the ref's commit date is the
-    staleness clock, so nothing on the issue timeline (an operator poking a
-    dead worker's thread, a bot comment) can ever make a claim look alive.
-    Unreadable pieces come back as None, never guessed."""
+    """Decode one claim ref's commit into (worker, msg, anchor_iso). The commit
+    date is the liveness clock, so nothing on the issue timeline can make a
+    claim look alive. Unreadable pieces are None."""
     commit = commit_meta.get(sha) or {}
     payload = parse_marker(commit.get("message") or "") or {}
     worker = payload.get("worker") or None
@@ -317,20 +228,9 @@ def claim_meta_of(
 
 @dataclasses.dataclass(frozen=True)
 class QueueRead:
-    """One queue read, whole: every open `Task`, the lease state of every claim
-    ref, the state record of every task that has one, and the commit meta both
-    were decoded from.
-
-    The commit meta is carried rather than dropped because `status` decodes each
-    holder's worker, message and heartbeat anchor out of it. Without it on the
-    read, the console cannot use `read` at all and re-runs the same five-step
-    fetch by hand, with five None checks and five diagnostics of its own, in
-    another module.
-
-    Leases and records sit side by side because they answer different halves of
-    "what is this task": the lease says whether somebody is executing it right
-    now, the record says what it is between workers (§3.1). Neither is derivable
-    from the other, and every reader here needs both."""
+    """One queue read: every open task, every lease (who is executing), every
+    state record (what the task is between workers, §3.1), and the commit meta
+    they were decoded from, which `status` reads heartbeats out of."""
 
     tasks: list[Task]
     leases: dict[Issue, Lease]
@@ -338,48 +238,29 @@ class QueueRead:
     states: dict[Issue, TaskState] = dataclasses.field(default_factory=dict)
 
     def by_number(self) -> dict[Issue, Task]:
-        """The tasks indexed by issue number — how the reconciler and the claim
-        loop reach the task behind a lease or a candidate."""
+        """The tasks indexed by issue number."""
         return {task.number: task for task in self.tasks}
 
     def record(self, issue: Issue) -> TaskState:
-        """One task's record, or `NO_RECORD` — the reconciler's and the claim
-        path's way in, so neither spells the `.get(..., NO_RECORD)` default and
-        gets the absent case wrong."""
+        """One task's record, or `NO_RECORD`."""
         return self.states.get(issue, NO_RECORD)
 
 
 class Queue:
-    """The coordination repo's task queue as this program reads it: the batched
-    walk, the lease state that comes with it, comment hydration, and the
-    startable filter.
-
-    One collaborator for the whole job — reading the queue and deciding which of
-    it is startable — so `acquire_next` injects a single object to stay testable.
-
-    The DECISIONS made on what is read — the requeue derivation, the hungry set,
-    the section parsing — stay module-level functions: they are pure, they touch
-    no transport, and they are tested as such. The decisions about ONE task
-    belong to `Task`, which is what the walk returns."""
+    """The coordination repo's task queue: the batched walk, the leases and
+    records that come with it, and the startable filter. Decisions about one
+    task belong to `Task`."""
 
     def __init__(self, api: Api):
         self.api = api
 
     def open_tasks(self) -> list[Task] | None:
-        """Every OPEN kraken-task issue in the repo, across all projects — number,
-        title, createdAt, body, labels and native blocked-by — in one paginated
-        GraphQL walk, each decoded into a `Task`. Returns the task list, or None
-        on transport failure.
+        """Every open kraken-task issue, all projects, in one paginated GraphQL
+        walk; None on transport failure. GraphQL's `labels:` filter is a UNION,
+        so only `kraken-task` is filtered server-side.
 
-        This is the ONE place the wire shape of an issue node is read. Everything
-        above it asks the `Task`, so a change to the query below is a change to
-        the constructor beside it and to nothing else.
-
-        Carries the comment COUNT and not one comment body. This walk is the hot
-        read — every worker's watcher runs it once a minute — and `totalCount` is
-        one integer per node, which is all the requeue derivation needs against
-        the record's anchor (§6). Fetching bodies here would put the whole
-        queue's comment volume on every poll of every worker."""
+        This is the hot read (every watcher, every minute), so it carries the
+        comment COUNT and never a comment body."""
         owner, name = self.api.repo.split("/", 1)
         tasks = []
         cursor = None
@@ -405,19 +286,9 @@ class Queue:
 
     def read(self, now: Epoch | None = None, ttl: int | None = None,
              ) -> QueueRead | None:
-        """One queue read: every open kraken-task node (repo-wide, BEFORE any project
-        filter), the LEASE state of every claim ref, and the STATE RECORD of every
-        task that has one. The single fetch the reconciler (§6), the startable
-        classification, the claim path and the console all consume, so a reader that
-        does several pays for it once. Returns a `QueueRead`, or None on transport
-        failure.
-
-        Three calls, and the third only when a ref actually exists: the issue walk,
-        one paginated read of the whole `refs/kraken/` namespace (claims AND
-        records — see `kraken_ref_items`), and one batched commit read resolving
-        both families at once. `Refs.commit_meta` answers `{}` for an empty ref list
-        without a request, so an idle queue pays exactly two calls. No comment is
-        read on any path."""
+        """One repo-wide queue read (before any project filter), or None on
+        transport failure. Three calls — the walk, the `refs/kraken/` namespace,
+        one batched commit read — and an idle queue skips the third."""
         tasks = self.open_tasks()
         if tasks is None:
             return None
@@ -430,26 +301,9 @@ class Queue:
     def lease_view(self, now: Epoch | None = None, ttl: int | None = None,
                    ) -> tuple[dict[Issue, Lease], CommitMeta,
                               dict[Issue, Sha]] | None:
-        """The ladder half of `read`: every claim ref's lease, aged against the
-        server's clock, the commit meta it was decoded from, and the state refs
-        as raw `{issue: sha}` — WITHOUT the issue walk and WITHOUT resolving
-        those records into `TaskState`s.
-
-        Returns `(leases, commit_meta, state_shas)`, or None on transport failure.
-
-        Separate from `read` because one question genuinely does not need the
-        queue: "does this worker already hold a claim?" (§5) is answered by the
-        LADDER, and the ladder is what arbitrates it. A caller that asks only
-        that should not pay for a paginated issue walk to find out — see
-        `claim.open_claim_of`.
-
-        The state shas ride along because parsing them out of the payload is
-        pure — the matching-refs read already carried them, and `state_ref_shas`
-        spends nothing. What is NOT done here is resolving their commits: a
-        worker holding nothing needs no record, and batching every record of the
-        queue into this read would put a commit read on the one path that had
-        none. The caller resolves the one record it turns out to need
-        (`States.at`), which is zero or one per invocation."""
+        """`read` without the issue walk and without resolving records:
+        `(leases, commit_meta, state_shas)`, or None on transport failure. For
+        callers asking only "does this worker hold a claim?" (§5)."""
         got = self._ref_view(now, ttl, with_states=False)
         if got is None:
             return None
@@ -460,18 +314,8 @@ class Queue:
                   with_states: bool,
                   ) -> tuple[dict[Issue, Lease], CommitMeta,
                              dict[Issue, TaskState], dict[Issue, Sha]] | None:
-        """The `refs/kraken/` namespace, decoded: leases, the commit meta behind
-        them, the state records when asked for, and the raw state shas either
-        way. None on transport failure.
-
-        One matching-refs read serves both families, and ONE batched commit read
-        resolves every sha either of them named, so adding records to a queue read
-        costs no extra round trip: the aliases just get longer, and `Api.aliased`
-        already chunks them.
-
-        `with_states` buys the COMMITS, not the shas: naming which tasks have a
-        record is a pure parse of the payload above, so it happens either way and
-        a caller that wants one record can resolve it alone."""
+        """The `refs/kraken/` namespace decoded, or None on transport failure.
+        One batched commit read resolves claims and, `with_states`, records."""
         refs = Refs(self.api)
         items = kraken_ref_items(self.api)
         if items is None:
@@ -487,9 +331,7 @@ class Queue:
             + (sorted(state_shas.values()) if with_states else []))
         if commit_meta is None:
             return None
-        # The server's clock, not this machine's (§5.1): the lease timestamps
-        # about to be aged are commit dates GitHub stamped, and the reads above
-        # have already been told what time GitHub thinks it is.
+        # The server's clock, not ours (§5.1): GitHub stamped these dates.
         leases = lease_state(claim_refs, commit_meta,
                              self.api.server_now() if now is None else now,
                              lease_ttl_seconds(ttl))
@@ -498,38 +340,18 @@ class Queue:
 
     def candidates(self, project: str, read: QueueRead | None = None,
                    ) -> list[Candidate] | None:
-        """The shared startable/held classification list-startable, watch's snapshot
-        and claim-next all read — one code path so the filter cannot drift between
-        them. Returns `Candidate`s ordered priority:high-first then oldest-first by
-        createdAt within each tier (a stable sort — see PRIORITY_LABEL), or None on
-        transport failure.
-
-        The classification of one task is `Task.state`; this is the page around
-        it: the project filter, the ordering, and the one batched call that
-        answers every `depends-on` target at once. Every candidate carries its
-        whole task, so claim-next can brief a subagent from the win without a
-        second fetch and the guard can re-derive the requeue verdict from the
-        same task the filter used — the GraphQL walk already paid for both.
-
-        `read` accepts an already-fetched `QueueRead`, which is how claim-next
-        classifies the state its reconcile pass just produced without
-        re-fetching it."""
+        """`project`'s tasks classified, priority:high first then oldest first;
+        None on transport failure. Pass `read` to classify an existing read."""
         if read is None:
             read = self.read()
             if read is None:
                 return None
         live = live_leases(read.leases)
         tasks = [t for t in read.tasks if project in t.projects]
-        # priority:high tasks lead; createdAt breaks ties FIFO within each tier. The
-        # key sorts on (not-high, createdAt) so the boolean puts the high tier first
-        # and the timestamp keeps the older task ahead inside a tier — a scheduling
-        # preference layered on top of pure FIFO (see PRIORITY_LABEL).
         tasks.sort(key=lambda t: (PRIORITY_LABEL not in t.labels, t.created))
 
         rows = [Candidate(task, task.state(live, read.states)) for task in tasks]
-        # The undecided ones, resolved in ONE batched call rather than a request
-        # per candidate: a `depends-on: #N` target's open/closed state is the only
-        # thing `Task.state` cannot answer from the task in front of it.
+        # Every undecided `depends-on` target, in ONE batched call.
         pending = [(i, task.depends_on) for i, task in enumerate(tasks)
                    if rows[i].state is None]
         if pending:
@@ -545,11 +367,9 @@ class Queue:
     # --- routing: which projects this repo actually carries -------------------
 
     def projects(self) -> list[str] | None:
-        """Every project:<name> label configured in the repo, sorted, prefix
-        stripped — the launch recon points a worker at each. Read from the repo's
-        label set (not the open-task walk) so a project with no open task still
-        gets a launch line. Returns a sorted name list, or None on transport
-        failure."""
+        """Every configured `project:<name>`, sorted, or None on transport
+        failure. Read from the label set, so a project with no open task still
+        counts."""
         items = self.api.paginated(f"/repos/{self.api.repo}/labels")
         if items is None:
             return None
@@ -560,17 +380,9 @@ class Queue:
         )
 
     def verify_project(self, project: str) -> tuple[bool | None, str]:
-        """Check that the coordination repo actually carries the `project:<name>`
-        label a worker was pointed at. Returns (ok, message): True when the label
-        exists, False (with a message naming the configured projects and the fix)
-        when it does not, and None when the label read itself failed — a project
-        is never declared missing from a read that never landed.
-
-        Routing is entirely client-side (§3): a worker scoped to a label nobody
-        uses filters every task out and reads as an empty queue forever, so a
-        typo'd or never-created project silently produces a worker that hears
-        nothing. Cheap to check once, so check it before the drain rather than
-        never."""
+        """(ok, message): whether the repo carries `project:<name>`. `ok` is
+        None when the label read failed — a project is never declared missing
+        from a read that never landed."""
         names = self.projects()
         if names is None:
             return (None, "project check: gh-failure stage=labels")
@@ -588,14 +400,8 @@ class Queue:
 
     def _depends_on(self,
                     targets: Iterable[Issue]) -> dict[Issue, bool] | None:
-        """Resolve every `depends-on: #N` fallback target's open/closed state
-        through the batched fan-out (one aliased `iN: issue(number: N) { state }`
-        field per distinct target), never one call per candidate. Returns
-        {number: is_open}, or None on transport failure.
-
-        The targets are materialized because they are read twice — once to build
-        the fields, once to read the answers back — and a caller is entitled to
-        hand this a generator."""
+        """{number: is_open} for every target in one aliased call, or None on
+        transport failure."""
         targets = list(targets)
         fields = [f"i{n}: issue(number: {n}) {{ state }}" for n in targets]
         repo_obj = self.api.aliased(fields)
