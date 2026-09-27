@@ -1,21 +1,26 @@
 # Kraken developer tasks — a thin front-end over the checks in tests/ and
-# scripts/. Requires `python3` (stdlib only — no `jq`, no `gh`). `test-agent`
+# scripts/. Requires `python3` (stdlib only — no `jq`, no `gh`). `test-e2e`
+# drives the real `copilot` CLI against a scripted fake model (token-free; it
+# skips when `copilot` is not on PATH). `test-agent`
 # additionally needs a logged-in `claude` CLI (`test-agent-copilot` a logged-in
 # `copilot`) and spends tokens, so neither is ever run automatically (no hook,
 # no CI) — invoke them by hand. See CONTRIBUTING.md.
 SHELL := bash
 
-.PHONY: help check test lint test-agent test-agent-copilot
+.PHONY: help check test test-e2e lint test-agent test-agent-copilot
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  make %-19s %s\n", $$1, $$2}'
 
-check: test lint ## Run every token-free check (what CI runs on each PR)
+check: test test-e2e lint ## Run every token-free check (what CI runs on each PR)
 
 test: ## Test suite — conformance + unit, mechanical, token-free (stdlib only)
 	python3 -m unittest discover -s tests/unit -p 'test_*.py'
 	python3 -m unittest discover -s tests/conformance -p 'test_*.py'
+
+test-e2e: ## Real Copilot CLI vs a scripted fake model (BYOK, offline) — token-free
+	python3 -m unittest discover -s tests/e2e -p 'test_*.py'
 
 lint: ## Deterministic skill lint — token-free
 	bash scripts/lint-skills.sh

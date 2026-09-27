@@ -177,7 +177,7 @@ def parse_args(args):
     while i < n:
         a = args[i]
         nxt = args[i + 1] if i + 1 < n else ""
-        if a == "-R":
+        if a in ("-R", "--repo"):
             p["repo"] = nxt; i += 2
         elif a == "issue":
             p["sub"] = nxt; i += 2

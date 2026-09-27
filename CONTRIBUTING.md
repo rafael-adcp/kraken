@@ -25,13 +25,14 @@ out of step. The linter enforces a lot of this mechanically.
 ## Dev setup
 
 No build, no package manager — just `bash` and `jq`. A `Makefile` fronts the
-checks. These two are token-free (no model calls, no network) and run in CI on
+checks. These are token-free (no model calls, no network) and run in CI on
 every PR:
 
 ```bash
-make test    # conformance + unit suites (native `python3 -m unittest`) — stdlib only
-make lint    # deterministic skill lint (bash scripts/lint-skills.sh)
-make check   # both of the above
+make test       # conformance + unit suites (native `python3 -m unittest`) — stdlib only
+make test-e2e   # the real Copilot CLI against a scripted fake model (BYOK, offline)
+make lint       # deterministic skill lint (bash scripts/lint-skills.sh)
+make check      # all of the above
 ```
 
 - **`make test`** runs the native stdlib runner — two `python3 -m unittest
@@ -47,6 +48,19 @@ make check   # both of the above
   skill is exposed to: label drift across files, orphan "step N" references,
   task-template field drift, broken relative links/images, and unparseable
   shell/YAML/JSON snippets.
+- **`make test-e2e`** runs the **real** GitHub Copilot CLI in BYOK offline mode
+  (`COPILOT_PROVIDER_BASE_URL` + `COPILOT_OFFLINE=true`) against a scripted,
+  OpenAI-compatible fake model (`tests/fake-model/model_server.py`). The "model"
+  plays a fixed list of tool calls, so the run is deterministic and needs no
+  credentials. Everything around the model is real: `scripts/kraken-loop.sh`, the
+  prompt and deny rules in `scripts/lib-copilot-drain.sh`, Copilot's shell tool
+  and permission layer, the plugin's `hooks.json` (SessionEnd), `kraken.py`
+  against the stub, and a git work repo with a bare remote. It proves the
+  **wiring**, not the model's judgment: a whole drain to a draft PR, the deny
+  rules blocking merge/delete/close, and SessionEnd releasing only its own
+  session's claim. It needs `copilot` on PATH (`npm install -g @github/copilot`)
+  and skips without it; CI pins the CLI version and sets `KRAKEN_E2E_REQUIRE=1`,
+  so there a missing CLI fails instead of skipping.
 
 ### The agent-behavior harness (run by hand)
 

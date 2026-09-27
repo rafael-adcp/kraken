@@ -48,7 +48,11 @@ differs, and each driver uses the one an operator actually runs:
 
 The Copilot wiring itself is pinned token-free by
 `tests/conformance/test_agent_harness_copilot.py` (a fake `copilot` records what
-it was handed), so `make check` catches a driver that drifts from the loop.
+it was handed), so `make check` catches a driver that drifts from the loop. The
+real Copilot CLI is also run token-free by `tests/e2e/` (`make test-e2e`, in
+CI): a scripted fake model (BYOK, offline) plays the tool calls, so a whole drain,
+the deny rules and the SessionEnd hook are exercised through the real CLI with no
+model judgment involved. This harness is still the only place judgment is tested.
 Every run's claim state lives in the scenario scratch (`KRAKEN_STATE_DIR`), never
 in your `~/.kraken`.
 
