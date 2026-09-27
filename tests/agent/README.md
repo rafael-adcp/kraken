@@ -64,7 +64,9 @@ in your `~/.kraken`.
 bash tests/agent/run-agent-tests.sh          # all scenarios
 bash tests/agent/run-agent-tests.sh 04       # only names matching "04"
 KRAKEN_AGENT_CLI=copilot bash tests/agent/run-agent-tests.sh   # on Copilot CLI
-make test-agent-copilot                      # the same, against a logged-in copilot
+make test-agent                              # every CLI, each logged in
+make test-agent-claude                       # only a logged-in claude
+make test-agent-copilot                      # only a logged-in copilot
 ```
 
 Requires the driven CLI on `PATH` (`claude` or `copilot`), `jq`, `git`, and its

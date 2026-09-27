@@ -86,14 +86,15 @@ measured. It runs slower than `make check` (every spawned interpreter is traced)
 ### The agent-behavior harness (run by hand)
 
 `make test-agent` drives **real** `/kraken:unleash --once` runs (headless
-`claude -p`) against the `gh` stub and asserts on artifacts — the skill's
+`claude -p`, and the Copilot CLI drain pass) against the `gh` stub and asserts on artifacts — the skill's
 *judgment*, not just the scripts. It is slow (several model runs) and **spends
 tokens**, so it is deliberately **not** wired into any hook or CI. Run it by
 hand when you change `skills/**` or `tests/agent/**`:
 
 ```bash
-make test-agent           # on Claude Code
-make test-agent-copilot   # the same scenarios on GitHub Copilot CLI
+make test-agent           # every agent CLI (Claude Code, then Copilot CLI)
+make test-agent-claude    # only Claude Code
+make test-agent-copilot   # only GitHub Copilot CLI
 ```
 
 It uses your logged-in Claude Code subscription (or `copilot login`; no paid API
