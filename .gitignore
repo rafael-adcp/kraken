@@ -9,5 +9,5 @@ graphify-out/
 # this one is personal by convention and must stay out of a public repo.
 .claude/settings.local.json
 
-# `COVERAGE_HTML=htmlcov make coverage`
+# HTML report written by `make coverage`
 htmlcov/

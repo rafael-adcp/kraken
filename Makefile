@@ -22,8 +22,8 @@ test: ## Test suite — conformance + unit, mechanical, token-free (stdlib only)
 test-e2e: ## Real Copilot CLI + Claude Code vs a scripted fake model — token-free
 	python3 -m unittest discover -s tests/e2e -p 'test_*.py'
 
-coverage: ## Line coverage of kraken.py across unit + conformance + e2e (a measurement, not a gate)
-	bash tests/coverage.sh
+coverage: ## Line coverage of kraken.py across unit + conformance + e2e, HTML in htmlcov/ (a measurement, not a gate)
+	COVERAGE_HTML="$${COVERAGE_HTML:-htmlcov}" bash tests/coverage.sh
 
 lint: ## Deterministic skill lint — token-free
 	bash scripts/lint-skills.sh

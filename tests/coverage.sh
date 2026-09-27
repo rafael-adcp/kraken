@@ -14,13 +14,15 @@
 # a percentage. Shell scripts (scripts/, hooks/) are not measured — their tests
 # are the conformance and e2e cases that drive them.
 #
-#   make coverage              # report, missing lines for files under 100%
-#   COVERAGE_HTML=DIR make coverage   # also write an HTML report to DIR
+#   make coverage              # report + HTML in htmlcov/ (COVERAGE_HTML=DIR to move it)
+#   bash tests/coverage.sh     # report only; COVERAGE_HTML=DIR also writes HTML to DIR
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+# Anchor a relative report dir to the caller's cwd: we cd into $WORK below.
+case "${COVERAGE_HTML:-}" in ''|/*) ;; *) COVERAGE_HTML="$PWD/$COVERAGE_HTML" ;; esac
 
 if ! python3 -c 'import coverage' 2>/dev/null; then
   if command -v uv >/dev/null 2>&1; then
