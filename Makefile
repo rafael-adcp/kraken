@@ -7,7 +7,7 @@
 # no CI) — invoke them by hand. See CONTRIBUTING.md.
 SHELL := bash
 
-.PHONY: help check test test-e2e lint test-agent test-agent-copilot
+.PHONY: help check test test-e2e coverage lint test-agent test-agent-copilot
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -21,6 +21,9 @@ test: ## Test suite — conformance + unit, mechanical, token-free (stdlib only)
 
 test-e2e: ## Real Copilot CLI + Claude Code vs a scripted fake model — token-free
 	python3 -m unittest discover -s tests/e2e -p 'test_*.py'
+
+coverage: ## Line coverage of kraken.py across unit + conformance + e2e (a measurement, not a gate)
+	bash tests/coverage.sh
 
 lint: ## Deterministic skill lint — token-free
 	bash scripts/lint-skills.sh

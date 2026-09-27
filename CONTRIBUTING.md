@@ -68,6 +68,21 @@ make check      # all of the above
   CI pins both versions and sets `KRAKEN_E2E_REQUIRE=1`, so there a missing CLI
   fails instead of skipping.
 
+### Line coverage (run by hand)
+
+```bash
+make coverage                      # unit + conformance + e2e, one combined report
+COVERAGE_HTML=htmlcov make coverage   # plus an HTML report
+```
+
+It measures `skills/unleash/` across all three suites, including every
+`kraken.py` the suites spawn as a subprocess (the conformance harness, the
+hooks, and the agent CLIs' shell tools in the e2e suite), and reports the
+missing lines of every file under 100%. It needs the `coverage` package; with
+`uv` on PATH and no `coverage` installed, it builds a throwaway venv for the run.
+It is a measurement, not a gate: no threshold, and shell scripts are not
+measured. It runs slower than `make check` (every spawned interpreter is traced).
+
 ### The agent-behavior harness (run by hand)
 
 `make test-agent` drives **real** `/kraken:unleash --once` runs (headless
