@@ -18,8 +18,7 @@ def render_next_action(env: Envelope) -> None:
         head += f" holding={env['holding']['repo']}#{env['holding']['issue']}"
     if env.get("resumed") is not None:
         head += f" resumed={str(env['resumed']).lower()}"
-    # Only when true: `bounced` is an alarm — this task is rework — and a line
-    # that says `bounced=false` on every fresh claim is a line nobody reads.
+    # Only when true: an alarm nobody would read on every fresh claim.
     if env.get("bounced"):
         head += " bounced=true"
     print(head)
@@ -27,10 +26,7 @@ def render_next_action(env: Envelope) -> None:
         print(f"  {env['detail']}")
     if env.get("pr"):
         print(f"  pr: {env['pr']}  (continue on this branch — do not open a second)")
-    # Only on a bounce, and as a COUNT: the bodies are the JSON's business, and
-    # a console line that dumped a thread would bury the verdict it sits under.
-    # An absent key on a bounced envelope is worth saying out loud — it is the
-    # one case where the agent still owes the thread a read of its own.
+    # A count, not the bodies; an absent key means the thread went unread.
     if env.get("bounced"):
         feedback = env.get("feedback")
         if feedback is None:
@@ -83,10 +79,7 @@ def _review_lines(review: list[Json]) -> list[str]:
              if review else
              "  📋 Review queue (awaiting-merge) — nothing waiting"]
     for item in review:
-        # No link is not a missing link. §8 carries the `pr` field "when there is
-        # one", so a work repo that takes no push delivers the diff on the thread
-        # — a supported delivery, and the review target IS the issue. Saying
-        # "recorded" sent the operator looking for a PR nobody ever opened.
+        # No PR is a legal delivery (§8): the diff is on the thread.
         link = (f" → {item['pr_url']}" if item["pr_url"]
                 else " → review on the thread (no PR)")
         if item["orphan"]:

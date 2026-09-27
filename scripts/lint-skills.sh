@@ -24,6 +24,9 @@ TEMPLATE="skills/unleash/task-template.yml"
 KRAKEN="skills/unleash/kraken.py"
 PKG="skills/unleash/kraken"
 WATCHER="$PKG/watch.py"
+# The held labels are spelled once, in HELD_LABELS; the lister and the claim
+# guard read that tuple rather than the strings.
+CONTRACT="$PKG/contract.py"
 LISTER="$PKG/queue.py"
 CLAIM="$PKG/claim.py"
 HEARTBEAT="$PKG/claim.py"
@@ -46,19 +49,19 @@ check_label() {
   [ -n "$missing" ] && err "label '$label' missing from:$missing"
 }
 # init creates all four; status surfaces only the three human-facing labels; the
-# lister owns the startable filter; claim guards the two held labels and writes
-# in-progress as a write-only badge (§3); escalate/deliver each swap in-progress
-# for their target; release only touches in-progress.
+# lister owns the startable filter; contract owns the two held labels; claim
+# writes in-progress as a write-only badge (§3); escalate/deliver each swap
+# in-progress for their target; release only touches in-progress.
 check_label "kraken-task"    "$SKILL" "$INIT" "$README" "$PROTOCOL" "$TEMPLATE" "$LISTER"
 check_label "in-progress"    "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER"
-check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$ESCALATE"
-check_label "awaiting-merge" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$LISTER" "$CLAIM" "$DELIVER"
+check_label "needs-decision" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$CONTRACT" "$LISTER" "$ESCALATE"
+check_label "awaiting-merge" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$CONTRACT" "$DELIVER"
 # priority:high is a scheduling preference, not a state: init upserts it, the
 # lister honors it in the startable ordering, and the docs describe that ordering.
 check_label "priority:high"  "$INIT" "$README" "$PROTOCOL" "$LISTER"
 # common typo class: labels use hyphens, never underscores
 for bad in kraken_task in_progress needs_decision awaiting_merge; do
-  grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$TEMPLATE" "$WATCHER" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER" "$HEARTBEAT" 2>/dev/null \
+  grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$TEMPLATE" "$WATCHER" "$CONTRACT" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER" "$HEARTBEAT" 2>/dev/null \
     && err "underscore variant '$bad' found (labels use hyphens)"
 done
 [ "$fail" -eq 0 ] && note "4 canonical labels + priority:high aligned across files"

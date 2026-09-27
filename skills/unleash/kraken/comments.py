@@ -21,14 +21,9 @@ MARKER_PREFIX = "<!-- kraken "
 MARKER_SUFFIX = " -->"
 MARKER_RE = re.compile(r"<!--\s*kraken\s+(\{.*?\})\s*-->")
 
-# Every marker "type" this program emits. `claim` and `heartbeat` ride the claim
-# ref's commit message; the rest head comments.
-# `note` heads a free-form worker comment and changes no machine state — it
-# exists only so the comment is recognizable as worker-authored (§4).
-# `lease-expired` heads the steal's audit comment and is also COUNTED (§6's
-# repeat-expiry guard), which is why it is a type of its own rather than a
-# `stale-claim` reason. (`requeue` is operator-only.) The lint checks each
-# against PROTOCOL.md's marker table via `kraken.py contract marker-types`.
+# Every marker "type" this program emits; the lint checks them against
+# PROTOCOL.md's table. `lease-expired` is its own type rather than a
+# `stale-claim` reason because §6 counts it.
 MARKER_TYPES = ("claim", "heartbeat", "needs-decision", "delivered",
                 "released", "stale-claim", "lease-expired", "note")
 
@@ -82,14 +77,8 @@ def task_trailer(repo: Repo, issue: Issue, worker: Worker) -> str:
 
 
 def read_body_file(path: str) -> str:
-    """Read a file the way `$(cat file)` did: content with trailing newlines
-    stripped (interior preserved).
-
-    Here rather than beside one of its callers because both halves of the
-    write surface use it — the terminal transitions compose their prose from a
-    file, and so does `note` — and this module is where a comment's raw
-    material already lives. Putting it next to either one would make the other
-    import a module it otherwise has no business knowing."""
+    """Read a file the way `$(cat file)` did: trailing newlines stripped,
+    interior preserved."""
     with open(path, encoding="utf-8") as fh:
         return fh.read().rstrip("\n")
 
@@ -106,12 +95,7 @@ def compose_comment(worker: Worker, prose: str, payload: Json) -> str:
 
 
 def compose_note(worker: Worker, prose: str) -> str:
-    """A free-form worker comment (assumptions, progress prose): the attribution
-    disclaimer, the prose, then a single non-state-changing `note` marker
-    (PROTOCOL.md §4), blank-line separated so GitHub keeps them distinct. The
-    marker is what makes the §6 requeue derivation read this as a worker comment
-    *structurally* — the disclaimer stays as human-facing attribution but is no
-    longer the arbiter. A `note` marker carries no machine state: the reconcile,
-    the requeue derivation, and validate all treat it as inert (they key on their
-    own marker types)."""
+    """A free-form worker comment. Its `note` marker changes no state; it is
+    what lets §6 recognise the comment as a worker's rather than trusting the
+    disclaimer (§4)."""
     return compose_comment(worker, prose, {"type": "note", "worker": worker})
