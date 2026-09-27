@@ -25,13 +25,14 @@ out of step. The linter enforces a lot of this mechanically.
 ## Dev setup
 
 No build, no package manager — just `bash` and `jq`. A `Makefile` fronts the
-checks. These two are token-free (no model calls, no network) and run in CI on
+checks. These are token-free (no model calls, no network) and run in CI on
 every PR:
 
 ```bash
-make test    # conformance + unit suites (native `python3 -m unittest`) — stdlib only
-make lint    # deterministic skill lint (bash scripts/lint-skills.sh)
-make check   # both of the above
+make test       # conformance + unit suites (native `python3 -m unittest`) — stdlib only
+make test-e2e   # the real Copilot CLI and Claude Code against a scripted fake model
+make lint       # deterministic skill lint (bash scripts/lint-skills.sh)
+make check      # all of the above
 ```
 
 - **`make test`** runs the native stdlib runner — two `python3 -m unittest
@@ -47,18 +48,53 @@ make check   # both of the above
   skill is exposed to: label drift across files, orphan "step N" references,
   task-template field drift, broken relative links/images, and unparseable
   shell/YAML/JSON snippets.
+- **`make test-e2e`** runs the **real** agent CLIs against a scripted fake
+  model (`tests/fake-model/model_server.py`), which speaks both wires: GitHub
+  Copilot CLI in BYOK offline mode (`COPILOT_PROVIDER_BASE_URL` +
+  `COPILOT_OFFLINE=true`, OpenAI chat completions) and Claude Code
+  (`ANTHROPIC_BASE_URL`, Anthropic Messages, with a fake key). The "model" plays
+  a fixed list of tool calls (or a scripted HTTP error), so the run is
+  deterministic and needs no credentials. Everything around the model is real:
+  `scripts/kraken-loop.sh` and the prompt and deny rules in
+  `scripts/lib-copilot-drain.sh`; the plugin loaded with `--plugin-dir` and the
+  `/kraken:unleash` slash command expanding `SKILL.md`; the CLIs' shell tools and
+  permission layers; the `hooks.json` hooks; `kraken.py` against the stub; and a
+  git work repo with a bare remote. It proves the **wiring**, not the model's
+  judgment: a whole drain to a draft PR on each CLI, Copilot's deny rules
+  blocking merge/delete/close, SessionEnd releasing only its own session's claim
+  on each CLI, and StopFailure releasing on a rate limit (Claude Code, in an
+  interactive session on a pseudo-terminal). Each CLI's module skips when that
+  CLI is not on PATH (`npm install -g @github/copilot @anthropic-ai/claude-code`);
+  CI pins both versions and sets `KRAKEN_E2E_REQUIRE=1`, so there a missing CLI
+  fails instead of skipping.
+
+### Line coverage (run by hand)
+
+```bash
+make coverage                      # unit + conformance + e2e, one combined report
+COVERAGE_HTML=htmlcov make coverage   # plus an HTML report
+```
+
+It measures `skills/unleash/` across all three suites, including every
+`kraken.py` the suites spawn as a subprocess (the conformance harness, the
+hooks, and the agent CLIs' shell tools in the e2e suite), and reports the
+missing lines of every file under 100%. It needs the `coverage` package; with
+`uv` on PATH and no `coverage` installed, it builds a throwaway venv for the run.
+It is a measurement, not a gate: no threshold, and shell scripts are not
+measured. It runs slower than `make check` (every spawned interpreter is traced).
 
 ### The agent-behavior harness (run by hand)
 
 `make test-agent` drives **real** `/kraken:unleash --once` runs (headless
-`claude -p`) against the `gh` stub and asserts on artifacts — the skill's
+`claude -p`, and the Copilot CLI drain pass) against the `gh` stub and asserts on artifacts — the skill's
 *judgment*, not just the scripts. It is slow (several model runs) and **spends
 tokens**, so it is deliberately **not** wired into any hook or CI. Run it by
 hand when you change `skills/**` or `tests/agent/**`:
 
 ```bash
-make test-agent           # on Claude Code
-make test-agent-copilot   # the same scenarios on GitHub Copilot CLI
+make test-agent           # every agent CLI (Claude Code, then Copilot CLI)
+make test-agent-claude    # only Claude Code
+make test-agent-copilot   # only GitHub Copilot CLI
 ```
 
 It uses your logged-in Claude Code subscription (or `copilot login`; no paid API

@@ -49,6 +49,9 @@ test process, so they are shared attributes, not env vars):
                  moves the `Date` header and every `committedDate` this server
                  stamps together, which is how a test puts a worker's clock out
                  of step with the one that dates the leases (PROTOCOL.md §5.1).
+  knobs.latency  seconds every request waits before it is answered — a real
+                 API's round trip, for the tests where a transition's wall-clock
+                 time is the point (a hook racing its harness's deadline).
 """
 import base64
 import hashlib
@@ -80,6 +83,7 @@ class Knobs:
         self.lock = threading.RLock()   # serializes state mutations (the CAS)
         self.fail = None                # injected-failure ERE, or None
         self.clock_offset = 0           # how far the server's clock is from ours
+        self.latency = 0                # seconds added to every response
         self._barrier_n = 0
         self._barrier = None
         self._snapshot = None
@@ -98,6 +102,10 @@ class Knobs:
         reader that subtracts the LOCAL clock instead reaches a different
         verdict the moment this is non-zero."""
         self.clock_offset = float(seconds or 0)
+
+    def set_latency(self, seconds):
+        """Delay every response by `seconds`, as a real API round trip does."""
+        self.latency = float(seconds or 0)
 
     def server_time(self):
         """Now, on the server's clock."""
@@ -589,6 +597,8 @@ class Handler(BaseHTTPRequestHandler):
         # DELETE carries a body on the contents API (the required blob sha), so
         # it is read like the write methods rather than assumed empty.
         body = self._body() if method in ("POST", "PATCH", "PUT", "DELETE") else {}
+        if self.knobs.latency:
+            time.sleep(self.knobs.latency)
         if self._log_and_maybe_fail(method, self.path, body):
             return
         parsed = urlparse(self.path)

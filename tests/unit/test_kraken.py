@@ -2508,6 +2508,72 @@ class NextActionEnvelopeTests(unittest.TestCase):
                          1700000000.0, "a timestamp we emit must read back")
 
 
+class NextActionTextTests(unittest.TestCase):
+    """`next-action --text`: the same verdict as lines a human scans. The JSON
+    is the machine contract; this pins what the console shows of it."""
+
+    def render(self, env):
+        out = StringIO()
+        with redirect_stdout(out):
+            kraken.render_next_action(env)
+        return out.getvalue().splitlines()
+
+    def execute_env(self, **extra):
+        env = kraken.next_action_envelope(
+            "execute", "acme/tasks", "env-1", issue=12, resumed=False,
+            script="/plugins/kraken.py")
+        env["brief"] = {"title": "Add greet", "goal": "Say hi\nsecond line",
+                        "acceptance": "", "notes": "", "body": ""}
+        env["lease"] = {"renew_every_seconds": 600, "expires_at": "2026-09-27T04:00:00Z",
+                        "seconds_remaining": 1200, "renew_now": False}
+        env.update(extra)
+        return env
+
+    def test_execute_shows_the_verdict_brief_lease_and_next_writes(self):
+        lines = self.render(self.execute_env())
+        self.assertEqual(lines[0], "next-action: execute issue=12 repo=acme/tasks "
+                                   "worker=env-1 resumed=false")
+        self.assertIn("  title: Add greet", lines)
+        self.assertIn("  goal: Say hi", lines, "only the goal's first line belongs on the console")
+        self.assertFalse(any(l.startswith("  acceptance:") for l in lines),
+                         "an empty acceptance must print nothing")
+        self.assertIn("  lease: renew every 600s; expires 2026-09-27T04:00:00Z (1200s left)", lines)
+        for name in ("renew", "note", "escalate", "deliver", "release"):
+            self.assertTrue(any(l.startswith("  %s: " % name) for l in lines),
+                            "then.%s missing from the text rendering" % name)
+        self.assertNotIn("bounced", lines[0], "bounced=false is noise, never printed")
+
+    def test_renew_now_is_shouted(self):
+        env = self.execute_env()
+        env["lease"]["renew_now"] = True
+        self.assertIn("(1200s left, RENEW NOW)", "\n".join(self.render(env)))
+
+    def test_a_bounce_says_so_and_counts_its_feedback(self):
+        lines = self.render(self.execute_env(bounced=True, pr="https://x/pull/3",
+                                             feedback=[{"body": "a"}, {"body": "b"}]))
+        self.assertTrue(lines[0].endswith(" bounced=true"))
+        self.assertIn("  pr: https://x/pull/3  (continue on this branch — do not open a second)", lines)
+        self.assertIn("  feedback: 2 comment(s) past the anchor", lines)
+
+    def test_a_bounce_with_unread_feedback_says_to_read_the_thread(self):
+        lines = self.render(self.execute_env(bounced=True))
+        self.assertIn("  feedback: unread — check the thread yourself", lines)
+
+    def test_blocked_names_the_held_claim_and_its_detail(self):
+        env = kraken.next_action_envelope(
+            "blocked", "acme/tasks", "env-1", reason="claim-elsewhere",
+            holding={"repo": "acme/other", "issue": "7"}, script="/plugins/kraken.py")
+        env["detail"] = "finish acme/other#7 first"
+        lines = self.render(env)
+        self.assertIn("holding=acme/other#7", lines[0])
+        self.assertIn("  finish acme/other#7 first", lines)
+
+    def test_idle_is_one_line(self):
+        env = kraken.next_action_envelope("idle", "acme/tasks", "env-1", reason="x")
+        env.pop("detail", None)
+        self.assertEqual(self.render(env), ["next-action: idle repo=acme/tasks worker=env-1"])
+
+
 class TaskBriefTests(unittest.TestCase):
     def test_sections_are_split_and_placeholders_read_as_empty(self):
         body = ("### Goal\nship it\n\n### Acceptance\nmake check\n\n"

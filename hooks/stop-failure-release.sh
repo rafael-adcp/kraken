@@ -23,6 +23,10 @@
 # recovery immediate, it is not what makes it happen. The StopFailure JSON on
 # stdin is unused — the matcher already scoped the error type.
 set -u
+# Under `claude -p` the process exits on the failed turn and signals its hooks
+# ~15ms after starting them (verified on Claude Code 2.1.283): ignore that, so
+# the hook lives long enough to stamp the flag and hand the release off.
+trap '' HUP INT TERM
 
 . "$(dirname "$0")/lib-release-claims.sh"
 
@@ -32,6 +36,8 @@ set -u
 mkdir -p "$KRAKEN_STATE" 2>/dev/null || true
 date -u +"%Y-%m-%dT%H:%M:%SZ" > "$KRAKEN_STATE/wake-retry" 2>/dev/null || true
 
-release_all_claims "usage limit"
+# Detached, like SessionEnd's: under `claude -p` the process exits on the failed
+# turn and would kill a release still in flight (see release_detached).
+release_detached release_all_claims "usage limit"
 
 exit 0

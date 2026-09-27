@@ -211,12 +211,17 @@ class KrakenConformanceTest(unittest.TestCase):
         return results
 
     def run_hook(self, hook_rel, stdin, env=None):
-        """Run a bundled bash hook (hooks/*.sh) with a JSON event on stdin."""
+        """Run a bundled bash hook (hooks/*.sh) with a JSON event on stdin.
+
+        The hooks run their release detached, so it outlives a harness's hook
+        deadline; KRAKEN_HOOK_WAIT=1 makes them wait for it here, so a test can
+        assert on the queue as soon as the hook returns. The detached path
+        itself is pinned by test_hook_release_detached.py."""
         self._apply_knobs(dict(env or {}))
         proc = subprocess.run(
             ["bash", os.path.join(ROOT, hook_rel)],
             cwd=ROOT,
-            env=self.base_env(env),
+            env=self.base_env({"KRAKEN_HOOK_WAIT": "1", **(env or {})}),
             input=stdin,
             capture_output=True,
             text=True,
