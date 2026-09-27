@@ -117,7 +117,8 @@ startable task, with no session to watch.
 > Each command in context — environments, permissions, parallelism — is
 > [the full walkthrough](#the-full-walkthrough) below.
 
-**Requirements**: `git`, and a `gh` CLI from June 2026 or later — the dependency
+**Requirements**: `git`, `python3` (every transition runs through the bundled
+`kraken.py`), and a `gh` CLI from June 2026 or later — the dependency
 flags (`--add-blocked-by` / `--blocked-by`) shipped then. Older `gh` still works for
 everything else; set dependencies via the Relationships sidebar instead.
 
@@ -304,6 +305,11 @@ reuses it through [`AGENTS.md`](AGENTS.md) with **no deltas at all**.
    /kraken:unleash OWNER/tasks --worker-name data-env-2 --project your_project_2
    ```
 
+   On **GitHub Copilot CLI**, launch each one from its work repo with
+   `scripts/kraken-copilot.sh` (interactive) or `scripts/kraken-loop.sh`
+   (headless) and the same three arguments — see the [agent cheat
+   sheet](#agent-cheat-sheet).
+
    Workers deliver on **work branches + draft PRs** — never the default branch,
    never a merge. Branches follow each work repo's own naming convention (CI
    pipelines key on those patterns); traceability comes from commit trailers
@@ -334,17 +340,17 @@ queue, and gives up with exit `20` after 60 consecutive failed reads
 live one that wakes nobody.
 
 Want a bounded run instead — a scheduled container, a one-off drain? Pass
-`--once`: drain and exit. Environments without the Monitor tool fall back to
-`--once` automatically; there, a dumb timer (`/loop 15m /kraken:unleash ...
---once`) still works — it just costs one full LLM turn per fire even when the
-queue is empty.
+`--once`: drain and exit. A harness with neither the Monitor tool nor background
+commands that wake the agent on exit falls back to `--once` automatically; in
+Claude Code, a dumb timer (`/loop 15m /kraken:unleash ... --once`) still works —
+it just costs one full LLM turn per fire even when the queue is empty.
 
 Inside an interactive **GitHub Copilot CLI** session, `/kraken:unleash` stays in
 ambush too: Copilot's background shell wakes the agent when a command exits, so
 the worker arms `kraken.py watch --exit-on-wake` — a watcher that exits on its
 first wake and is re-armed after each drain — with the same zero-token idle.
 
-For the GitHub Copilot CLI worker (no Monitor tool), the shipped
+For a **headless** Copilot CLI worker — no session to talk to — the shipped
 [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) is the ready-made ambush loop:
 launch it from the work repo's checkout (or point `--work-dir` at it) and it polls
 the queue outside the model, invoking `copilot` in that work repo only when a task
@@ -391,6 +397,25 @@ everything else:
 
 Everything except launching workers works from your phone — file tasks on the
 commute, answer decisions from the couch, merge from anywhere.
+
+### Agent cheat sheet
+
+The same worker on both harnesses, side by side. `$KRAKEN` is your kraken
+checkout; run every worker command from the work repo's checkout (or pass
+`--work-dir`).
+
+| You want to...                 | Claude Code                                                                  | GitHub Copilot CLI                                                                                   |
+| ------------------------------ | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Install the plugin             | `/plugin marketplace add rafael-adcp/kraken`<br>`/plugin install kraken@kraken` | Same two commands, inside `copilot`                                                                  |
+| Stand up the queue (once)      | `/kraken:init OWNER/tasks --project my_app`                                  | Same, inside `copilot`                                                                               |
+| Pre-allow unattended work      | Allowlist in the work repo's `.claude/settings.json` (walkthrough step 3)    | Nothing to write — both scripts pass `--allow-all-tools --no-ask-user` plus the deny rules          |
+| Launch a worker you can talk to | `/kraken:unleash OWNER/tasks --worker-name env-1 --project my_app`          | `$KRAKEN/scripts/kraken-copilot.sh OWNER/tasks --worker-name env-1 --project my_app`                |
+| Run with no session to watch   | —                                                                            | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app`                   |
+| Drain once and exit            | Append `--once` to `/kraken:unleash`                                         | Append `--once` to either script                                                                     |
+| Idle on an empty queue         | Automatic — Monitor watcher, zero tokens                                     | Automatic — `watch --exit-on-wake`, re-armed per drain (interactive); polling outside the model (loop) |
+| See the queues                 | `/kraken:status OWNER/tasks`                                                 | Same, inside `copilot`                                                                               |
+| Stop a worker                  | Say "stop", or close the session                                             | Same (interactive); Ctrl-C (loop)                                                                    |
+| Resume after a usage limit     | Nothing — `StopFailure` releases the claim, the watcher retries after reset  | Nothing (loop); send any message after the reset (interactive)                                       |
 
 ## Witness the Depths
 
@@ -592,13 +617,13 @@ task bodies are untrusted input to an agent that can push branches.
 <summary><b>Does anything survive closing the terminal?</b></summary>
 
 The queue does — it's GitHub Issues. The worker doesn't: `/kraken:unleash` and
-its watcher live inside a Claude Code session. But a **graceful** exit now
+its watcher live inside a Claude Code (or Copilot CLI) session. But a **graceful** exit now
 self-heals: a bundled `SessionEnd` hook fires when you close the terminal or
 `/exit`, and if the worker was still holding a claim it runs `kraken.py release`
 for you — `released: <worker>` / `reason: session ended`, then drops `in-progress`,
 so the task is back on the queue in seconds instead of at the end of its lease.
 It frees only the claims **that session** made (the claim records its Claude Code
-session), so closing some other `claude` window on the same machine never takes
+or Copilot CLI session), so closing some other `claude` or `copilot` window on the same machine never takes
 a live task from a worker. That covers a graceful end only; a usage-limit pause never fires `SessionEnd`
 either, but its own `StopFailure` hook releases the claim there (see the limit
 FAQ above). A hard kill / crash / power loss fires neither hook — and it does not
