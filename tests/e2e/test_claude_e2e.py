@@ -152,10 +152,15 @@ class PluginHookTests(ClaudeE2ETest):
         self.assertTrue(os.path.exists(self.claim_state_file(WORKER)))
 
     def test_stop_failure_headless_releases_before_the_process_exits(self):
-        # Under `claude -p` a rate-limited turn ends the process at once; the
-        # detached release must land anyway.
+        # Under `claude -p` a rate-limited turn ends the process at once, and
+        # BOTH hooks fire: StopFailure, then SessionEnd, each releasing
+        # detached. A claim made in the session would be freed by whichever
+        # lands first, proving nothing about StopFailure — so the claim here is
+        # made outside the session (no session recorded), which SessionEnd
+        # leaves alone and only StopFailure (account-wide) releases.
+        self.assertEqual(self.kraken("claim", COORD, ISSUE, WORKER).rc, 0)
         self.at_real_api_speed()
-        proc, requests = self.unleash([{"bash": NEXT_ACTION}, RATE_LIMIT])
+        proc, requests = self.unleash([RATE_LIMIT])
         self.assertNotEqual(proc.returncode, 0, "a rate-limited turn must not exit clean" + self.detail())
         self.assertIn("429", self.transcript)
         self.assert_claimed_then_released("usage limit", requests)

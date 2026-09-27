@@ -64,7 +64,9 @@ class DetachedHookReleaseTests(KrakenConformanceTest):
     def wait_released(self, issue, timeout=30):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if not self.has_label(issue, "in-progress") and not self.claim_ref_exists(issue):
+            # The state file goes last: `release` removes it after the lock.
+            if (not self.has_label(issue, "in-progress") and not self.claim_ref_exists(issue)
+                    and not os.path.isfile(self.claim_state_file("w1"))):
                 return True
             time.sleep(0.2)
         return False

@@ -8,3 +8,6 @@ graphify-out/
 # Per-clone Claude Code settings. The shared .claude/settings.json IS checked in;
 # this one is personal by convention and must stay out of a public repo.
 .claude/settings.local.json
+
+# `COVERAGE_HTML=htmlcov make coverage`
+htmlcov/

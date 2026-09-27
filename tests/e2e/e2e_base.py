@@ -256,10 +256,12 @@ class E2ETest(KrakenConformanceTest):
 
     def wait_released(self, timeout=30):
         """The hooks release DETACHED, so the release may still be landing
-        after the CLI exits: wait for the lock and the label to go."""
+        after the CLI exits: wait for all of it — the label, the lock, and the
+        local claim state file, which `release` removes last."""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if not self.has_label(ISSUE, "in-progress") and not self.claim_ref_exists(ISSUE):
+            if (not self.has_label(ISSUE, "in-progress") and not self.claim_ref_exists(ISSUE)
+                    and not os.path.exists(self.claim_state_file(WORKER))):
                 return
             time.sleep(0.2)
 
