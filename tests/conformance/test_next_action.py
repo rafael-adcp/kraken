@@ -68,6 +68,20 @@ class NextActionTests(KrakenConformanceTest):
                           "then.%s does not carry a quoted absolute path: %r"
                           % (name, command))
 
+    def test_text_renders_the_same_verdict_for_a_human(self):
+        # --text is the operator's view of the same call: it still claims, and
+        # prints the verdict and the next writes as lines instead of JSON.
+        self.mk_issue(7, "oldest task", "kraken-task", "project:app")
+        self.mk_body(7, "### Goal\nship it\n\n### Acceptance\nmake check passes")
+        r = self.kraken("next-action", "--text", "acme/tasks", "app", "w1")
+        self.assertEqual(r.rc, 0, r.err)
+        self.assertEqual(r.lines[0], "next-action: execute issue=7 repo=acme/tasks "
+                                     "worker=w1 resumed=false")
+        self.assertIn("  goal: ship it", r.lines)
+        self.assertIn("  acceptance: make check passes", r.lines)
+        self.assertTrue(any(l.startswith("  deliver: ") for l in r.lines))
+        self.assertTrue(self.has_label(7, "in-progress"), "--text must still claim")
+
     def test_resume_does_not_reclaim(self):
         self.mk_issue(7, "a resumable task", "kraken-task", "project:app")
         self.mk_body(7, "### Goal\nship it")
