@@ -30,7 +30,7 @@ every PR:
 
 ```bash
 make test       # conformance + unit suites (native `python3 -m unittest`) — stdlib only
-make test-e2e   # the real Copilot CLI against a scripted fake model (BYOK, offline)
+make test-e2e   # the real Copilot CLI and Claude Code against a scripted fake model
 make lint       # deterministic skill lint (bash scripts/lint-skills.sh)
 make check      # all of the above
 ```
@@ -48,19 +48,25 @@ make check      # all of the above
   skill is exposed to: label drift across files, orphan "step N" references,
   task-template field drift, broken relative links/images, and unparseable
   shell/YAML/JSON snippets.
-- **`make test-e2e`** runs the **real** GitHub Copilot CLI in BYOK offline mode
-  (`COPILOT_PROVIDER_BASE_URL` + `COPILOT_OFFLINE=true`) against a scripted,
-  OpenAI-compatible fake model (`tests/fake-model/model_server.py`). The "model"
-  plays a fixed list of tool calls, so the run is deterministic and needs no
-  credentials. Everything around the model is real: `scripts/kraken-loop.sh`, the
-  prompt and deny rules in `scripts/lib-copilot-drain.sh`, Copilot's shell tool
-  and permission layer, the plugin's `hooks.json` (SessionEnd), `kraken.py`
-  against the stub, and a git work repo with a bare remote. It proves the
-  **wiring**, not the model's judgment: a whole drain to a draft PR, the deny
-  rules blocking merge/delete/close, and SessionEnd releasing only its own
-  session's claim. It needs `copilot` on PATH (`npm install -g @github/copilot`)
-  and skips without it; CI pins the CLI version and sets `KRAKEN_E2E_REQUIRE=1`,
-  so there a missing CLI fails instead of skipping.
+- **`make test-e2e`** runs the **real** agent CLIs against a scripted fake
+  model (`tests/fake-model/model_server.py`), which speaks both wires: GitHub
+  Copilot CLI in BYOK offline mode (`COPILOT_PROVIDER_BASE_URL` +
+  `COPILOT_OFFLINE=true`, OpenAI chat completions) and Claude Code
+  (`ANTHROPIC_BASE_URL`, Anthropic Messages, with a fake key). The "model" plays
+  a fixed list of tool calls (or a scripted HTTP error), so the run is
+  deterministic and needs no credentials. Everything around the model is real:
+  `scripts/kraken-loop.sh` and the prompt and deny rules in
+  `scripts/lib-copilot-drain.sh`; the plugin loaded with `--plugin-dir` and the
+  `/kraken:unleash` slash command expanding `SKILL.md`; the CLIs' shell tools and
+  permission layers; the `hooks.json` hooks; `kraken.py` against the stub; and a
+  git work repo with a bare remote. It proves the **wiring**, not the model's
+  judgment: a whole drain to a draft PR on each CLI, Copilot's deny rules
+  blocking merge/delete/close, SessionEnd releasing only its own session's claim
+  on each CLI, and StopFailure releasing on a rate limit (Claude Code, in an
+  interactive session on a pseudo-terminal). Each CLI's module skips when that
+  CLI is not on PATH (`npm install -g @github/copilot @anthropic-ai/claude-code`);
+  CI pins both versions and sets `KRAKEN_E2E_REQUIRE=1`, so there a missing CLI
+  fails instead of skipping.
 
 ### The agent-behavior harness (run by hand)
 
