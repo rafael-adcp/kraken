@@ -9,9 +9,9 @@ import re
 import sys
 from typing import Callable, Sequence
 
-from .contract import EXIT_OK, EXIT_USAGE, PROTOCOL_VERSION, protocol_section
+from .contract import EXIT_OK, EXIT_TRANSPORT, EXIT_USAGE, PROTOCOL_VERSION, protocol_section
 from .comments import MARKER_TYPES, disclaimer, task_trailer
-from .transport import Api
+from .transport import Api, TransportError
 from .lease import (
     LEASE_DEFAULT_TTL_SECONDS, lease_renew_seconds, lease_ttl_seconds
 )
@@ -250,4 +250,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Built once here, so a test can hand in a stand-in.
     if not getattr(args, "api", None):
         args.api = Api(getattr(args, "repo", "") or "")
-    return args.func(args)
+    try:
+        return args.func(args)
+    except TransportError as failed:
+        # Every command reports its own faults; this is the backstop, so a
+        # missed one is still exit 20 and never a traceback.
+        print(f"kraken: gh-failure stage={failed.stage or 'unknown'}",
+              file=sys.stderr)
+        return EXIT_TRANSPORT

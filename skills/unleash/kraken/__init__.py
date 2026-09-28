@@ -53,9 +53,10 @@ from .comments import (
     parse_marker, read_body_file, task_trailer
 )
 from .transport import (
-    Api, DEFAULT_API_URL, GRAPHQL_ALIAS_CHUNK, HTTP_TIMEOUT_SECONDS, PER_PAGE,
-    STATUS_NETWORK_FAILURE, api_base, comment_total_of, github_token,
-    parse_http_date, quote_path
+    Api, DEFAULT_API_URL, GRAPHQL_ALIAS_CHUNK, HTTP_TIMEOUT_SECONDS, IssueView,
+    PER_PAGE, STATUS_NETWORK_FAILURE, TransportError, UNREADABLE_ISSUE,
+    api_base, comment_total_of, github_token, parse_http_date, quote_path,
+    stage
 )
 from .lease import (
     LEASE_DEFAULT_TTL_SECONDS, LEASE_EXPIRY_ESCALATE, LEASE_RENEW_DIVISOR,
@@ -66,8 +67,8 @@ from .lease import (
     write_claim_state
 )
 from .refs import (
-    CLAIM_REF_PREFIX, EMPTY_TREE_SHA, KRAKEN_REF_NAMESPACE, Refs, claim_ref,
-    kraken_ref_items, parse_claim_ref
+    Advance, CLAIM_REF_PREFIX, EMPTY_TREE_SHA, Hold, KRAKEN_REF_NAMESPACE, Refs,
+    claim_ref, kraken_ref_items, parse_claim_ref
 )
 from .state import (
     NO_RECORD, QUEUED, RECORD_STATES, STATE_REF_PREFIX, States, TaskState,
@@ -75,7 +76,8 @@ from .state import (
     state_ref, state_ref_shas, state_view
 )
 from .queue import (
-    DEPENDS_ON_RE, NO_RESPONSE_PLACEHOLDER, Candidate, Queue, QueueRead, Task,
+    DEPENDS_ON_RE, NO_RESPONSE_PLACEHOLDER, PROJECT_CHECK_FAILED, Candidate,
+    ProjectCheck, Queue, QueueRead, Task,
     claim_meta_of, cmd_list_startable, is_empty_section, missing_requirements,
     section_body, section_text
 )
@@ -84,7 +86,7 @@ from .render import (
 )
 from .reconcile import (
     Migrate, OrphanLock, OrphanState, REPAIRS, RECONCILER_WORKER, ReAnchor,
-    Reclaim, Repair, RepairFailed, apply_reconcile, cmd_reap,
+    Reclaim, Repair, apply_reconcile, cmd_reap,
     project_reconcile, reconcile_pass, reconcile_plan, stale_claim_body
 )
 from .claim import (

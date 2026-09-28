@@ -19,13 +19,13 @@ from .contract import (
     EXIT_UNKNOWN_PROJECT, EXIT_USAGE, HELD_LABELS, Issue, Json, Worker, diag
 )
 from .comments import compose_comment, compose_note, read_body_file
-from .transport import Api, comment_total_of
+from .transport import Api, TransportError
 from .lease import (
     Lease, NO_LEASE, format_age, lease_ttl_seconds, write_claim_state
 )
 from .refs import Refs
 from .state import NO_RECORD, States, TaskState, holding_state
-from .queue import Queue, QueueRead
+from .queue import PROJECT_CHECK_FAILED, Queue, QueueRead
 from .reconcile import apply_reconcile, project_reconcile, reconcile_plan
 
 # --- subcommand: claim -------------------------------------------------------
@@ -62,15 +62,15 @@ class ClaimAttempt:
     Each phase answers an exit code to stop with, or None to carry on.
 
     A drain hands in the `record` and `lease` its queue read already saw; a
-    named claim has neither, so it passes `probe_lease` and `ensure_clear` and
-    the guard reads them itself — after the cheap label check, so a held task
+    named claim has neither, so it passes `probe` and `ensure_clear` and the
+    guard reads them itself — after the cheap label check, so a held task
     still refuses in one read. The lease decides the CAS's starting rung: a
     steal is not a different algorithm, just the generation above an expired
     holder."""
 
     def __init__(self, api: Api, issue: Issue, worker: Worker, *,
-                 record: TaskState | None = None, lease: Lease = NO_LEASE,
-                 ttl: int | None = None, probe_lease: bool = False,
+                 record: TaskState = NO_RECORD, lease: Lease = NO_LEASE,
+                 ttl: int | None = None, probe: bool = False,
                  ensure_clear: Callable[[], int | None] | None = None):
         self.api = api
         self.refs = Refs(api)
@@ -80,7 +80,7 @@ class ClaimAttempt:
         self.record = record
         self.lease = lease
         self.ttl = lease_ttl_seconds(ttl)
-        self.probe_lease = probe_lease
+        self.probe = probe
         self.ensure_clear = ensure_clear or (lambda: None)
         # Decided by the guard, consumed by the projection.
         self.steal = NO_LEASE
@@ -99,18 +99,19 @@ class ClaimAttempt:
     def _guard(self) -> int | None:
         """Refuse a held task with zero writes (§5.2 step 3). One issue fetch
         gives both the live comment count and the no-record label fallback."""
-        obj = self.api.issue_detail(self.issue)
-        total = None if obj is None else comment_total_of(obj)
-        if obj is None or total is None:
-            diag(f"claim: gh-failure issue={self.issue} stage=guard")
-            return EXIT_TRANSPORT
-        label_names = [lbl.get("name", "") for lbl in obj.get("labels", [])]
+        try:
+            detail = self.api.issue_detail(self.issue)
+        except TransportError:
+            return self._failed("guard")
+        total = detail.comment_total
+        if total is None:
+            return self._failed("guard")
+        label_names = detail.labels
 
-        if self.record is None:
+        if self.probe:
             self.record = self.states.of(self.issue)
             if self.record.unknown:
-                diag(f"claim: gh-failure issue={self.issue} stage=record")
-                return EXIT_TRANSPORT
+                return self._failed("record")
         holding = holding_state(self.record, total, label_names)
         if holding is not None:
             diag(f"claim: held issue={self.issue} label={holding}")
@@ -118,11 +119,10 @@ class ClaimAttempt:
         code = self.ensure_clear()
         if code is not None:
             return code
-        if self.probe_lease and not self.lease.present:
+        if self.probe:
             self.lease = probe_lease_state(self.api, self.issue, self.ttl)
             if self.lease.unknown:
-                diag(f"claim: gh-failure issue={self.issue} stage=lease")
-                return EXIT_TRANSPORT
+                return self._failed("lease")
 
         # The read must refuse a live lease, because the CAS cannot: creating
         # the generation above it would SUCCEED and take the task from its
@@ -138,23 +138,19 @@ class ClaimAttempt:
 
     def _take(self) -> int | None:
         """The CAS: create the generation above whatever was observed."""
-        outcome, gen, _sha = self.refs.advance(
-            self.issue, self.lease.gen,
-            {"type": "claim", "worker": self.worker})
-        if outcome.startswith("fail"):
-            diag(f"claim: gh-failure issue={self.issue} stage={outcome[len('fail-'):]}")
-            return EXIT_TRANSPORT
-        if outcome == "lost":
-            # A 422 on our own in-flight generation (a retry after a network
-            # failure, §5) is not a loss. An unreadable owner counts as not ours.
-            if self.refs.owner(self.issue) != self.worker:
-                diag(f"claim: lost-cas issue={self.issue} — another worker holds the claim ref")
-                return EXIT_LOST
+        step = self.refs.advance(self.issue, self.lease.gen,
+                                 {"type": "claim", "worker": self.worker})
+        if step.failed:
+            return self._failed(step.stage)
+        # A 422 on our own in-flight generation (a retry after a network
+        # failure, §5) is not a loss. An unreadable owner counts as not ours.
+        if step.lost and self.refs.owner(self.issue) != self.worker:
+            diag(f"claim: lost-cas issue={self.issue} — another worker holds the claim ref")
+            return EXIT_LOST
 
         # The generations we climbed past are garbage now.
-        if gen is not None:
-            self.refs.drop(self.issue,
-                             self.lease.superseded_below(gen))
+        if step.won:
+            self.refs.drop(self.issue, self.lease.superseded_below(step.gen))
         return None
 
     def _project(self) -> int | None:
@@ -169,8 +165,7 @@ class ClaimAttempt:
             if not self.api.post_comment(
                     self.issue, lease_expired_body(self.worker, self.steal)):
                 return self._held("comment")
-            record = self.record if self.record is not None else NO_RECORD
-            if not self.states.write(self.issue, record.stolen(self.worker)):
+            if not self.states.write(self.issue, self.record.stolen(self.worker)):
                 return self._held("record")
         for stale in self.stale_held:
             if not self.api.swap_labels(self.issue, remove=stale):
@@ -185,6 +180,11 @@ class ClaimAttempt:
             return self._held("comment")
         return None
 
+    def _failed(self, stage: str) -> int:
+        """A read or the CAS did not land: nothing is ours yet, so re-check."""
+        diag(f"claim: gh-failure issue={self.issue} stage={stage}")
+        return EXIT_TRANSPORT
+
     def _held(self, stage: str) -> int:
         """A projection write that did not land after the CAS won: the claim is
         ours, so exit 20 means re-check, not re-claim."""
@@ -193,13 +193,12 @@ class ClaimAttempt:
 
 
 def _claim_once(api: Api, issue: Issue, worker: Worker,
-                record: TaskState | None = None, lease: Lease = NO_LEASE,
-                ttl: int | None = None, probe_lease: bool = False,
+                record: TaskState = NO_RECORD, lease: Lease = NO_LEASE,
+                ttl: int | None = None, probe: bool = False,
                 ensure_clear: Callable[[], int | None] | None = None) -> int:
     """The claim sequence as a call, injectable as a drain's `claim_step`."""
     return ClaimAttempt(api, issue, worker, record=record, lease=lease,
-                        ttl=ttl, probe_lease=probe_lease,
-                        ensure_clear=ensure_clear).run()
+                        ttl=ttl, probe=probe, ensure_clear=ensure_clear).run()
 
 
 def refuse_second_claim(read: QueueRead, worker: Worker,
@@ -242,14 +241,11 @@ def refused_line(worker: Worker, held: Issue) -> str:
 
 
 def open_claim_of(api: Api, worker: Worker, issue: Issue | str | None = None,
-                  ttl: int | None = None) -> tuple[bool, Issue | None]:
+                  ttl: int | None = None) -> Issue | None:
     """`refuse_second_claim` for a caller with no queue read, decided from the
-    ladder alone: `(ok, held)`, `ok` False only on transport failure. Two
-    batched calls plus one issue fetch per claim found."""
-    got = Queue(api).lease_view(ttl=ttl)
-    if got is None:
-        return (False, None)
-    leases, _commit_meta, state_shas = got
+    ladder alone: the issue this worker already holds, or None when it is
+    clear. Two batched calls plus one issue fetch per claim found."""
+    leases, _commit_meta, state_shas = Queue(api).lease_view(ttl=ttl)
 
     for held, lease in sorted(leases.items()):
         if not lease.held_by(worker):
@@ -257,31 +253,29 @@ def open_claim_of(api: Api, worker: Worker, issue: Issue | str | None = None,
         # A re-claim of the same issue is permitted, and needs no fetch.
         if issue is not None and str(held) == str(issue):
             continue
-        obj = api.issue_detail(held)
-        if obj is None:
-            return (False, None)
-        labels = {lbl.get("name", "") for lbl in obj.get("labels", [])}
-        if str(obj.get("state", "")).upper() != "OPEN" or "kraken-task" not in labels:
+        detail = api.issue_detail(held)
+        if not detail.open or "kraken-task" not in detail.labels:
             continue                    # left the queue: moot, and no record to read
         record = States(api).at(state_shas[held]) if held in state_shas else NO_RECORD
         if record.unknown:
-            return (False, None)
-        if claim_is_moot(record, comment_total_of(obj), labels):
+            raise TransportError()
+        if claim_is_moot(record, detail.comment_total, detail.labels):
             continue
         diag(refused_line(worker, held))
-        return (True, held)
-    return (True, None)
+        return held
+    return None
 
 
 def cmd_claim(args: argparse.Namespace) -> int:
     def ensure_clear() -> int | None:
-        ok, held = open_claim_of(args.api, args.worker, args.issue)
-        if not ok:
+        try:
+            held = open_claim_of(args.api, args.worker, args.issue)
+        except TransportError:
             diag("claim: gh-failure stage=lease")
             return EXIT_TRANSPORT
-        return EXIT_NOT_CLEAR if held is not None else None
+        return None if held is None else EXIT_NOT_CLEAR
 
-    return _claim_once(args.api, args.issue, args.worker, probe_lease=True,
+    return _claim_once(args.api, args.issue, args.worker, probe=True,
                        ensure_clear=ensure_clear)
 
 
@@ -374,15 +368,19 @@ class Drain:
     def _preflight(self) -> Acquisition | None:
         # Before any read or write: a worker scoped to a label the repo does not
         # carry is deaf, not idle — it would report an empty queue forever.
-        ok, message = self.queue.verify_project(self.project)
-        if ok:
+        try:
+            check = self.queue.check_project(self.project)
+        except TransportError:
+            return self._transport(PROJECT_CHECK_FAILED)
+        if check.carried:
             return None
-        diag(message)
-        return NoClaim(EXIT_TRANSPORT if ok is None else EXIT_UNKNOWN_PROJECT)
+        diag(check.refusal)
+        return NoClaim(EXIT_UNKNOWN_PROJECT)
 
     def _read(self) -> Acquisition | None:
-        self.read = self.queue.read(ttl=self.ttl)
-        if self.read is None:
+        try:
+            self.read = self.queue.read(ttl=self.ttl)
+        except TransportError:
             return self._transport("claim-next: gh-failure stage=list")
         return None
 
@@ -398,15 +396,18 @@ class Drain:
         plan = reconcile_plan(read.tasks, read.leases, read.states)
         if not plan:
             return None
-        if apply_reconcile(self.api, plan, self.worker) is None:
+        try:
+            apply_reconcile(self.api, plan, self.worker)
+        except TransportError:
             return self._transport(
                 "claim-next: gh-failure stage=reconcile — state unknown, re-check")
         project_reconcile(plan, read.tasks, read.leases, read.states)
         return None
 
     def _claim_first_startable(self) -> Acquisition:
-        rows = self.queue.candidates(self.project, read=self.read)
-        if rows is None:
+        try:
+            rows = self.queue.candidates(self.project, read=self.read)
+        except TransportError:
             return self._transport("claim-next: gh-failure stage=list")
         for cand in rows:  # priority-first, then FIFO
             if not cand.startable:
@@ -443,22 +444,20 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
     so a renewal and a steal race on the same ref and the loser is told."""
     api, issue, worker, message = args.api, args.issue, args.worker, args.message
     refs = Refs(api)
-    lost, head, refusal = refs.hold(issue, worker)
-    if lost is not None:
-        diag(f"heartbeat: {refusal}")
-        return lost
-    outcome, gen, _sha = refs.advance(
-        issue, head.gen,
-        {"type": "heartbeat", "worker": worker, "msg": message},
-    )
-    if outcome.startswith("fail"):
-        diag(f"heartbeat: gh-failure issue={issue} stage={outcome[len('fail-'):]}")
+    hold = refs.hold(issue, worker)
+    if hold.refused:
+        diag(f"heartbeat: {hold.reason}")
+        return hold.code
+    step = refs.advance(issue, hold.head.gen,
+                        {"type": "heartbeat", "worker": worker, "msg": message})
+    if step.failed:
+        diag(f"heartbeat: gh-failure issue={issue} stage={step.stage}")
         return EXIT_TRANSPORT
-    if outcome == "lost":
+    if step.lost:
         diag(f"heartbeat: lost-lease issue={issue} — another worker took the "
              "lease while this one was silent")
         return EXIT_LOST
-    refs.drop(issue, head.superseded_below(gen))
+    refs.drop(issue, hold.head.superseded_below(step.gen))
     diag(f"heartbeat: renewed issue={issue} worker={worker}")
     return EXIT_OK
 

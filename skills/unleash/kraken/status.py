@@ -13,7 +13,7 @@ from typing import Callable, Sequence
 from .contract import (
     CommitMeta, EXIT_OK, EXIT_TRANSPORT, Epoch, Json
 )
-from .transport import Api
+from .transport import Api, TransportError, stage
 from .lease import Lease
 from .state import TaskState
 from .queue import Queue, QueueRead, Task, claim_meta_of
@@ -35,17 +35,14 @@ def parse_github_pr_url(pr_url: str) -> tuple[str, str, str] | None:
     return m.group(1), m.group(2), m.group(3)
 
 
-def pr_is_merged(api: Api, pr_url: str) -> bool | None:
+def pr_is_merged(api: Api, pr_url: str) -> bool:
     """Whether a delivery PR is merged. False also for a URL this cannot check
-    ("not confirmed", so a non-GitHub delivery never breaks status); None only
-    on a transport failure."""
+    ("not confirmed", so a non-GitHub delivery never breaks status)."""
     parts = parse_github_pr_url(pr_url)
     if parts is None:
         return False
     owner, name, number = parts
     data = api.json("GET", f"/repos/{owner}/{name}/pulls/{number}")
-    if data is None:
-        return None
     return (bool(data.get("merged_at")) or bool(data.get("merged"))
             or str(data.get("state", "")).upper() == "MERGED")
 
@@ -67,19 +64,18 @@ def queue_hygiene(tasks: Sequence[Task], project: str = "") -> list[Json]:
 
 class StatusReport:
     """The operator console's report, computed from one queue read. A failed
-    PR or label read makes it None, so status exits 20 rather than report a
-    queue it did not see. `pr_merged` is injectable for tests."""
+    PR or label read raises, so status exits 20 rather than report a queue it
+    did not see. `pr_merged` is injectable for tests."""
 
     def __init__(self, api: Api, project: str, now: Epoch, *,
-                 pr_merged: Callable[[str], bool | None] | None = None):
+                 pr_merged: Callable[[str], bool] | None = None):
         self.api = api
         self.project = project
         self.now = now
         self.pr_merged = pr_merged or (lambda url: pr_is_merged(api, url))
 
-    def of(self, read: QueueRead) -> Json | None:
-        """The report dict, or None on any transport failure inside it
-        (propagated by the caller as exit 20)."""
+    def of(self, read: QueueRead) -> Json:
+        """The report dict."""
         # Unfiltered on purpose: see `queue_hygiene`.
         hygiene = queue_hygiene(read.tasks, self.project)
         review, decision, in_flight = [], [], []
@@ -88,10 +84,7 @@ class StatusReport:
             # As a worker reads it (§3.1): a requeued task leaves these lists.
             holding = task.holding(read.states)
             if holding == "awaiting-merge":
-                row = self._reviewed(task, task.record(read.states))
-                if row is None:
-                    return None
-                review.append(row)
+                review.append(self._reviewed(task, task.record(read.states)))
             elif holding == "needs-decision":
                 decision.append({"number": task.number, "title": task.title})
             elif task.number in read.leases:
@@ -99,8 +92,6 @@ class StatusReport:
                     task, read.leases[task.number], read.commit_meta))
 
         projects = self._projects()
-        if projects is None:
-            return None
         return {
             "repo": self.api.repo,
             "project": self.project or None,
@@ -120,17 +111,14 @@ class StatusReport:
             tasks = [t for t in tasks if self.project in t.projects]
         return sorted(tasks, key=lambda t: (t.created, t.number))
 
-    def _reviewed(self, task: Task, record: TaskState) -> Json | None:
+    def _reviewed(self, task: Task, record: TaskState) -> Json:
         """One awaiting-merge row; a merged PR on a still-open task makes it an
-        orphan. None when the PR read fails."""
+        orphan."""
         pr_url = record.pr
         orphan = False
         merge_state_unknown = False
         if pr_url:
-            merged = self.pr_merged(pr_url)
-            if merged is None:
-                return None
-            orphan = bool(merged)
+            orphan = bool(self.pr_merged(pr_url))
             # A non-GitHub delivery is never an orphan, but say it went unchecked.
             merge_state_unknown = parse_github_pr_url(pr_url) is None
         return {"number": task.number, "title": task.title,
@@ -147,7 +135,7 @@ class StatusReport:
                 "heartbeat_age_seconds": lease.age, "heartbeat_msg": msg,
                 "stale": lease.expired}
 
-    def _projects(self) -> list[str] | None:
+    def _projects(self) -> list[str]:
         """The launch recon: the scoped project, or every configured one."""
         return [self.project] if self.project else Queue(self.api).projects()
 
@@ -155,15 +143,13 @@ class StatusReport:
 def cmd_status(args: argparse.Namespace) -> int:
     api, project = args.api, args.project
     # The read comes first: the server's clock is only known after a response.
-    read = Queue(api).read()
-    if read is None:
-        print("status: gh-failure stage=list", file=sys.stderr)
-        return EXIT_TRANSPORT
-    now = api.server_now()
-
-    report = StatusReport(api, project, now).of(read)
-    if report is None:
-        print("status: gh-failure stage=read", file=sys.stderr)
+    try:
+        with stage("list"):
+            read = Queue(api).read()
+        with stage("read"):
+            report = StatusReport(api, project, api.server_now()).of(read)
+    except TransportError as failed:
+        print(f"status: gh-failure stage={failed.stage}", file=sys.stderr)
         return EXIT_TRANSPORT
 
     if args.json:

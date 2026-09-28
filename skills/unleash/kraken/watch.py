@@ -11,18 +11,16 @@ import time
 from typing import Any, Callable
 
 from .contract import EXIT_TRANSPORT, EXIT_UNKNOWN_PROJECT, Epoch
-from .transport import Api
+from .transport import Api, TransportError
 from .lease import state_dir, wake_retry_mtime
-from .queue import Queue
+from .queue import PROJECT_CHECK_FAILED, Queue
 
 # --- subcommand: watch -------------------------------------------------------
 
-def snapshot_state(api: Api, project: str) -> str | None:
+def snapshot_state(api: Api, project: str) -> str:
     """The queue snapshot list-startable emits in --snapshot mode, via the same
-    Queue.candidates. Returns the snapshot text, or None on transport failure."""
+    Queue.candidates."""
     rows = Queue(api).candidates(project)
-    if rows is None:
-        return None
     return "\n".join(
         f"{c.number}:{c.state}" for c in sorted(rows, key=lambda c: c.number)
     )
@@ -139,9 +137,12 @@ class Watcher:
         # Retries are owed only for wakes THIS watcher emitted.
         self.last_emit = time.time()
         while True:
-            snapshot = self.read_snapshot(self.api, self.project)
-            stop = (self._read_failed() if snapshot is None
-                    else self._observed(snapshot))
+            try:
+                snapshot = self.read_snapshot(self.api, self.project)
+            except TransportError:
+                stop = self._read_failed()
+            else:
+                stop = self._observed(snapshot)
             if stop is not None:
                 return stop
             time.sleep(self.poll_seconds)
@@ -149,12 +150,14 @@ class Watcher:
     def _preflight(self) -> int | None:
         # The drain's project preflight; a failed label read only warns, since
         # the loop rides out transport faults anyway.
-        ok, message = Queue(self.api).verify_project(self.project)
-        if ok is False:
-            print(message, file=sys.stderr)
+        try:
+            check = Queue(self.api).check_project(self.project)
+        except TransportError:
+            print(PROJECT_CHECK_FAILED + " — arming anyway", file=sys.stderr)
+            return None
+        if not check.carried:
+            print(check.refusal, file=sys.stderr)
             return EXIT_UNKNOWN_PROJECT
-        if ok is None:
-            print(message + " — arming anyway", file=sys.stderr)
         return None
 
     def _read_failed(self) -> int | None:

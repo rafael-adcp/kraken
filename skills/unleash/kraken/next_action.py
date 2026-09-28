@@ -12,7 +12,7 @@ from .contract import (
     Epoch, Gen, Issue, Json, Repo, Worker, diag, diagnostics_on_stderr
 )
 from .comments import parse_marker
-from .transport import Api, comment_total_of
+from .transport import Api, IssueView, TransportError, UNREADABLE_ISSUE
 from .lease import (
     Lease, UNREADABLE_LEASE, clear_claim_state, format_iso,
     lease_renew_seconds, lease_ttl_seconds, open_claim_record, write_claim_state
@@ -76,18 +76,14 @@ def lease_block(
     }
 
 
-def feedback_since(api: Api, issue: Issue, anchor: int,
-                   ) -> list[CommentRecord] | None:
-    """The human comments past `anchor` — what a bounce is about — or None on
-    transport failure.
+def feedback_since(api: Api, issue: Issue, anchor: int) -> list[CommentRecord]:
+    """The human comments past `anchor` — what a bounce is about.
 
     Cut first, filter second: the anchor is a position in the whole thread, so
     removing worker comments (they carry a marker, §4) before the cut would
     slide it. A thread that shrank below its anchor yields [], never a slice
     from the end."""
     records = api.comment_records(issue)
-    if records is None:
-        return None
     return [c for c in records[max(0, int(anchor)):]
             if parse_marker(c.get("body") or "") is None]
 
@@ -172,19 +168,18 @@ def next_action_envelope(action: str, repo: Repo, worker: Worker, *,
     return NextActionEnvelope(repo, worker, script).build(action, **fields)
 
 
-def issue_is_finished(issue_obj: Json | None, record: TaskState = NO_RECORD,
+def issue_is_finished(issue_view: IssueView, record: TaskState = NO_RECORD,
                       ) -> bool:
     """Closed, or in a held state per its record (§3.1) — not per its badge,
     which still says `awaiting-merge` on a task an operator just requeued."""
-    if str((issue_obj or {}).get("state", "")).upper() == "CLOSED":
+    if issue_view.closed:
         return True
-    names = {lbl.get("name", "") for lbl in (issue_obj or {}).get("labels", [])}
-    return claim_is_moot(record, comment_total_of(issue_obj or {}), names)
+    return claim_is_moot(record, issue_view.comment_total, issue_view.labels)
 
 
 def resume_verdict(
     record: ClaimRecord, repo: Repo, worker: Worker, head: Lease,
-    issue_obj: Json | None, state: TaskState = NO_RECORD,
+    issue_view: IssueView, state: TaskState = NO_RECORD,
 ) -> tuple[str, Json]:
     """What a recorded open claim is worth, as a pure function of what was
     observed: `(verdict, detail)`, verdict being "blocked" (claim in another
@@ -202,13 +197,14 @@ def resume_verdict(
         return ("retry", {"reason": "lease-unreadable",
                           "detail": "the claim ref did not read — re-check "
                                     "before writing anything"})
-    if issue_obj is None:
+    # An unread record is as ambiguous as an unread issue: never a decision.
+    if issue_view.unknown or state.unknown:
         return ("retry", {"reason": "issue-unreadable",
                           "detail": "the task issue did not read — re-check "
                                     "before writing anything"})
 
     if not head.held_by(worker):
-        if issue_is_finished(issue_obj, state):
+        if issue_is_finished(issue_view, state):
             return ("resolved", {"reason": "already-resolved"})
         if not head.present:
             return ("abandon", {"reason": "lease-gone",
@@ -219,7 +215,7 @@ def resume_verdict(
                             "detail": f"the lease is held by {holder} now — the "
                                       f"branch and PR you pushed stay, and "
                                       f"whoever holds the task inherits them"})
-    if issue_is_finished(issue_obj, state):
+    if issue_is_finished(issue_view, state):
         # Our lease, but the task ended under us (an operator closed or answered
         # it). Nothing to resume; the lease frees itself within one TTL.
         return ("resolved", {"reason": "task-finished"})
@@ -252,19 +248,19 @@ class NextAction:
         """Resume what is held, else acquire. Returns `(exit_code, envelope)`."""
         record = open_claim_record(self.worker)
         if record is not None:
-            rc, env = self.resume(record)
-            if env is not None:
-                return (rc, env)
+            answer = self.resume(record)
+            if answer is not None:
+                return answer
             # Resolved: fall through and take the next task.
         return self.acquire()
 
     # --- resuming a claim this worker already holds ---------------------------
 
-    def resume(self, record: ClaimRecord) -> tuple[int | None, Envelope | None]:
+    def resume(self, record: ClaimRecord) -> tuple[int, Envelope] | None:
         """Fetch what `resume_verdict` needs and turn its verdict into an
-        envelope. Returns `(exit_code, envelope)`, or `(None, None)` when the
-        recorded claim is resolved and the caller should acquire a new task."""
-        verdict, detail, issue_obj, state = self._observe(record)
+        envelope. Returns `(exit_code, envelope)`, or None when the recorded
+        claim is resolved and the caller should acquire a new task."""
+        verdict, detail, issue_view, state = self._observe(record)
         issue = record["issue"]
 
         if verdict == "resolved":
@@ -272,7 +268,7 @@ class NextAction:
             clear_claim_state(self.worker)
             diag(f"next-action: claim resolved issue={issue} ({detail['reason']}) "
                  "— continuing the drain")
-            return (None, None)
+            return None
 
         if verdict == "abandon":
             # Provably not ours (an ambiguous read is "retry", never this).
@@ -281,25 +277,30 @@ class NextAction:
         action = verdict  # the remaining verdicts are the action names themselves
         if action != "execute":
             return self._refuse(action, record, detail)
-        return self._resumed(issue, detail, issue_obj, state)
+        return self._resumed(issue, detail, issue_view, state)
 
     def _observe(self, record: ClaimRecord):
         """The verdict plus what it was decided from — the issue and the state
         record, which the resumed envelope reuses for `bounced` and `pr`."""
         if record["repo"] and record["repo"] != self.api.repo:
             verdict, detail = resume_verdict(
-                record, self.api.repo, self.worker, UNREADABLE_LEASE, None)
-            return (verdict, detail, None, NO_RECORD)
+                record, self.api.repo, self.worker, UNREADABLE_LEASE,
+                UNREADABLE_ISSUE)
+            return (verdict, detail, UNREADABLE_ISSUE, NO_RECORD)
         issue = record["issue"]
         head = Refs(self.api).head(issue)
         # One GET serves the finished-task check, the comment anchor and the brief.
-        issue_obj = None if head.unknown else self.api.issue_detail(issue)
-        state = NO_RECORD if issue_obj is None else States(self.api).of(issue)
-        if state.unknown:
-            issue_obj = None  # ambiguous is never a decision: retry
+        issue_view = UNREADABLE_ISSUE if head.unknown else self._issue_view(issue)
+        state = NO_RECORD if issue_view.unknown else States(self.api).of(issue)
         verdict, detail = resume_verdict(
-            record, self.api.repo, self.worker, head, issue_obj, state)
-        return (verdict, detail, issue_obj, state)
+            record, self.api.repo, self.worker, head, issue_view, state)
+        return (verdict, detail, issue_view, state)
+
+    def _issue_view(self, issue: Issue) -> IssueView:
+        try:
+            return self.api.issue_detail(issue)
+        except TransportError:
+            return UNREADABLE_ISSUE
 
     def _refuse(self, action: str, record: ClaimRecord,
                 detail: Json) -> tuple[int, Envelope]:
@@ -315,7 +316,7 @@ class NextAction:
             action, issue=issue, reason=detail["reason"],
             detail=detail.get("detail"))
 
-    def _resumed(self, issue: Issue, detail: Json, issue_obj: Json,
+    def _resumed(self, issue: Issue, detail: Json, issue_view: IssueView,
                  state: TaskState) -> tuple[int, Envelope]:
         # Re-stamp the scratch file the hooks read, in case it was lost.
         write_claim_state(self.api.repo, issue, self.worker)
@@ -327,22 +328,24 @@ class NextAction:
         diag(f"next-action: resumed issue={issue} worker={self.worker}")
         # A claim writes no record (§3.1), so a resume reports the same bounce
         # and the same feedback its acquisition did.
-        bounced = state.requeued(comment_total_of(issue_obj))
+        bounced = state.requeued(issue_view.comment_total)
         return self.envelope.answer(
             "execute", issue=issue, resumed=True,
             bounced=bounced, pr=state.pr,
             feedback=self._feedback(issue, bounced, state.comments),
-            brief=task_brief(issue_obj.get("title") or "",
-                             issue_obj.get("body") or ""),
+            brief=task_brief(issue_view.title, issue_view.body),
             lease=lease)
 
     def _feedback(self, issue: Issue, bounced: bool,
                   anchor: int) -> list[CommentRecord] | None:
         """The comments a bounce is about; only read when `bounced`, so a fresh
-        task pays nothing."""
+        task pays nothing. None — no `feedback` key — when unread."""
         if not bounced:
             return None
-        return feedback_since(self.api, issue, anchor)
+        try:
+            return feedback_since(self.api, issue, anchor)
+        except TransportError:
+            return None
 
     # --- acquiring the next task ---------------------------------------------
 
@@ -380,10 +383,10 @@ class NextAction:
         name (lost with its machine, or landed after the resume check). The
         ladder is the truth, so resume that task; `resume` re-proves the lease
         before anything is written."""
-        rc, env = self.resume({"repo": self.api.repo, "issue": str(held),
-                               "worker": self.worker})
-        if env is not None:
-            return (rc, env)
+        answer = self.resume({"repo": self.api.repo, "issue": str(held),
+                              "worker": self.worker})
+        if answer is not None:
+            return answer
         # Resolved between the guard and this read — the drain continues on the
         # next invocation rather than looping inside this one.
         return self.envelope.answer(

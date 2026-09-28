@@ -48,6 +48,11 @@ class FakeApi(kraken.Api):
             setattr(self, name, fn)
 
 
+def unreachable(*_args, **_kwargs):
+    """A stand-in for any read or method whose call does not land."""
+    raise kraken.TransportError()
+
+
 def recording_api(repo: str = DEFAULT_REPO, **methods):
     """A FakeApi plus the list its writes are appended to.
 

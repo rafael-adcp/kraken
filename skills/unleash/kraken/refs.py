@@ -3,15 +3,16 @@
 Part of the kraken protocol package; see __init__.py."""
 from __future__ import annotations
 
+import dataclasses
 import json
 from typing import Iterable, Sequence
 
 from .contract import (
-    CommitMeta, EXIT_LOST, EXIT_TRANSPORT, Gen, Issue, Json, LEGACY_CLAIM_GEN,
-    Sha, Worker
+    CommitMeta, EXIT_LOST, EXIT_OK, EXIT_TRANSPORT, Gen, Issue, Json,
+    LEGACY_CLAIM_GEN, Sha, Worker
 )
 from .comments import make_marker
-from .transport import Api
+from .transport import Api, TransportError
 from .lease import Lease, NO_LEASE, UNREADABLE_LEASE
 
 # --- claim refs: the CAS ladder, and the lease it carries --------------------
@@ -45,9 +46,8 @@ KRAKEN_REF_NAMESPACE = "kraken/"
 EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
-def kraken_ref_items(api: Api) -> list[Json] | None:
-    """Every ref under `refs/kraken/`, undecoded, or None on transport failure.
-    `Refs.all` and `States.all` each parse their own family out of it."""
+def kraken_ref_items(api: Api) -> list[Json]:
+    """Every ref under `refs/kraken/`, undecoded. `Refs.all` and `States.all` each parse their own family out of it."""
     return api.paginated(f"/repos/{api.repo}/git/matching-refs/{KRAKEN_REF_NAMESPACE}")
 
 
@@ -84,6 +84,45 @@ def _parse_ref_items(items: Iterable[Json]) -> list[tuple[Issue, Gen, Sha]]:
     return out
 
 
+@dataclasses.dataclass(frozen=True)
+class Advance:
+    """What climbing to generation `gen` came to: "won", "lost", or
+    "fail-<stage>" when the write did not land and the state is unknown."""
+
+    verdict: str
+    gen: Gen
+
+    @property
+    def won(self) -> bool:
+        return self.verdict == "won"
+
+    @property
+    def lost(self) -> bool:
+        return self.verdict == "lost"
+
+    @property
+    def failed(self) -> bool:
+        return self.verdict.startswith("fail-")
+
+    @property
+    def stage(self) -> str:
+        return self.verdict[len("fail-"):]
+
+
+@dataclasses.dataclass(frozen=True)
+class Hold:
+    """The write-after-expiry check's answer: the lease `head`, and when the
+    caller may not write, the exit `code` and the `reason` it reports."""
+
+    head: Lease
+    code: int = EXIT_OK
+    reason: str = ""
+
+    @property
+    def refused(self) -> bool:
+        return self.code != EXIT_OK
+
+
 class Refs:
     """One repo's claim-ref ladder, the CAS that arbitrates it, and the lease it
     carries (PROTOCOL.md §4/§5). Cheap to construct where needed."""
@@ -94,34 +133,29 @@ class Refs:
     # --- reading the ladder ---------------------------------------------------
 
     def all(self, items: Iterable[Json] | None = None,
-            ) -> dict[Issue, list[tuple[Gen, Sha]]] | None:
-        """Every claim ref as {issue: [(generation, sha), …]}, uncollapsed, or
-        None on transport failure. `items` reuses an already-fetched payload."""
+            ) -> dict[Issue, list[tuple[Gen, Sha]]]:
+        """Every claim ref as {issue: [(generation, sha), …]}, uncollapsed.
+        `items` reuses an already-fetched payload."""
         if items is None:
             items = kraken_ref_items(self.api)
-            if items is None:
-                return None
         refs = {}
         for issue, gen, sha in _parse_ref_items(items):
             refs.setdefault(issue, []).append((gen, sha))
         return refs
 
-    def of(self, issue: Issue) -> tuple[bool, list[tuple[Gen, Sha]]]:
-        """`(ok, sorted ladder)` for one issue; `ok` is False only on transport
-        failure, so "unclaimed" is never confused with "unread"."""
+    def of(self, issue: Issue) -> list[tuple[Gen, Sha]]:
+        """One issue's sorted ladder; [] when unclaimed. A malformed issue
+        number is unreadable, never unclaimed."""
         if not str(issue).lstrip("-").isdigit():
-            return (False, [])
+            raise TransportError()
         items = self.api.paginated(
             f"/repos/{self.api.repo}/git/matching-refs/kraken/claims/{int(issue)}"
         )
-        if items is None:
-            return (False, [])
-        return (True, sorted((gen, sha) for i, gen, sha in _parse_ref_items(items)
-                             if i == int(issue)))
+        return sorted((gen, sha) for i, gen, sha in _parse_ref_items(items)
+                      if i == int(issue))
 
-    def commit_meta(self, shas: Sequence[Sha]) -> CommitMeta | None:
-        """{sha: {committedDate, message}} in one aliased fan-out, or None on
-        transport failure. Aliases are indexes (`c0`…) because a GraphQL alias
+    def commit_meta(self, shas: Sequence[Sha]) -> CommitMeta:
+        """{sha: {committedDate, message}} in one aliased fan-out. Aliases are indexes (`c0`…) because a GraphQL alias
         must be a name and a SHA may start with a digit."""
         ordered = sorted(set(shas))
         fields = [
@@ -129,8 +163,6 @@ class Refs:
             for i, sha in enumerate(ordered)
         ]
         repo_obj = self.api.aliased(fields)
-        if repo_obj is None:
-            return None
         meta = {}
         for i, sha in enumerate(ordered):
             obj = repo_obj.get(f"c{i}") or {}
@@ -145,15 +177,13 @@ class Refs:
         and every generation present. `NO_LEASE` when unclaimed,
         `UNREADABLE_LEASE` when the read did not land. Not aged: it knows no
         TTL."""
-        ok, refs = self.of(issue)
-        if not ok:
+        try:
+            refs = self.of(issue)
+            if not refs:
+                return NO_LEASE
+            return Lease.from_ladder(refs, self.commit_meta([max(refs)[1]]))
+        except TransportError:
             return UNREADABLE_LEASE
-        if not refs:
-            return NO_LEASE
-        meta = self.commit_meta([max(refs)[1]])
-        if meta is None:
-            return UNREADABLE_LEASE
-        return Lease.from_ladder(refs, meta)
 
     def owner(self, issue: Issue) -> Worker | None:
         """The worker holding `issue`, or None when absent or unreadable."""
@@ -161,14 +191,12 @@ class Refs:
 
     # --- writing the ladder ---------------------------------------------------
 
-    def commit(self, payload: Json) -> Sha | None:
+    def commit(self, payload: Json) -> Sha:
         """The orphan commit a ref points at: empty tree, no parents, the marker
-        as message. The server stamps the date. None on transport failure."""
+        as message. The server stamps the date."""
         for tree in (EMPTY_TREE_SHA, None):
             if tree is None:
                 tree = self._head_tree_sha()
-                if tree is None:
-                    return None
             status, text = self.api.request(
                 "POST", f"/repos/{self.api.repo}/git/commits",
                 {"message": make_marker(payload), "tree": tree, "parents": []},
@@ -177,12 +205,14 @@ class Refs:
                 try:
                     sha = json.loads(text).get("sha")
                 except (ValueError, json.JSONDecodeError):
-                    return None
-                return sha if isinstance(sha, str) and sha else None
+                    raise TransportError() from None
+                if not isinstance(sha, str) or not sha:
+                    raise TransportError()
+                return sha
             if status != 422:
-                return None
+                raise TransportError()
             # 422 on the empty tree: this host wants a reachable tree — fall back.
-        return None
+        raise TransportError()
 
     def create(self, issue: Issue, gen: Gen, sha: Sha) -> str:
         """The CAS: create generation `gen`. "won", "lost" (422: somebody else
@@ -213,48 +243,42 @@ class Refs:
                 ok = False
         return ok
 
-    def advance(self, issue: Issue, gen: Gen,
-                payload: Json) -> tuple[str, Gen | None, Sha | None]:
-        """Create the generation above `gen` (§5.2): `(verdict, gen, sha)`, the
-        verdict being "won", "lost", "fail-commit" or "fail-ref"."""
-        sha = self.commit(payload)
-        if sha is None:
-            return ("fail-commit", None, None)
+    def advance(self, issue: Issue, gen: Gen, payload: Json) -> Advance:
+        """Create the generation above `gen` (§5.2)."""
+        try:
+            sha = self.commit(payload)
+        except TransportError:
+            return Advance("fail-commit", gen + 1)
         verdict = self.create(issue, gen + 1, sha)
-        if verdict == "fail":
-            return ("fail-ref", None, None)
-        return (verdict, gen + 1 if verdict == "won" else None,
-                sha if verdict == "won" else None)
+        return Advance("fail-ref" if verdict == "fail" else verdict, gen + 1)
 
-    def hold(self, issue: Issue,
-             worker: Worker) -> tuple[int | None, Lease, str]:
+    def hold(self, issue: Issue, worker: Worker) -> Hold:
         """The write-after-expiry check (§5.3): prove this worker still holds
-        the lease before a transition writes anything. `(code, head, reason)`,
-        `code` None when the caller may proceed.
+        the lease before a transition writes anything.
 
         This is what makes a short TTL safe: a worker that stalled long enough
         to be stolen from writes nothing. Ours-but-expired still passes — nobody
         took it, and the question is who holds the lease, not its age."""
         head = self.head(issue)
         if head.unknown:
-            return (EXIT_TRANSPORT, head, f"gh-failure issue={issue} stage=lease")
+            return Hold(head, EXIT_TRANSPORT, f"gh-failure issue={issue} stage=lease")
         if not head.present:
-            return (EXIT_LOST, head,
-                    f"lost-lease issue={issue} — the lease is gone, "
-                    "re-claim the task before writing to it")
+            return Hold(head, EXIT_LOST,
+                        f"lost-lease issue={issue} — the lease is gone, "
+                        "re-claim the task before writing to it")
         if not head.held_by(worker):
             holder = head.worker or "another worker"
-            return (EXIT_LOST, head,
-                    f"lost-lease issue={issue} — the lease is held by {holder}")
-        return (None, head, "")
+            return Hold(head, EXIT_LOST,
+                        f"lost-lease issue={issue} — the lease is held by {holder}")
+        return Hold(head)
 
     # --- internals ------------------------------------------------------------
 
-    def _head_tree_sha(self) -> Sha | None:
+    def _head_tree_sha(self) -> Sha:
         """HEAD's tree SHA, for hosts that reject the empty tree."""
         obj = self.api.json("GET", f"/repos/{self.api.repo}/commits/HEAD")
-        if obj is None:
-            return None
-        tree = (obj.get("commit") or {}).get("tree") or {}
+        tree = ((obj if isinstance(obj, dict) else {}).get("commit") or {}).get("tree") or {}
         sha = tree.get("sha")
-        return sha if isinstance(sha, str) and sha else None
+        if not isinstance(sha, str) or not sha:
+            raise TransportError()
+        return sha

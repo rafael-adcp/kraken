@@ -15,7 +15,7 @@ from .contract import (
     EXIT_LOST, EXIT_OK, EXIT_TRANSPORT, EXIT_USAGE, Issue, Json, Worker, diag
 )
 from .comments import compose_comment, read_body_file
-from .transport import Api
+from .transport import Api, TransportError
 from .lease import clear_claim_state
 from .refs import Refs
 from .state import QUEUED, States
@@ -66,12 +66,12 @@ class TerminalTransition:
         t = self.terminal
         # The lease first (§5.3): a worker stolen from while silent must not
         # write onto the task its new holder is executing.
-        lost, head, refusal = self.refs.hold(self.issue, self.worker)
-        if lost is not None:
-            diag(f"{t.command}: {refusal}")
-            if t.clear_on_lost and lost == EXIT_LOST:
+        hold = self.refs.hold(self.issue, self.worker)
+        if hold.refused:
+            diag(f"{t.command}: {hold.reason}")
+            if t.clear_on_lost and hold.code == EXIT_LOST:
                 clear_claim_state(self.worker)
-            return lost
+            return hold.code
 
         body = compose_comment(
             self.worker, prose,
@@ -83,7 +83,7 @@ class TerminalTransition:
         if not self.api.swap_labels(self.issue, remove="in-progress",
                                     add=t.add_label):
             return self._failed(t.label_stage)
-        if not self.refs.drop(self.issue, head.gens):
+        if not self.refs.drop(self.issue, hold.head.gens):
             return self._failed("ref")
 
         clear_claim_state(self.worker)
@@ -95,8 +95,9 @@ class TerminalTransition:
         """Write the record this transition lands on (§3.1), built from the
         previous one so `expiries` and `pr` carry over. A failed read fails the
         transition, leaving the task held by our lease."""
-        total = self.api.comment_count(self.issue)
-        if total is None:
+        try:
+            total = self.api.comment_count(self.issue)
+        except TransportError:
             return False
         previous = self.states.of(self.issue)
         if previous.unknown:
