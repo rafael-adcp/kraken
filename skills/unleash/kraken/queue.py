@@ -11,10 +11,10 @@ from typing import Iterable, Mapping
 
 from .contract import (
     CommitMeta, EXIT_OK, EXIT_TRANSPORT, Epoch, HELD_LABELS, Issue, Json,
-    Node, PRIORITY_LABEL, Sha, Worker
+    Node, PRIORITY_LABEL, Repo, Sha, Worker
 )
 from .comments import parse_marker
-from .transport import Api
+from .transport import Api, TransportError
 from .lease import (
     Lease, holder_shas, lease_state, lease_ttl_seconds, live_leases
 )
@@ -198,8 +198,9 @@ class Candidate:
 
 
 def cmd_list_startable(args: argparse.Namespace) -> int:
-    rows = Queue(args.api).candidates(args.project)
-    if rows is None:
+    try:
+        rows = Queue(args.api).candidates(args.project)
+    except TransportError:
         return EXIT_TRANSPORT
 
     if args.snapshot:
@@ -246,6 +247,33 @@ class QueueRead:
         return self.states.get(issue, NO_RECORD)
 
 
+# A worker's project check could not read the label set.
+PROJECT_CHECK_FAILED = "project check: gh-failure stage=labels"
+
+
+@dataclasses.dataclass(frozen=True)
+class ProjectCheck:
+    """Whether a repo carries `project:<name>`, judged against the projects it
+    does carry. A worker scoped to a label the repo lacks is deaf, not idle."""
+
+    repo: Repo
+    project: str
+    configured: list[str]
+
+    @property
+    def carried(self) -> bool:
+        return self.project in self.configured
+
+    @property
+    def refusal(self) -> str:
+        configured = ", ".join(self.configured) or "(none configured)"
+        return ("unknown project: %s has no `project:%s` label, so this worker "
+                "would never see a task. Configured projects: %s. Fix the "
+                "--project spelling, or create the label with `kraken.py init %s "
+                "--project %s`."
+                % (self.repo, self.project, configured, self.repo, self.project))
+
+
 class Queue:
     """The coordination repo's task queue: the batched walk, the leases and
     records that come with it, and the startable filter. Decisions about one
@@ -254,9 +282,9 @@ class Queue:
     def __init__(self, api: Api):
         self.api = api
 
-    def open_tasks(self) -> list[Task] | None:
+    def open_tasks(self) -> list[Task]:
         """Every open kraken-task issue, all projects, in one paginated GraphQL
-        walk; None on transport failure. GraphQL's `labels:` filter is a UNION,
+        walk. GraphQL's `labels:` filter is a UNION,
         so only `kraken-task` is filtered server-side.
 
         This is the hot read (every watcher, every minute), so it carries the
@@ -276,8 +304,6 @@ class Queue:
                 f'blockedBy(first: 50) {{ nodes {{ number state }} }} }} }} }} }}'
             )
             resp = self.api.graphql(query)
-            if resp is None:
-                return None
             page = resp["data"]["repository"]["issues"]
             tasks.extend(Task(node) for node in page["nodes"])
             if not page["pageInfo"]["hasNextPage"]:
@@ -285,52 +311,37 @@ class Queue:
             cursor = page["pageInfo"]["endCursor"]
 
     def read(self, now: Epoch | None = None, ttl: int | None = None,
-             ) -> QueueRead | None:
-        """One repo-wide queue read (before any project filter), or None on
-        transport failure. Three calls — the walk, the `refs/kraken/` namespace,
-        one batched commit read — and an idle queue skips the third."""
+             ) -> QueueRead:
+        """One repo-wide queue read (before any project filter). Three calls —
+        the walk, the `refs/kraken/` namespace, one batched commit read — and an
+        idle queue skips the third."""
         tasks = self.open_tasks()
-        if tasks is None:
-            return None
-        got = self._ref_view(now, ttl, with_states=True)
-        if got is None:
-            return None
-        leases, commit_meta, states, _state_shas = got
+        leases, commit_meta, states, _state_shas = self._ref_view(
+            now, ttl, with_states=True)
         return QueueRead(tasks, leases, commit_meta, states)
 
     def lease_view(self, now: Epoch | None = None, ttl: int | None = None,
-                   ) -> tuple[dict[Issue, Lease], CommitMeta,
-                              dict[Issue, Sha]] | None:
+                   ) -> tuple[dict[Issue, Lease], CommitMeta, dict[Issue, Sha]]:
         """`read` without the issue walk and without resolving records:
-        `(leases, commit_meta, state_shas)`, or None on transport failure. For
-        callers asking only "does this worker hold a claim?" (§5)."""
-        got = self._ref_view(now, ttl, with_states=False)
-        if got is None:
-            return None
-        leases, commit_meta, _states, state_shas = got
+        `(leases, commit_meta, state_shas)`. For callers asking only "does this
+        worker hold a claim?" (§5)."""
+        leases, commit_meta, _states, state_shas = self._ref_view(
+            now, ttl, with_states=False)
         return (leases, commit_meta, state_shas)
 
     def _ref_view(self, now: Epoch | None, ttl: int | None, *,
                   with_states: bool,
                   ) -> tuple[dict[Issue, Lease], CommitMeta,
-                             dict[Issue, TaskState], dict[Issue, Sha]] | None:
-        """The `refs/kraken/` namespace decoded, or None on transport failure.
-        One batched commit read resolves claims and, `with_states`, records."""
+                             dict[Issue, TaskState], dict[Issue, Sha]]:
+        """The `refs/kraken/` namespace decoded. One batched commit read
+        resolves claims and, `with_states`, records."""
         refs = Refs(self.api)
         items = kraken_ref_items(self.api)
-        if items is None:
-            return None
         claim_refs = refs.all(items)
-        if claim_refs is None:
-            return None
         state_shas = States(self.api).all(items)
-        if state_shas is None:
-            return None
         commit_meta = refs.commit_meta(
             holder_shas(claim_refs)
             + (sorted(state_shas.values()) if with_states else []))
-        if commit_meta is None:
-            return None
         # The server's clock, not ours (§5.1): GitHub stamped these dates.
         leases = lease_state(claim_refs, commit_meta,
                              self.api.server_now() if now is None else now,
@@ -338,14 +349,11 @@ class Queue:
         states = state_view(state_shas, commit_meta) if with_states else {}
         return (leases, commit_meta, states, state_shas)
 
-    def candidates(self, project: str, read: QueueRead | None = None,
-                   ) -> list[Candidate] | None:
-        """`project`'s tasks classified, priority:high first then oldest first;
-        None on transport failure. Pass `read` to classify an existing read."""
-        if read is None:
-            read = self.read()
-            if read is None:
-                return None
+    def candidates(self, project: str,
+                   read: QueueRead | None = None) -> list[Candidate]:
+        """`project`'s tasks classified, priority:high first then oldest first.
+        Pass `read` to classify an existing read."""
+        read = read or self.read()
         live = live_leases(read.leases)
         tasks = [t for t in read.tasks if project in t.projects]
         tasks.sort(key=lambda t: (PRIORITY_LABEL not in t.labels, t.created))
@@ -356,8 +364,6 @@ class Queue:
                    if rows[i].state is None]
         if pending:
             dep_open = self._depends_on(sorted({dep for _, dep in pending}))
-            if dep_open is None:
-                return None
             for i, dep in pending:
                 rows[i] = dataclasses.replace(
                     rows[i],
@@ -366,47 +372,29 @@ class Queue:
 
     # --- routing: which projects this repo actually carries -------------------
 
-    def projects(self) -> list[str] | None:
-        """Every configured `project:<name>`, sorted, or None on transport
-        failure. Read from the label set, so a project with no open task still
-        counts."""
+    def projects(self) -> list[str]:
+        """Every configured `project:<name>`, sorted. Read from the label set,
+        so a project with no open task still counts."""
         items = self.api.paginated(f"/repos/{self.api.repo}/labels")
-        if items is None:
-            return None
         return sorted(
             n["name"][len("project:"):]
             for n in items
             if isinstance(n, dict) and str(n.get("name", "")).startswith("project:")
         )
 
-    def verify_project(self, project: str) -> tuple[bool | None, str]:
-        """(ok, message): whether the repo carries `project:<name>`. `ok` is
-        None when the label read failed — a project is never declared missing
-        from a read that never landed."""
-        names = self.projects()
-        if names is None:
-            return (None, "project check: gh-failure stage=labels")
-        if project in names:
-            return (True, "")
-        configured = ", ".join(names) if names else "(none configured)"
-        return (False,
-                "unknown project: %s has no `project:%s` label, so this worker "
-                "would never see a task. Configured projects: %s. Fix the "
-                "--project spelling, or create the label with `kraken.py init %s "
-                "--project %s`."
-                % (self.api.repo, project, configured, self.api.repo, project))
+    def check_project(self, project: str) -> ProjectCheck:
+        """Whether this repo carries `project:<name>`. A failed label read
+        raises: a project is never declared missing from a read that never
+        landed."""
+        return ProjectCheck(self.api.repo, project, self.projects())
 
     # --- internals ------------------------------------------------------------
 
-    def _depends_on(self,
-                    targets: Iterable[Issue]) -> dict[Issue, bool] | None:
-        """{number: is_open} for every target in one aliased call, or None on
-        transport failure."""
+    def _depends_on(self, targets: Iterable[Issue]) -> dict[Issue, bool]:
+        """{number: is_open} for every target in one aliased call."""
         targets = list(targets)
         fields = [f"i{n}: issue(number: {n}) {{ state }}" for n in targets]
         repo_obj = self.api.aliased(fields)
-        if repo_obj is None:
-            return None
         return {
             n: str((repo_obj.get(f"i{n}") or {}).get("state", "")).upper() == "OPEN"
             for n in targets

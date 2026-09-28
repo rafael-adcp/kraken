@@ -4,6 +4,8 @@ Part of the kraken protocol package; see __init__.py."""
 from __future__ import annotations
 
 import base64
+import contextlib
+import dataclasses
 import datetime
 import email.utils
 import json
@@ -19,7 +21,8 @@ from .contract import CommentRecord, Epoch, Issue, Json, Repo, Sha
 # --- transport ---------------------------------------------------------------
 # Stdlib urllib behind one object; `Api.request` is the only network call. A
 # non-2xx answer keeps its integer status: 422 is the CAS-lost signal, anything
-# else is the exit-20 path.
+# else is the exit-20 path. A read that did not land raises `TransportError`,
+# so only the code that decides what a fault means has to mention one.
 
 DEFAULT_API_URL = "https://api.github.com"
 HTTP_TIMEOUT_SECONDS = 30
@@ -81,6 +84,24 @@ def parse_http_date(value: str) -> Epoch | None:
     return dt.timestamp()
 
 
+class TransportError(Exception):
+    """A GitHub call that did not land, so what it would have said is unknown.
+    `stage` names the step for the exit-20 diagnostic."""
+
+    def __init__(self, stage: str = ""):
+        super().__init__(stage)
+        self.stage = stage
+
+
+@contextlib.contextmanager
+def stage(name: str):
+    """Report any transport fault inside as stage `name`."""
+    try:
+        yield
+    except TransportError:
+        raise TransportError(name) from None
+
+
 def comment_total_of(issue_obj: Json) -> int | None:
     """The comment count off a REST issue object, or None when missing — never
     0, which would sit below every anchor and bury requeues."""
@@ -88,6 +109,47 @@ def comment_total_of(issue_obj: Json) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return max(0, value)
+
+
+@dataclasses.dataclass(frozen=True)
+class IssueView:
+    """One REST issue object, decoded here and nowhere else."""
+
+    fields: Json = dataclasses.field(default_factory=dict)
+    known: bool = True          # False only on UNREADABLE_ISSUE
+
+    @property
+    def unknown(self) -> bool:
+        """The read did not land — the caller owes an exit 20, never a write."""
+        return not self.known
+
+    @property
+    def title(self) -> str:
+        return self.fields.get("title") or ""
+
+    @property
+    def body(self) -> str:
+        return self.fields.get("body") or ""
+
+    @property
+    def labels(self) -> list[str]:
+        return [lbl.get("name", "") for lbl in self.fields.get("labels", [])]
+
+    @property
+    def open(self) -> bool:
+        return str(self.fields.get("state", "")).upper() == "OPEN"
+
+    @property
+    def closed(self) -> bool:
+        return str(self.fields.get("state", "")).upper() == "CLOSED"
+
+    @property
+    def comment_total(self) -> int | None:
+        return comment_total_of(self.fields)
+
+
+# The read did not land; a pure decision takes this where it would take a view.
+UNREADABLE_ISSUE = IssueView(known=False)
 
 
 class Api:
@@ -143,42 +205,41 @@ class Api:
         an offset so it keeps ticking; plain `time.time()` before any response."""
         return time.time() + (self._clock_offset or 0.0)
 
-    def json(self, method: str, path: str,
-             body: Json | None = None) -> Any | None:
-        """Parsed JSON from a 2xx response, or None on any failure."""
+    def json(self, method: str, path: str, body: Json | None = None) -> Any:
+        """Parsed JSON from a 2xx response; anything else raises."""
         status, text = self.request(method, path, body)
         if not 200 <= status < 300:
-            return None
+            raise TransportError()
         try:
             return json.loads(text)
         except (ValueError, json.JSONDecodeError):
-            return None
+            raise TransportError() from None
 
-    def paginated(self, path: str) -> list[Json] | None:
-        """Every element of a paginated list endpoint, or None on failure."""
+    def paginated(self, path: str) -> list[Json]:
+        """Every element of a paginated list endpoint."""
         sep = "&" if "?" in path else "?"
         items = []
         page = 1
         while True:
             chunk = self.json("GET", f"{path}{sep}per_page={PER_PAGE}&page={page}")
             if not isinstance(chunk, list):
-                return None
+                raise TransportError()
             items.extend(chunk)
             if len(chunk) < PER_PAGE:
                 return items
             page += 1
 
-    def graphql(self, query: str) -> Json | None:
-        """The parsed {"data": ...} envelope, or None on any failure."""
+    def graphql(self, query: str) -> Json:
+        """The parsed {"data": ...} envelope."""
         resp = self.json("POST", "/graphql", {"query": query})
         if not isinstance(resp, dict) or resp.get("errors"):
-            return None
+            raise TransportError()
         if not isinstance(resp.get("data"), dict):
-            return None
+            raise TransportError()
         return resp
 
     def aliased(self, fields: Sequence[str],
-                chunk: int = GRAPHQL_ALIAS_CHUNK) -> Json | None:
+                chunk: int = GRAPHQL_ALIAS_CHUNK) -> Json:
         """The batched fan-out: pre-aliased `repository` selections, one query
         per `chunk`, merged into `{alias: node}` (`{}` for an empty ask). Aliases
         must be unique across the whole ask. One failed chunk fails it all: a
@@ -191,19 +252,15 @@ class Api:
             body = " ".join(fields[start:start + chunk])
             resp = self.graphql(
                 f'{{ repository(owner: "{owner}", name: "{name}") {{ {body} }} }}')
-            if resp is None:
-                return None
             merged.update(resp["data"]["repository"] or {})
         return merged
 
     # --- issues, comments, labels --------------------------------------------
 
-    def comment_records(self, issue: Issue) -> list[CommentRecord] | None:
+    def comment_records(self, issue: Issue) -> list[CommentRecord]:
         """Every comment as {"body", "createdAt"}, in server order and fully
-        paginated, or None on transport failure."""
+        paginated."""
         items = self.paginated(f"/repos/{self.repo}/issues/{issue}/comments")
-        if items is None:
-            return None
         return [
             {"body": c.get("body") or "", "createdAt": c.get("created_at") or ""}
             for c in items if isinstance(c, dict)
@@ -234,32 +291,29 @@ class Api:
                 return False
         return True
 
-    def issue_detail(self, issue: Issue) -> Json | None:
-        """The live REST issue object, or None on transport failure."""
-        return self.json("GET", f"/repos/{self.repo}/issues/{issue}")
+    def issue_detail(self, issue: Issue) -> IssueView:
+        """The live REST issue."""
+        obj = self.json("GET", f"/repos/{self.repo}/issues/{issue}")
+        if not isinstance(obj, dict):
+            raise TransportError()
+        return IssueView(obj)
 
-    def issue_label_names(self, issue: Issue) -> list[str] | None:
-        """The issue's live label names, or None on transport failure."""
-        obj = self.issue_detail(issue)
-        if obj is None:
-            return None
-        return [lbl.get("name", "") for lbl in obj.get("labels", [])]
+    def issue_label_names(self, issue: Issue) -> list[str]:
+        return self.issue_detail(issue).labels
 
-    def comment_count(self, issue: Issue) -> int | None:
-        """The live comment count, the anchor a transition records (§3.1), or
-        None. Callers read it AFTER their own comment lands, never as `+1`: a
-        comment arriving in between would otherwise be swallowed."""
-        obj = self.issue_detail(issue)
-        if obj is None:
-            return None
-        return comment_total_of(obj)
+    def comment_count(self, issue: Issue) -> int:
+        """The live comment count, the anchor a transition records (§3.1).
+        Callers read it AFTER their own comment lands, never as `+1`: a comment
+        arriving in between would otherwise be swallowed. An answer without a
+        count is no answer."""
+        total = self.issue_detail(issue).comment_total
+        if total is None:
+            raise TransportError()
+        return total
 
-    def issue_body(self, issue: Issue) -> str | None:
-        """The live body ("" when empty), or None on transport failure."""
-        obj = self.issue_detail(issue)
-        if obj is None:
-            return None
-        return obj.get("body") or ""
+    def issue_body(self, issue: Issue) -> str:
+        """The live body, "" when empty."""
+        return self.issue_detail(issue).body
 
     def label_upsert(self, name: str, color: str, description: str) -> bool:
         """Create a label, or PATCH it back to canonical when it exists (422)."""
@@ -279,12 +333,13 @@ class Api:
         status, _ = self.request("GET", f"/repos/{self.repo}")
         return 200 <= status < 300
 
-    def authenticated_login(self) -> str | None:
-        """The login the token authenticates as (`GET /user`), or None when it
-        could not be read — a transport fault, never a verdict on ownership."""
+    def authenticated_login(self) -> str:
+        """The login the token authenticates as (`GET /user`)."""
         obj = self.json("GET", "/user")
         login = obj.get("login") if isinstance(obj, dict) else None
-        return login if isinstance(login, str) and login else None
+        if not isinstance(login, str) or not login:
+            raise TransportError()
+        return login
 
     def repo_create_private(self) -> bool:
         """Create the coordination repo, always PRIVATE: the queue is
@@ -298,7 +353,10 @@ class Api:
     def get_content_meta(self, path: str) -> tuple[str | None, Sha | None]:
         """(bytes, blob_sha) for `path`, or (None, None) when absent OR
         unreadable — both read as absent."""
-        obj = self.json("GET", f"/repos/{self.repo}/contents/{path}")
+        try:
+            obj = self.json("GET", f"/repos/{self.repo}/contents/{path}")
+        except TransportError:
+            return (None, None)
         if not isinstance(obj, dict):
             return (None, None)
         encoded = obj.get("content")

@@ -27,7 +27,7 @@ SKILL_DIR = os.path.join(HERE, "..", "..", "skills", "unleash")
 sys.path.insert(0, os.path.abspath(SKILL_DIR))
 
 import kraken  # noqa: E402
-from fakes import FakeApi, FakeQueue  # noqa: E402
+from fakes import FakeApi, FakeQueue, unreachable  # noqa: E402
 
 
 def disclaimer_body(worker, *rest):
@@ -197,9 +197,9 @@ class ReapCommandTests(unittest.TestCase):
 
         buf = StringIO()
         with redirect_stdout(buf):
-            rc, counts = kraken.reconcile_pass(
+            counts = kraken.reconcile_pass(
                 self._api(), worker, ttl, queue=FakeQueue(read=read))
-        return rc, counts, buf.getvalue()
+        return counts, buf.getvalue()
 
     @staticmethod
     def _expired(n, expiries):
@@ -213,11 +213,10 @@ class ReapCommandTests(unittest.TestCase):
         # The only escalation left: the task has already been stolen
         # LEASE_EXPIRY_ESCALATE times and still nobody finished it.
         node = self._node(1, ["kraken-task", "in-progress"])
-        rc, counts, _ = self._run(
+        counts, _ = self._run(
             [node], {1: "s1"},
             {"s1": self._meta(kraken.LEASE_DEFAULT_TTL_SECONDS + 60)},
             states=self._expired(1, kraken.LEASE_EXPIRY_ESCALATE))
-        self.assertEqual(rc, kraken.EXIT_OK)
         self.assertIn((1, "in-progress", "needs-decision"), self.swaps)
         self.assertEqual(len(self.posts), 1)
         self.assertIn("stale-claim", self.posts[0][1])
@@ -228,21 +227,19 @@ class ReapCommandTests(unittest.TestCase):
         # protocol/6: reap does NOT free an expired lease. The reader already
         # treats it as unheld, so a pass that "repaired" it would only escalate a
         # task the next drain would have picked up by itself.
-        rc, counts, _ = self._run(
+        counts, _ = self._run(
             [self._node(2, ["kraken-task", "in-progress"])],
             {2: "s2"},
             {"s2": self._meta(kraken.LEASE_DEFAULT_TTL_SECONDS + 60)})
-        self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.swaps, [])
         self.assertEqual(self.posts, [])
         self.assertEqual(self.deleted, [])
         self.assertEqual((counts["reclaim"], counts["orphan-lock"]), (0, 0))
 
     def test_live_worker_left_alone(self):
-        rc, counts, _ = self._run(
+        counts, _ = self._run(
             [self._node(2, ["kraken-task", "in-progress"])],
             {2: "s2"}, {"s2": self._meta(0)})
-        self.assertEqual(rc, kraken.EXIT_OK)
         self.assertEqual(self.swaps, [])
         self.assertEqual(self.posts, [])
         self.assertEqual(self.deleted, [])
@@ -260,18 +257,17 @@ class ReapCommandTests(unittest.TestCase):
         # --ttl 60 makes a 5-minute-old lease expired, so the repeat guard fires
         # on a task a default TTL would still consider held.
         node = self._node(7, ["kraken-task", "in-progress"])
-        rc, _, _ = self._run([node], {7: "s7"}, {"s7": self._meta(300)}, ttl=60,
+        self._run([node], {7: "s7"}, {"s7": self._meta(300)}, ttl=60,
                              states=self._expired(7, kraken.LEASE_EXPIRY_ESCALATE))
-        self.assertEqual(rc, kraken.EXIT_OK)
         self.assertIn((7, "in-progress", "needs-decision"), self.swaps)
 
-    def test_transport_failure_on_the_queue_read_is_twenty(self):
-        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-            rc, counts = kraken.reconcile_pass(
-                self._api(), "w", None,
-                queue=FakeQueue(read=lambda now=None, ttl=None: None))
-        self.assertEqual(rc, kraken.EXIT_TRANSPORT)
-        self.assertIsNone(counts)
+    def test_transport_failure_on_the_queue_read_is_reported_and_raised(self):
+        err = StringIO()
+        with redirect_stdout(StringIO()), redirect_stderr(err), \
+                self.assertRaises(kraken.TransportError):
+            kraken.reconcile_pass(self._api(), "w", None,
+                                  queue=FakeQueue(read=unreachable))
+        self.assertIn("reap: gh-failure stage=list", err.getvalue())
 
     def test_cmd_reap_renders_the_summary(self):
         # The one test that drives the argv-shaped entry point, so the summary
@@ -537,7 +533,7 @@ class ValidateCommandTests(unittest.TestCase):
     def test_transport_failure_on_labels_is_twenty(self):
         args = SimpleNamespace(
             repo="acme/tasks", issue="1",
-            api=self._api(issue_label_names=lambda i: None))
+            api=self._api(issue_label_names=unreachable))
         with redirect_stdout(StringIO()):
             rc = kraken.cmd_validate(args)
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
@@ -647,13 +643,13 @@ class ValidateCommandTests(unittest.TestCase):
     def test_an_unreadable_record_is_transport_not_a_silent_stale_anchor(self):
         held = kraken.TaskState(state="awaiting-merge", worker="w0",
                                 comments=4, recorded=True)
-        rc = self._flagged(held, paginated=lambda path, **kw: None)
+        rc = self._flagged(held, paginated=unreachable)
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
 
     def test_an_unreadable_count_is_transport(self):
         held = kraken.TaskState(state="awaiting-merge", worker="w0",
                                 comments=4, recorded=True)
-        rc = self._flagged(held, comment_count=lambda issue: None)
+        rc = self._flagged(held, comment_count=unreachable)
         self.assertEqual(rc, kraken.EXIT_TRANSPORT)
 
 
@@ -711,7 +707,7 @@ class CleanupCommandTests(unittest.TestCase):
         return FakeApi(
             "acme/tasks",
             request=request,
-            issue_label_names=lambda i: labels,
+            issue_label_names=unreachable if labels is None else lambda i: labels,
             swap_labels=swap or (lambda issue, remove=None, add=None: (
                 self.removed.append((issue, remove, add)) or True)),
         )

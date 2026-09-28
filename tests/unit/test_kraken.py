@@ -25,7 +25,7 @@ SKILL_DIR = os.path.join(HERE, "..", "..", "skills", "unleash")
 sys.path.insert(0, os.path.abspath(SKILL_DIR))
 
 import kraken  # noqa: E402
-from fakes import FakeApi, FakeQueue, recording_api  # noqa: E402
+from fakes import FakeApi, FakeQueue, recording_api, unreachable  # noqa: E402
 
 
 # --- marker builders (what a claim commit / a comment carries) ---------------
@@ -171,11 +171,11 @@ class RefCasTests(unittest.TestCase):
         self.assertEqual(trees, [kraken.EMPTY_TREE_SHA, "headtree"],
                          "must retry with the HEAD tree after the empty-tree 422")
 
-    def test_create_claim_commit_returns_none_on_transport_fault(self):
+    def test_create_claim_commit_raises_on_transport_fault(self):
         api = FakeApi(request=lambda m, p, body=None: (
             kraken.STATUS_NETWORK_FAILURE, ""))
-        self.assertIsNone(
-            kraken.Refs(api).commit({"type": "claim", "worker": "w"}))
+        with self.assertRaises(kraken.TransportError):
+            kraken.Refs(api).commit({"type": "claim", "worker": "w"})
 
     def test_claim_ref_create_maps_the_cas_outcomes(self):
         api = FakeApi(request=lambda m, p, body=None: (201, "{}"))
@@ -201,9 +201,9 @@ class RefCasTests(unittest.TestCase):
             return (201, "{}")
 
         api = FakeApi(request=fake_request)
-        verdict, gen, sha = kraken.Refs(api).advance(
-            7, 4, {"type": "claim", "worker": "w1"})
-        self.assertEqual((verdict, gen, sha), ("won", 5, "fresh"))
+        step = kraken.Refs(api).advance(7, 4, {"type": "claim", "worker": "w1"})
+        self.assertEqual(step, kraken.Advance("won", 5))
+        self.assertTrue(step.won)
         self.assertEqual(created["ref"], "refs/kraken/claims/7/5")
         self.assertEqual(created["sha"], "fresh")
 
@@ -214,8 +214,23 @@ class RefCasTests(unittest.TestCase):
             return (422, "")
 
         api = FakeApi(request=fake_request)
-        self.assertEqual(kraken.Refs(api).advance(7, 1, {"type": "claim"}),
-                         ("lost", None, None))
+        step = kraken.Refs(api).advance(7, 1, {"type": "claim"})
+        self.assertTrue(step.lost)
+        self.assertFalse(step.won or step.failed)
+
+    def test_advance_names_the_write_that_did_not_land(self):
+        def commit_fails(method, path, body=None):
+            return (500, "")
+
+        def ref_fails(method, path, body=None):
+            if path.endswith("/git/commits"):
+                return (201, json.dumps({"sha": "fresh"}))
+            return (500, "")
+
+        for request, stage in ((commit_fails, "commit"), (ref_fails, "ref")):
+            step = kraken.Refs(FakeApi(request=request)).advance(7, 1, {})
+            self.assertTrue(step.failed)
+            self.assertEqual(step.stage, stage)
 
     def test_claim_ref_delete_tolerates_a_missing_ref(self):
         api = FakeApi(request=lambda m, p, body=None: (204, ""))
@@ -263,17 +278,19 @@ class RefCasTests(unittest.TestCase):
             {"ref": "refs/kraken/claims/12/1", "object": {"sha": "mine"}},
             {"ref": "refs/kraken/claims/120/9", "object": {"sha": "theirs"}},
         ])))
-        self.assertEqual(kraken.Refs(api).of(12), (True, [(1, "mine")]))
+        self.assertEqual(kraken.Refs(api).of(12), [(1, "mine")])
 
     def test_claim_refs_of_separates_absent_from_unreadable(self):
         api = FakeApi(request=lambda m, p, body=None: (200, "[]"))
-        self.assertEqual(kraken.Refs(api).of(7), (True, []))
+        self.assertEqual(kraken.Refs(api).of(7), [])
         api = FakeApi(request=lambda m, p, body=None: (500, ""))
-        self.assertEqual(kraken.Refs(api).of(7), (False, []))
+        with self.assertRaises(kraken.TransportError):
+            kraken.Refs(api).of(7)
 
-    def test_claim_ref_list_transport_failure_is_none(self):
+    def test_claim_ref_list_transport_failure_raises(self):
         api = FakeApi(request=lambda m, p, body=None: (500, ""))
-        self.assertIsNone(kraken.Refs(api).all())
+        with self.assertRaises(kraken.TransportError):
+            kraken.Refs(api).all()
 
     def test_claim_ref_owner_names_the_ref_holder(self):
         # The §5 re-check discriminator: a 422 is a real loss only when the
@@ -703,9 +720,53 @@ class CommentRecordsPaginationTests(unittest.TestCase):
         self.assertEqual(result[0]["createdAt"], "2026-07-01T00:00:00Z")
         self.assertEqual(result[0]["body"], "first")
 
-    def test_transport_failure_returns_none(self):
+    def test_transport_failure_raises(self):
         api = FakeApi(request=lambda m, p, body=None: (500, ""))
-        self.assertIsNone(api.comment_records("42"))
+        with self.assertRaises(kraken.TransportError):
+            api.comment_records("42")
+
+
+class TransportFaultTests(unittest.TestCase):
+    """A read that did not land raises; only the code deciding what a fault
+    means mentions one, and `stage` names it for the exit-20 line."""
+
+    def test_a_non_2xx_read_raises(self):
+        api = FakeApi(request=lambda m, p, body=None: (404, ""))
+        with self.assertRaises(kraken.TransportError):
+            api.issue_detail(7)
+
+    def test_stage_names_the_step_that_failed(self):
+        with self.assertRaises(kraken.TransportError) as caught:
+            with kraken.stage("labels"):
+                raise kraken.TransportError()
+        self.assertEqual(caught.exception.stage, "labels")
+
+    def test_an_answer_without_a_count_is_no_answer(self):
+        # Never 0: a zero anchor sits below every thread and buries requeues.
+        api = FakeApi(request=lambda m, p, body=None: (200, json.dumps({})))
+        with self.assertRaises(kraken.TransportError):
+            api.comment_count(7)
+
+
+class IssueViewTests(unittest.TestCase):
+    """The REST issue decoded once, with a stand-in for a read that failed."""
+
+    def test_decodes_what_the_callers_ask(self):
+        view = kraken.IssueView({"state": "open", "title": "t", "body": None,
+                                 "comments": 3,
+                                 "labels": [{"name": "kraken-task"}]})
+        self.assertTrue(view.open)
+        self.assertFalse(view.closed)
+        self.assertEqual((view.title, view.body), ("t", ""))
+        self.assertEqual(view.labels, ["kraken-task"])
+        self.assertEqual(view.comment_total, 3)
+        self.assertFalse(view.unknown)
+
+    def test_the_unreadable_issue_is_unknown_and_empty(self):
+        view = kraken.UNREADABLE_ISSUE
+        self.assertTrue(view.unknown)
+        self.assertEqual(view.labels, [])
+        self.assertIsNone(view.comment_total)
 
 
 class BatchedAliasTests(unittest.TestCase):
@@ -755,11 +816,13 @@ class BatchedAliasTests(unittest.TestCase):
 
         def fake(q):
             calls.append(q)
-            return None if len(calls) > 1 else {"data": {"repository": {"a0": {}}}}
+            if len(calls) > 1:
+                raise kraken.TransportError()
+            return {"data": {"repository": {"a0": {}}}}
 
         api = FakeApi("o/t", graphql=fake)
-        self.assertIsNone(
-            api.aliased([f"a{i}: x" for i in range(kraken.GRAPHQL_ALIAS_CHUNK + 1)]))
+        with self.assertRaises(kraken.TransportError):
+            api.aliased([f"a{i}: x" for i in range(kraken.GRAPHQL_ALIAS_CHUNK + 1)])
 
     def test_a_null_repository_is_an_empty_answer_not_a_crash(self):
         api = FakeApi("o/t", graphql=lambda q: {"data": {"repository": None}})
@@ -797,9 +860,14 @@ class ClaimNextIterationTests(unittest.TestCase):
         tasks = [c.task for c in (rows or [])]
 
         def fake_claim_step(api, issue, worker, record=None, lease=None,
-                            ttl=None, probe_lease=False):
+                            ttl=None, probe=False):
             self.attempted.append(issue)
             return claim_results[issue]
+
+        def read(now=None, ttl=None):
+            if rows is None:
+                raise kraken.TransportError()
+            return kraken.QueueRead(tasks, {}, {}, states or {})
 
         # The preflight reads the repo's label set; the queue read is scripted.
         api = FakeApi(paginated=lambda path: [{"name": "project:app"}])
@@ -809,9 +877,7 @@ class ClaimNextIterationTests(unittest.TestCase):
                 api, "app", "w1",
                 queue=FakeQueue(
                     api,
-                    read=lambda now=None, ttl=None: (
-                        None if rows is None
-                        else kraken.QueueRead(tasks, {}, {}, states or {})),
+                    read=read,
                     candidates=lambda p, read=None: rows),
                 claim_step=fake_claim_step)
         return won.exit_code, won, buf.getvalue()
@@ -923,44 +989,42 @@ class ClaimNextIterationTests(unittest.TestCase):
         self.assertIn("claim-next: gh-failure stage=list", out)
 
 
-class VerifyProjectTests(unittest.TestCase):
+class ProjectCheckTests(unittest.TestCase):
     """The project preflight, isolated from transport: a worker pointed at a
     `project:<name>` label the coordination repo does not carry is permanently
     deaf — every task is filtered out client-side, so the queue reads as empty
     forever. The check refuses on a genuinely absent label, and never declares a
     project missing from a label read that merely failed."""
 
-    def _verify(self, projects, project="app"):
+    def _check(self, projects, project="app"):
         # Faked at the Api, not at `Queue.projects`: the real label read and
-        # the real `project:` stripping stay under test, and a failed read is a
-        # `paginated` answering None — what the transport actually does.
-        labels = (None if projects is None
-                  else [{"name": f"project:{p}"} for p in projects])
+        # the real `project:` stripping stay under test.
+        labels = [{"name": f"project:{p}"} for p in projects]
         api = FakeApi(paginated=lambda path: labels)
-        return kraken.Queue(api).verify_project(project)
+        return kraken.Queue(api).check_project(project)
 
     def test_configured_project_passes(self):
-        ok, message = self._verify(["app", "docs"])
-        self.assertIs(ok, True)
-        self.assertEqual(message, "")
+        self.assertTrue(self._check(["app", "docs"]).carried)
 
     def test_unknown_project_refuses_and_names_the_configured_ones(self):
-        ok, message = self._verify(["app", "docs"], project="ap")
-        self.assertIs(ok, False)
+        check = self._check(["app", "docs"], project="ap")
+        self.assertFalse(check.carried)
+        message = check.refusal
         self.assertIn("project:ap", message, "refusal did not name the missing label")
         self.assertIn("app", message, "refusal did not list the configured projects")
         self.assertIn("docs", message, "refusal did not list the configured projects")
         self.assertIn("--project", message, "refusal did not name the fix")
 
     def test_repo_without_any_project_label_refuses(self):
-        ok, message = self._verify([], project="app")
-        self.assertIs(ok, False)
-        self.assertIn("none configured", message)
+        check = self._check([], project="app")
+        self.assertFalse(check.carried)
+        self.assertIn("none configured", check.refusal)
 
     def test_transport_failure_is_not_a_missing_project(self):
-        ok, message = self._verify(None)
-        self.assertIsNone(ok, "a failed label read must not read as a missing project")
-        self.assertIn("gh-failure", message)
+        api = FakeApi(paginated=unreachable)
+        with self.assertRaises(kraken.TransportError,
+                               msg="a failed label read must not read as a missing project"):
+            kraken.Queue(api).check_project("app")
 
 
 class ClaimNextProjectGateTests(unittest.TestCase):
@@ -977,7 +1041,7 @@ class ClaimNextProjectGateTests(unittest.TestCase):
     def _run(self, labels):
         # The verdict comes from the real preflight over a scripted label set:
         # a list of names, [] for a repo with none, None for a failed read.
-        api = FakeApi(paginated=lambda path: labels)
+        api = FakeApi(paginated=unreachable if labels is None else lambda path: labels)
         buf = StringIO()
         with redirect_stdout(buf):
             rc = kraken.acquire_next(
@@ -1020,8 +1084,9 @@ class WatchProjectGateTests(unittest.TestCase):
         raise KeyboardInterrupt
 
     def _run(self, labels):
-        # The verdict comes from the real preflight over a scripted label set.
-        api = FakeApi(paginated=lambda path: labels)
+        # The verdict comes from the real preflight over a scripted label set;
+        # None is a failed read.
+        api = FakeApi(paginated=unreachable if labels is None else lambda path: labels)
         out, err = StringIO(), StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             try:
@@ -1121,9 +1186,11 @@ class PrIsMergedTests(unittest.TestCase):
         self.assertFalse(kraken.pr_is_merged(api, "not a url"))
         self.assertFalse(kraken.pr_is_merged(api, None))
 
-    def test_github_transport_failure_is_none(self):
+    def test_github_transport_failure_raises(self):
+        # Never False: an unread PR is not an unmerged one.
         api = FakeApi(request=lambda m, p, body=None: (500, ""))
-        self.assertIsNone(kraken.pr_is_merged(api, "https://github.com/o/r/pull/1"))
+        with self.assertRaises(kraken.TransportError):
+            kraken.pr_is_merged(api, "https://github.com/o/r/pull/1")
 
     def test_github_merged_pr_is_true(self):
         api = FakeApi(request=lambda m, p, body=None: (
@@ -1316,16 +1383,16 @@ class StatusComputeTests(unittest.TestCase):
                               for n in range(1, 6)}))
         self.assertEqual(len(report["review_queue"]), 5)
 
-    def test_a_failed_pr_read_still_propagates_none(self):
+    def test_a_failed_pr_read_still_propagates(self):
         # The console has one transport call left inside the report — the merge
         # state of a delivery PR — and a failure there must still be exit 20
         # rather than a report that quietly says "not merged".
         nodes = [self._node(88, "x", ["kraken-task", "project:app", "awaiting-merge"])]
         report = kraken.StatusReport(
-            FakeApi("o/tasks"), "", self.NOW, pr_merged=lambda u: None,
-        ).of(kraken.QueueRead(nodes, {}, {},
-                              {88: self._delivered("https://github.com/o/r/pull/5")}))
-        self.assertIsNone(report)
+            FakeApi("o/tasks"), "", self.NOW, pr_merged=unreachable)
+        with self.assertRaises(kraken.TransportError):
+            report.of(kraken.QueueRead(
+                nodes, {}, {}, {88: self._delivered("https://github.com/o/r/pull/5")}))
 
 
 class QueueHygieneTests(unittest.TestCase):
@@ -1590,9 +1657,10 @@ class DependsOnBatchTests(unittest.TestCase):
         api = FakeApi("o/t", graphql=lambda q: {"data": {"repository": {}}})
         self.assertEqual(kraken.Queue(api)._depends_on([5]), {5: False})
 
-    def test_transport_failure_propagates_as_none(self):
-        api = FakeApi("o/t", graphql=lambda q: None)
-        self.assertIsNone(kraken.Queue(api)._depends_on([1]))
+    def test_transport_failure_propagates(self):
+        api = FakeApi("o/t", graphql=unreachable)
+        with self.assertRaises(kraken.TransportError):
+            kraken.Queue(api)._depends_on([1])
 
 
 class ExpiryCountTests(unittest.TestCase):
@@ -1904,7 +1972,8 @@ class ReconcilerApplyTests(unittest.TestCase):
             aliased=lambda fields: {
                 "c0": {"committedDate": "2026-01-01T00:00:00Z",
                        "message": kraken.make_marker(record.payload())}},
-            comment_count=lambda n: live_total,
+            comment_count=(unreachable if live_total is None
+                           else lambda n: live_total),
         )
 
     @staticmethod
@@ -1947,9 +2016,9 @@ class ReconcilerApplyTests(unittest.TestCase):
                                     comments=5, recorded=True),
             live_total=None)
         buf, err = StringIO(), StringIO()
-        with redirect_stdout(buf), redirect_stderr(err):
-            counts = kraken.apply_reconcile(api, self._plan_re_anchor(), "w")
-        self.assertIsNone(counts)
+        with redirect_stdout(buf), redirect_stderr(err), \
+                self.assertRaises(kraken.TransportError):
+            kraken.apply_reconcile(api, self._plan_re_anchor(), "w")
         self.assertIn("gh-failure stage=count issue=8", err.getvalue())
         self.assertEqual(self.writes, [])
 
@@ -1967,14 +2036,14 @@ class ReconcilerApplyTests(unittest.TestCase):
         self.assertTrue(after.held_state, "the repair must not lift the hold")
         self.assertFalse(after.requeued(3), "re-anchoring is not a requeue")
 
-    def test_transport_failure_answers_none(self):
+    def test_transport_failure_is_reported_and_raised(self):
         api = self._api(swap=lambda n, remove=None, add=None: False)
         buf, err = StringIO(), StringIO()
-        with redirect_stdout(buf), redirect_stderr(err):
-            counts = kraken.apply_reconcile(
+        with redirect_stdout(buf), redirect_stderr(err), \
+                self.assertRaises(kraken.TransportError):
+            kraken.apply_reconcile(
                 api,
                 [kraken.Reclaim(5, "x", held=True, gens=[1])], "w")
-        self.assertIsNone(counts)
         self.assertIn("gh-failure stage=labels issue=5", err.getvalue())
 
     def test_project_reconcile_folds_the_plan_into_the_read(self):
@@ -2069,7 +2138,10 @@ class WatchFailureLoopTests(unittest.TestCase):
         def scripted(api, project):
             if not pending:
                 raise KeyboardInterrupt
-            return pending.pop(0)
+            snapshot = pending.pop(0)
+            if snapshot is None:  # a read that did not land
+                raise kraken.TransportError()
+            return snapshot
 
         self._setenv("KRAKEN_WATCH_POLL_SECONDS", "0")  # no real waiting
         for name, value in (env or {}).items():
@@ -2223,8 +2295,9 @@ def ref_head(worker="w1", epoch=1000.0, gen=1):
 
 
 def issue_obj(state="open", labels=("kraken-task", "in-progress"), comments=0):
-    return {"state": state, "title": "t", "body": "b", "comments": comments,
-            "labels": [{"name": n} for n in labels]}
+    return kraken.IssueView({"state": state, "title": "t", "body": "b",
+                             "comments": comments,
+                             "labels": [{"name": n} for n in labels]})
 
 
 def task_state(state, comments, **kw):
@@ -2237,17 +2310,11 @@ class ResumeVerdictTests(unittest.TestCase):
     """PROTOCOL.md §5.3 as a decision table: who owns the lease decides whether a
     write is legal, and an ambiguous read is never a decision."""
 
-    # None is a meaningful VALUE for obj ("the read failed"), so its default
-    # needs a sentinel of its own. `head` no longer needs one: the two
-    # no-ladder outcomes are objects (NO_LEASE / UNREADABLE_LEASE).
-    DEFAULT = object()
-
     def verdict(self, *, record=None, repo="acme/tasks", worker="w1",
-                head=DEFAULT, obj=DEFAULT, state=kraken.NO_RECORD):
+                head=None, obj=None, state=kraken.NO_RECORD):
         return kraken.resume_verdict(
-            record or rec(), repo, worker,
-            ref_head() if head is self.DEFAULT else head,
-            issue_obj() if obj is self.DEFAULT else obj, state)
+            record or rec(), repo, worker, head or ref_head(),
+            obj or issue_obj(), state)
 
     def test_live_lease_of_ours_resumes(self):
         v, detail = self.verdict(head=ref_head(epoch=1900.0))
@@ -2280,8 +2347,15 @@ class ResumeVerdictTests(unittest.TestCase):
         self.assertEqual(detail["reason"], "lease-unreadable")
 
     def test_unreadable_issue_is_a_retry(self):
-        v, detail = self.verdict(obj=None)
+        v, detail = self.verdict(obj=kraken.UNREADABLE_ISSUE)
         self.assertEqual(v, "retry", "a failed issue read is ambiguous, not a loss")
+        self.assertEqual(detail["reason"], "issue-unreadable")
+
+    def test_unreadable_record_is_a_retry(self):
+        # The record decides whether the task is finished, so an unread one is
+        # as ambiguous as an unread issue.
+        v, detail = self.verdict(state=kraken.UNREADABLE_RECORD)
+        self.assertEqual(v, "retry")
         self.assertEqual(detail["reason"], "issue-unreadable")
 
     def test_terminal_label_without_our_lease_is_resolved(self):
@@ -2350,7 +2424,7 @@ class ResumeVerdictTests(unittest.TestCase):
         # read — hence the "nothing was observed" lease and no issue.
         v, detail = kraken.resume_verdict(
             rec(repo="acme/other"), "acme/tasks", "w1",
-            kraken.UNREADABLE_LEASE, None)
+            kraken.UNREADABLE_LEASE, kraken.UNREADABLE_ISSUE)
         self.assertEqual(v, "blocked", "a claim elsewhere must block this drain")
         self.assertEqual(detail["reason"], "claim-elsewhere")
         self.assertIn("acme/other#7", detail["detail"],
@@ -2406,10 +2480,11 @@ class FeedbackSinceTests(unittest.TestCase):
         self.assertEqual(kraken.feedback_since(self._api(), 12, 99), [],
                          "a stale anchor must not produce feedback")
 
-    def test_a_failed_read_is_none_never_an_empty_cut(self):
-        api = FakeApi("acme/tasks", comment_records=lambda i: None)
-        self.assertIsNone(kraken.feedback_since(api, 12, 0),
-                          "a failed read must not pose as 'nothing was said'")
+    def test_a_failed_read_raises_never_an_empty_cut(self):
+        api = FakeApi("acme/tasks", comment_records=unreachable)
+        with self.assertRaises(kraken.TransportError,
+                               msg="a failed read must not pose as 'nothing was said'"):
+            kraken.feedback_since(api, 12, 0)
 
 
 class NextActionEnvelopeTests(unittest.TestCase):

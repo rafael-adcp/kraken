@@ -13,6 +13,7 @@ from .contract import (
     CommentRecord, EXIT_OK, EXIT_TRANSPORT, EXIT_USAGE, SKILL_DIR
 )
 from .comments import make_marker, parse_marker
+from .transport import TransportError, stage
 from .refs import Refs
 from .queue import missing_requirements
 from .render import render_init
@@ -65,8 +66,9 @@ def refuse_foreign_owner(api) -> int | None:
     """None when the token's login owns the slug, else the exit code of a
     reported refusal. `POST /user/repos` ignores the slug's owner (#174)."""
     owner = api.repo.split("/", 1)[0] if "/" in api.repo else None
-    login = api.authenticated_login()
-    if login is None:
+    try:
+        login = api.authenticated_login()
+    except TransportError:
         print("init: gh-failure stage=identity (GET /user) — cannot tell who "
               f"{api.repo} would be created under", file=sys.stderr)
         return EXIT_TRANSPORT
@@ -213,70 +215,58 @@ def cmd_validate(args: argparse.Namespace) -> int:
     one actionable comment; debounced, so an unchanged verdict posts nothing.
     Informs only: it never holds, closes or relabels."""
     api, issue = args.api, args.issue
-
-    labels = api.issue_label_names(issue)
-    if labels is None:
-        print(f"validate: gh-failure stage=labels issue={issue}", file=sys.stderr)
+    try:
+        print(_validate(api, issue))
+    except TransportError as failed:
+        print(f"validate: gh-failure stage={failed.stage} issue={issue}",
+              file=sys.stderr)
         return EXIT_TRANSPORT
-    if "kraken-task" not in labels:
-        print(f"validate: #{issue} is not a kraken-task issue — no-op")
-        return EXIT_OK
-
-    body = api.issue_body(issue)
-    if body is None:
-        print(f"validate: gh-failure stage=body issue={issue}", file=sys.stderr)
-        return EXIT_TRANSPORT
-
-    missing = [VALIDATE_MESSAGES[requirement]
-               for requirement in missing_requirements(labels, body)]
-
-    if not missing:
-        print(f"validate: #{issue} is compliant — no-op")
-        return EXIT_OK
-
-    body_to_post = validation_body(missing)
-
-    records = api.comment_records(issue)
-    if records is None:
-        print(f"validate: gh-failure stage=comments issue={issue}", file=sys.stderr)
-        return EXIT_TRANSPORT
-    prior = latest_validation_comment(records)
-    # rstrip: a re-read body may pick up a trailing newline the transport adds;
-    # our own posted body never carries one, so normalizing both is exact.
-    if prior is not None and prior.rstrip("\n") == body_to_post.rstrip("\n"):
-        print(f"validate: #{issue} already carries an identical validation comment — no-op")
-        return EXIT_OK
-
-    if not api.post_comment(issue, body_to_post):
-        print(f"validate: gh-failure stage=comment issue={issue}", file=sys.stderr)
-        return EXIT_TRANSPORT
-
-    rc = _refresh_anchor(api, issue)
-    if rc != EXIT_OK:
-        return rc
-    print(f"validate: #{issue} flagged (missing: project/Goal/Acceptance as listed)")
     return EXIT_OK
 
 
-def _refresh_anchor(api, issue) -> int:
+def _validate(api, issue) -> str:
+    """Validate one task; the line to report."""
+    with stage("labels"):
+        labels = api.issue_label_names(issue)
+    if "kraken-task" not in labels:
+        return f"validate: #{issue} is not a kraken-task issue — no-op"
+
+    with stage("body"):
+        body = api.issue_body(issue)
+    missing = [VALIDATE_MESSAGES[requirement]
+               for requirement in missing_requirements(labels, body)]
+    if not missing:
+        return f"validate: #{issue} is compliant — no-op"
+
+    body_to_post = validation_body(missing)
+    with stage("comments"):
+        prior = latest_validation_comment(api.comment_records(issue))
+    # rstrip: a re-read body may pick up a trailing newline the transport adds;
+    # our own posted body never carries one, so normalizing both is exact.
+    if prior is not None and prior.rstrip("\n") == body_to_post.rstrip("\n"):
+        return (f"validate: #{issue} already carries an identical validation "
+                "comment — no-op")
+
+    if not api.post_comment(issue, body_to_post):
+        raise TransportError("comment")
+    _refresh_anchor(api, issue)
+    return f"validate: #{issue} flagged (missing: project/Goal/Acceptance as listed)"
+
+
+def _refresh_anchor(api, issue) -> None:
     """Move the record's anchor past the comment just posted (§3.1), or §6
     would read the validator's own comment as an operator's reply and requeue
     a held task. A task with no record has no anchor to move."""
     states = States(api)
     record = states.of(issue)
     if record.unknown:
-        print(f"validate: gh-failure stage=record issue={issue}", file=sys.stderr)
-        return EXIT_TRANSPORT
+        raise TransportError("record")
     if not record.recorded:
-        return EXIT_OK
-    total = api.comment_count(issue)
-    if total is None:
-        print(f"validate: gh-failure stage=anchor issue={issue}", file=sys.stderr)
-        return EXIT_TRANSPORT
+        return
+    with stage("anchor"):
+        total = api.comment_count(issue)
     if not states.write(issue, record.re_anchored(total)):
-        print(f"validate: gh-failure stage=record issue={issue}", file=sys.stderr)
-        return EXIT_TRANSPORT
-    return EXIT_OK
+        raise TransportError("record")
 
 
 def is_identity_label(name: str) -> bool:
@@ -290,8 +280,9 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     label filters never match dead state. Idempotent."""
     api, issue = args.api, args.issue
 
-    labels = api.issue_label_names(issue)
-    if labels is None:
+    try:
+        labels = api.issue_label_names(issue)
+    except TransportError:
         print(f"cleanup: gh-failure stage=labels issue={issue}", file=sys.stderr)
         return EXIT_TRANSPORT
     if "kraken-task" not in labels:
@@ -308,8 +299,12 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
             return EXIT_TRANSPORT
         stripped += 1
 
-    ok, refs = Refs(api).of(issue)
-    if not ok or not Refs(api).drop(issue, [g for g, _s in refs]):
+    refs = Refs(api)
+    try:
+        dropped = refs.drop(issue, [g for g, _s in refs.of(issue)])
+    except TransportError:
+        dropped = False
+    if not dropped:
         print(f"cleanup: gh-failure stage=ref issue={issue}", file=sys.stderr)
         return EXIT_TRANSPORT
 

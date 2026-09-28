@@ -12,7 +12,7 @@ from .contract import (
     EXIT_OK, EXIT_TRANSPORT, Gen, Issue, Json, Worker, diag
 )
 from .comments import compose_comment
-from .transport import Api
+from .transport import Api, TransportError, stage
 from .lease import LEASE_EXPIRY_ESCALATE, Lease
 from .refs import Refs
 from .state import NO_RECORD, States, TaskState
@@ -47,14 +47,6 @@ def stale_claim_body(worker: Worker, reason: str) -> str:
 # with its ref delete, so a half-applied pass leaves the task held and the next
 # reader finishes it (§5's ordering rule).
 
-class RepairFailed(Exception):
-    """A repair write that did not land; `stage` names which one."""
-
-    def __init__(self, stage: str):
-        super().__init__(stage)
-        self.stage = stage
-
-
 @dataclasses.dataclass
 class Repair:
     issue: Issue
@@ -80,7 +72,7 @@ class OrphanLock(Repair):
 
     def apply(self, api, states, worker):
         if not Refs(api).drop(self.issue, self.gens):
-            raise RepairFailed("ref")
+            raise TransportError("ref")
         diag(f"reap: orphan-lock issue={self.issue} — claim ref deleted")
         return True
 
@@ -96,7 +88,7 @@ class OrphanState(Repair):
 
     def apply(self, api, states, worker):
         if not states.delete(self.issue):
-            raise RepairFailed("state")
+            raise TransportError("state")
         diag(f"reap: orphan-state issue={self.issue} — state record deleted")
         return True
 
@@ -116,21 +108,20 @@ class Reclaim(Repair):
     def apply(self, api, states, worker):
         if not api.post_comment(self.issue,
                                 stale_claim_body(worker, self.reason)):
-            raise RepairFailed("comment")
+            raise TransportError("comment")
         # The record lands before the ref goes, or the task is observably
         # queued while it waits on a human (§3.1).
-        total = api.comment_count(self.issue)
-        if total is None:
-            raise RepairFailed("count")
+        with stage("count"):
+            total = api.comment_count(self.issue)
         if not states.write(self.issue, states.of(self.issue).moved_to(
                 "needs-decision", worker, total)):
-            raise RepairFailed("state")
+            raise TransportError("state")
         if not api.swap_labels(self.issue,
                                remove="in-progress" if self.held else None,
                                add="needs-decision"):
-            raise RepairFailed("labels")
+            raise TransportError("labels")
         if not Refs(api).drop(self.issue, self.gens):
-            raise RepairFailed("ref")
+            raise TransportError("ref")
         diag(f"reap: reclaimed issue={self.issue} ({self.reason})")
         return True
 
@@ -158,7 +149,7 @@ class Migrate(Repair):
 
     def apply(self, api, states, worker):
         if not states.write(self.issue, self._record(worker)):
-            raise RepairFailed("state")
+            raise TransportError("state")
         diag(f"reap: migrate issue={self.issue} — recorded {self.state}")
         return True
 
@@ -178,18 +169,17 @@ class ReAnchor(Repair):
     rule: ClassVar[str] = "re-anchor"
 
     def apply(self, api, states, worker):
-        total = api.comment_count(self.issue)
-        if total is None:
-            raise RepairFailed("count")
+        with stage("count"):
+            total = api.comment_count(self.issue)
         record = states.of(self.issue)
         if record.unknown:
-            raise RepairFailed("state")
+            raise TransportError("state")
         if not record.held_state or total >= record.comments:
             diag(f"reap: re-anchor issue={self.issue} — skipped, the record and "
                  "the thread already agree")
             return False
         if not states.write(self.issue, record.re_anchored(total)):
-            raise RepairFailed("state")
+            raise TransportError("state")
         diag(f"reap: re-anchor issue={self.issue} — anchor {record.comments} -> "
              f"{total} ({self.reason})")
         return True
@@ -267,18 +257,18 @@ def _record_repairs(by_number: Mapping[Issue, Task],
 
 
 def apply_reconcile(api: Api, plan: Sequence[Repair],
-                    worker: Worker) -> dict[str, int] | None:
-    """Execute a plan. Returns per-rule counts, or None on the first transport
-    failure."""
+                    worker: Worker) -> dict[str, int]:
+    """Execute a plan. Returns per-rule counts; stops at the first transport
+    fault, reports it, and re-raises."""
     counts = {repair.rule: 0 for repair in REPAIRS}
     states = States(api)
     for repair in plan:
         try:
             applied = repair.apply(api, states, worker)
-        except RepairFailed as failed:
+        except TransportError as failed:
             print(f"reap: gh-failure stage={failed.stage} issue={repair.issue}",
                   file=sys.stderr)
-            return None
+            raise
         if applied:
             counts[repair.rule] += 1
     return counts
@@ -296,28 +286,26 @@ def project_reconcile(plan: Sequence[Repair], tasks: list[Task],
 
 
 def reconcile_pass(api: Api, worker: Worker, ttl: int | None = None, *,
-                   queue: Queue | None = None) -> tuple[int, Json | None]:
-    """`(exit_code, counts)`; counts is None on transport failure. `queue` is
-    injectable for tests."""
-    got = (queue or Queue(api)).read(ttl=ttl)
-    if got is None:
+                   queue: Queue | None = None) -> Json:
+    """One fresh queue read, reconciled: `{"leases": n, **per-rule counts}`.
+    A transport fault is reported and re-raised. `queue` is injectable for
+    tests."""
+    try:
+        got = (queue or Queue(api)).read(ttl=ttl)
+    except TransportError:
         print("reap: gh-failure stage=list", file=sys.stderr)
-        return (EXIT_TRANSPORT, None)
-    leases = got.leases
-
-    plan = reconcile_plan(got.tasks, leases, got.states)
-    counts = apply_reconcile(api, plan, worker)
-    if counts is None:
-        return (EXIT_TRANSPORT, None)
-    return (EXIT_OK, {"leases": len(leases), **counts})
+        raise
+    plan = reconcile_plan(got.tasks, got.leases, got.states)
+    return {"leases": len(got.leases), **apply_reconcile(api, plan, worker)}
 
 
 def cmd_reap(args: argparse.Namespace) -> int:
     """The reconcile pass by hand (§6). It does not free expired leases — they
     are already unheld — nor touch the write-only in-progress label."""
-    rc, counts = reconcile_pass(args.api, args.worker, args.ttl)
-    if counts is None:
-        return rc
+    try:
+        counts = reconcile_pass(args.api, args.worker, args.ttl)
+    except TransportError:
+        return EXIT_TRANSPORT
 
     print(
         f"reap: done leases={counts['leases']} reclaimed={counts['reclaim']} "
@@ -325,4 +313,4 @@ def cmd_reap(args: argparse.Namespace) -> int:
         f"orphan_states={counts['orphan-state']} migrated={counts['migrate']} "
         f"re_anchored={counts['re-anchor']}"
     )
-    return rc
+    return EXIT_OK

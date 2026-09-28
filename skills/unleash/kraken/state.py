@@ -10,7 +10,7 @@ from .contract import (
     CommitMeta, HELD_LABELS, Issue, Json, Sha, Worker
 )
 from .comments import parse_marker
-from .transport import Api
+from .transport import Api, TransportError
 from .refs import EMPTY_TREE_SHA, Refs, kraken_ref_items
 
 # --- the state record --------------------------------------------------------
@@ -199,22 +199,19 @@ class States:
 
     # --- reading ---------------------------------------------------------------
 
-    def all(self, items: Iterable[Json] | None = None,
-            ) -> dict[Issue, Sha] | None:
-        """Every state ref as `{issue: sha}`, or None on transport failure.
-        Pass an already-fetched `refs/kraken/` payload as `items` to avoid a
-        second paginated read."""
+    def all(self, items: Iterable[Json] | None = None) -> dict[Issue, Sha]:
+        """Every state ref as `{issue: sha}`. Pass an already-fetched
+        `refs/kraken/` payload as `items` to avoid a second paginated read."""
         if items is None:
             items = kraken_ref_items(self.api)
-            if items is None:
-                return None
         return state_ref_shas(items)
 
     def at(self, sha: Sha) -> TaskState:
         """The record behind a known sha: one commit read. A commit that does
         not decode is `NO_RECORD`, so §6's rule 3 can rewrite it."""
-        meta = Refs(self.api).commit_meta([sha])
-        if meta is None:
+        try:
+            meta = Refs(self.api).commit_meta([sha])
+        except TransportError:
             return UNREADABLE_RECORD
         entry = meta.get(sha) or {}
         record = parse_state_commit(entry.get("message") or "", sha)
@@ -226,9 +223,10 @@ class States:
         parse — `state/12` must not answer with `state/120`."""
         if not str(issue).lstrip("-").isdigit():
             return UNREADABLE_RECORD
-        items = self.api.paginated(
-            f"/repos/{self.api.repo}/git/matching-refs/kraken/state/{int(issue)}")
-        if items is None:
+        try:
+            items = self.api.paginated(
+                f"/repos/{self.api.repo}/git/matching-refs/kraken/state/{int(issue)}")
+        except TransportError:
             return UNREADABLE_RECORD
         sha = state_ref_shas(items).get(int(issue))
         return NO_RECORD if sha is None else self.at(sha)
@@ -240,8 +238,9 @@ class States:
         claim ref: the only writers are the proven lease holder (§5.3) and the
         idempotent reconciler. Create comes first because a task's first
         transition is the common case."""
-        sha = Refs(self.api).commit(record.payload())
-        if sha is None:
+        try:
+            sha = Refs(self.api).commit(record.payload())
+        except TransportError:
             return False
         status, _text = self.api.request(
             "POST", f"/repos/{self.api.repo}/git/refs",
