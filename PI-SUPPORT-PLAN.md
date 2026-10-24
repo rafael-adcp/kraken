@@ -33,7 +33,8 @@ argument delivery** by spike 0.9: the `/skill:unleash <args>` form reaches the m
 Pi 1.4.0 + OpenAI `gpt-6-luna`, 2026-10-23). Decisions #1, #2 and #4 are made; #3 is still
 open but low-stakes — see [Decisions needed](#decisions-needed).
 
-**PR 3 in progress** (`docs/pi-third-harness`, base `main` now that #184 merged): 1.0, 1.1,
+**PR 3 in review** as [#185](https://github.com/rafael-adcp/kraken/pull/185)
+(`docs/pi-third-harness`, base `main` now that #184 merged): 1.0, 1.1,
 1.2, 1.3's prose sites, 1.4, 1.6, 1.7, the Pi case in the trailers test, and `make lint`.
 What it found wrong in this plan is in [Corrections found by PR 3](#corrections-found-by-pr-3).
 Next after it: PR 4 (Phase 2).
