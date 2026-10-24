@@ -22,12 +22,13 @@ Drafted 2026-10-22 against `kraken@0.7.1`; re-based 2026-10-23 onto `kraken@0.8.
 ## Status — where we left off
 
 **Phase 1: in progress.** PR 1 (`feat/pi-harness-agnostic-loop`, [1.5](#15-scriptskraken-loopsh--generalize-the-harness)
-+ the parametrized loop tests), rebased onto 0.8.0, is in review as
++ the parametrized loop tests) is **merged** as
 [#183](https://github.com/rafael-adcp/kraken/pull/183). The Pi argv it ships is **verified for
 argument delivery** by spike 0.9: the `/skill:unleash <args>` form reaches the model.
 
-**PR 2 in progress** (`fix/pi-harness-neutral-launch-line`, stacked on PR 1): the launch
-recon in `render.py` keeps its copy-paste `/kraken:unleash` lines and names Pi's spelling (1.3). Spikes 0.3 and 0.9 are **done** (operator,
+**PR 2 in review** as [#184](https://github.com/rafael-adcp/kraken/pull/184)
+(`fix/pi-harness-neutral-launch-line`): the launch recon in `render.py` keeps its copy-paste
+`/kraken:unleash` lines and names Pi's spelling (1.3). Spikes 0.3 and 0.9 are **done** (operator,
 Pi 1.4.0 + OpenAI `gpt-6-luna`, 2026-10-23). Decisions #1, #2 and #4 are made; #3 is still
 open — see [Decisions needed](#decisions-needed).
 
