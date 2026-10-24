@@ -74,6 +74,14 @@ class StatusTests(KrakenConformanceTest):
         for p in ("app", "idle", "web"):
             self.assertIn("--project %s" % p, out, "launch recon missing project:%s" % p)
         self.assertIn("acme/tasks --worker-name <worker-name>", out, "launch line shape wrong")
+        # The copy-paste contract: each launch line is the plugin command as-is,
+        # and one hint after them names Pi's spelling.
+        launch = out[out.index("🚀 Launch"):].splitlines()[1:]
+        for p in ("app", "idle", "web"):
+            self.assertIn("     /kraken:unleash acme/tasks --worker-name <worker-name> --project %s" % p,
+                          launch, "launch line for project:%s is not copy-paste" % p)
+        self.assertEqual(launch[-1], "     (Pi: /skill:unleash with the same arguments)",
+                         "launch hint must name the Pi spelling after the lines")
 
         # --- 2. THE read-only guarantee: nothing was written -----------------
         self.assertEqual(self._queue_snapshot(), snapshot, "status mutated the queue — must be read-only")
