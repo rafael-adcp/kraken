@@ -14,9 +14,10 @@
 # SessionEnd never fires there — that path is the StopFailure hook's
 # (stop-failure-release.sh). See the #60 FAQ in README.md.
 #
-# Both harnesses run it: Claude Code, and GitHub Copilot CLI, which loads this
+# Three harnesses run it: Claude Code; GitHub Copilot CLI, which loads this
 # plugin's hooks.json and fires SessionEnd with the same Claude-shaped payload
-# (verified on Copilot CLI 1.0.88).
+# (verified on Copilot CLI 1.0.88); and Pi, whose optional kraken extension
+# (extensions/pi/kraken.ts) pipes that payload in on session_shutdown.
 #
 # Scope: ONLY the ending session's own claims (#173). SessionEnd fires for
 # every agent session on the host — a 30-second `claude -p` or `copilot -p`

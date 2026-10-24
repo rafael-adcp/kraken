@@ -25,8 +25,18 @@ out of step. The linter enforces a lot of this mechanically.
 
 ## Dev setup
 
-No build, no package manager — just `bash` and `jq`. A `Makefile` fronts the
-checks. These are token-free (no model calls, no network) and run in CI on
+No build, no package manager — just `bash` and `jq`. One exception, and it is
+optional: [`extensions/pi/kraken.ts`](extensions/pi/kraken.ts), the repo's only
+non-bash, non-Python file, is a Pi extension that an operator loads only through
+Pi's `extensions` settings key (or `-e`, as `scripts/kraken-loop.sh --harness pi`
+does). Pi compiles it at load time, so there is still nothing to build, and
+`make test` does not run it (no Node in CI). Keep it a thin event-to-`bash`
+adapter: its decisions live in files the suites cover — the release in
+`hooks/session-end-release.sh`, the deny matcher in `extensions/pi/deny.py`
+(`tests/unit/test_pi_deny.py`) — and a change to the TypeScript itself is checked
+by hand with a real `pi` run, pasted into the PR. Like the hooks it is an
+optimization over lease expiry, never normative, so it has no `tests/COVERAGE.md`
+row. A `Makefile` fronts the checks. These are token-free (no model calls, no network) and run in CI on
 every PR:
 
 ```bash

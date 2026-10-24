@@ -124,6 +124,7 @@ Clone kraken and point [Pi](https://pi.dev/) at the checkout's `skills/` — in
 ```json
 {
   "skills": ["/path/to/kraken/skills"],
+  "extensions": ["/path/to/kraken/extensions/pi/kraken.ts"],
   "defaultTools": ["+grep", "+find", "+ls"]
 }
 ```
@@ -136,6 +137,14 @@ Clone kraken and point [Pi](https://pi.dev/) at the checkout's `skills/` — in
 - **Mind the `+`.** Pi's default tools are `read`, `bash`, `edit` and `write`;
   `+name` adds one, while a plain name *replaces* the defaults — so
   `["grep", "find", "ls"]` would leave the worker unable to edit or deliver.
+- **The `extensions` entry is optional.** It loads kraken's Pi extension, which
+  does for Pi what `hooks.json` does for the other two: hands the session's
+  claim back when the session ends (only that session's — `kraken.py claim`
+  records Pi's `PI_SESSION_ID`), and refuses `gh pr merge`, `gh repo delete` and
+  `gh issue close` in the `bash` tool. Pi compiles it on load; nothing to build.
+  The loop loads it on its own (`-e`), so this entry matters for the sessions
+  you start yourself. Without it a worker still conforms — an abandoned claim
+  frees itself within one lease TTL.
 - **Pick a model provider other than a Claude plan's OAuth.** Pi on Anthropic
   OAuth is billed as extra usage, not against your plan limits — Anthropic
   answers `400 invalid_request_error: "Third-party apps now draw from your extra
@@ -151,13 +160,16 @@ cd /path/to/my_app
 /path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness pi
 ```
 
-**Known gap:** Pi can refuse whole tools (`--exclude-tools`, `*` patterns, MCP
-tools included), which covers the GitHub MCP server's `merge_pull_request` and
-`issue_write` — but not a command pattern inside its single `bash` tool. So
-`gh pr merge`, `gh repo delete` and `gh issue close`, which Copilot denies at the
-tool layer, rest on the skill's prose until a Pi extension blocks them; the loop
-does not pass `--exclude-tools` yet either. Protect the work repo's default
-branch, and run Pi workers in an isolated environment (see [step
+**Deny rules, in two halves.** What Copilot denies with `--deny-tool`, a Pi
+worker under the loop refuses this way: the GitHub MCP server's
+`merge_pull_request` and `issue_write` tools are excluded whole
+(`--exclude-tools 'mcp__*__merge_pull_request,mcp__*__issue_write'`), and the
+extension refuses `gh pr merge`, `gh repo delete` and `gh issue close` inside the
+single `bash` tool. That second half matches the command's words
+([`extensions/pi/deny.py`](extensions/pi/deny.py)) — it catches
+`cd x && GH_TOKEN=… gh pr merge 1 --admin` but not a variable, `eval`, a script
+or `gh api`; it is defense in depth, not a sandbox. Protect the work repo's
+default branch, and run Pi workers in an isolated environment (see [step
 3](#the-full-walkthrough)).
 
 > Each command in context — environments, permissions, parallelism — is
@@ -459,9 +471,9 @@ checkout; run every worker command from the work repo's checkout (or pass
 
 | You want to...                 | Claude Code                                                                  | GitHub Copilot CLI                                                                                   | Pi                                                                                  |
 | ------------------------------ | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Install the plugin             | `/plugin marketplace add rafael-adcp/kraken`<br>`/plugin install kraken@kraken` | Same two commands, inside `copilot`                                                                  | `"skills": ["$KRAKEN/skills"]` in `~/.pi/agent/settings.json` ([details](#pi))     |
+| Install the plugin             | `/plugin marketplace add rafael-adcp/kraken`<br>`/plugin install kraken@kraken` | Same two commands, inside `copilot`                                                                  | `"skills": ["$KRAKEN/skills"]` (and optionally `"extensions": ["$KRAKEN/extensions/pi/kraken.ts"]`) in `~/.pi/agent/settings.json` ([details](#pi)) |
 | Stand up the queue (once)      | `/kraken:init OWNER/tasks --project my_app`                                  | Same, inside `copilot`                                                                               | `/skill:init OWNER/tasks --project my_app`, inside `pi`                             |
-| Pre-allow unattended work      | Allowlist in the work repo's `.claude/settings.json` (walkthrough step 3)    | Nothing to write — both scripts pass `--allow-all-tools --no-ask-user` plus the deny rules          | Nothing to write — Pi never asks; `bash` commands cannot be denied: isolate the environment |
+| Pre-allow unattended work      | Allowlist in the work repo's `.claude/settings.json` (walkthrough step 3)    | Nothing to write — both scripts pass `--allow-all-tools --no-ask-user` plus the deny rules          | Nothing to write — Pi never asks; the loop passes `--exclude-tools` and the extension's `gh` deny check: isolate the environment |
 | Launch a worker you can talk to | `/kraken:unleash OWNER/tasks --worker-name env-1 --project my_app`          | `$KRAKEN/scripts/kraken-copilot.sh OWNER/tasks --worker-name env-1 --project my_app`                | `/skill:unleash OWNER/tasks --worker-name env-1 --project my_app` — drains, no ambush yet |
 | Run with no session to watch   | —                                                                            | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app`                   | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness pi` |
 | Drain once and exit            | Append `--once` to `/kraken:unleash`                                         | Append `--once` to either script                                                                     | Append `--once` to the loop                                                         |
@@ -726,17 +738,20 @@ correctness gap, just a slower one: its task comes back in minutes rather than
 seconds — exactly like a hard kill / power loss on any harness. Run it
 through the loop anyway: it also skips the model entirely on an idle queue.
 
-**Pi** gets the floor and the loop, not the hooks: it loads no `hooks.json`, so
-its fast release is `kraken-loop.sh --harness pi` alone, until a Pi extension
-adds the session-end release and blocks the three `gh` commands. Side by side:
+**Pi** loads no `hooks.json`; its equivalent of the `SessionEnd` hook is the
+optional extension at [`extensions/pi/kraken.ts`](extensions/pi/kraken.ts)
+(Pi's `session_shutdown` event), which releases only the ending session's claim,
+recorded by Pi's `PI_SESSION_ID`. Pi exposes no clean usage-limit signal, so
+there is no `StopFailure` equivalent: the loop's release on exit covers that
+case. Side by side:
 
 | | Claude Code | GitHub Copilot CLI | Pi |
 | --- | --- | --- | --- |
 | Lease expiry (the floor) | ✅ | ✅ | ✅ |
-| Release on a graceful session end | `SessionEnd` hook | `SessionEnd` hook | — (planned extension) |
+| Release on a graceful session end | `SessionEnd` hook | `SessionEnd` hook | `session_shutdown` in the extension |
 | Release when a loop drain dies | — (no loop needed) | `kraken-loop.sh` | `kraken-loop.sh --harness pi` |
 | Release + retry on a usage limit | `StopFailure` hook + watcher | loop releases, next poll retries | loop releases, next poll retries |
-| Merge / delete / close refused at the tool layer | allowlist ask-gate | `--deny-tool` rules | MCP writes: `--exclude-tools`; `gh` in `bash`: skill prose only (planned extension) |
+| Merge / delete / close refused at the tool layer | allowlist ask-gate | `--deny-tool` rules | MCP writes: `--exclude-tools`; `gh` in `bash`: the extension's deny check |
 
 </details>
 
@@ -754,8 +769,8 @@ kraken checkout your `skills` entry points at.
 <summary><b>What does uninstalling leave behind?</b></summary>
 
 Nothing that runs. `/plugin uninstall kraken@kraken` removes the skills — the
-only thing Kraken ever installs on a machine (on Pi: drop the `skills` entry and
-the checkout). The queue is just a private repo
+only thing Kraken ever installs on a machine (on Pi: drop the `skills` and `extensions`
+entries and the checkout). The queue is just a private repo
 of issues you own, with nothing running inside it: keep it,
 archive it, or delete it. No service to stop, no daemon to kill, no state
 anywhere else.

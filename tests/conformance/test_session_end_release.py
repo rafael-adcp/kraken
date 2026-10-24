@@ -120,6 +120,23 @@ class SessionEndReleaseTests(KrakenConformanceTest):
         self.assertFalse(self.has_label(7, "in-progress"),
                          "the Copilot session's end did not release its claim")
 
+    def test_pi_session_shutdown_releases_its_own_claim(self):
+        # The kraken Pi extension (extensions/pi/kraken.ts) pipes this same
+        # event into this hook on session_shutdown, naming the Pi session that
+        # Pi's bash tool exported as PI_SESSION_ID when the claim was made.
+        self.mk_issue(7, "pi-held task", "kraken-task", "project:app")
+        self.mk_issue(8, "co-located claude task", "kraken-task", "project:app")
+        self.kraken("claim", "acme/tasks", 7, "pi-1", env={"PI_SESSION_ID": "pi-A"})
+        self.kraken("claim", "acme/tasks", 8, "w-claude", env=in_session("claude-B"))
+        self.assert_claim_survives(7, "pi-1", event("claude-B-other"),
+                                   "another session's end released a Pi claim")
+
+        self.run_hook(HOOK, event("pi-A"))
+        self.assertFalse(self.has_label(7, "in-progress"),
+                         "the Pi session's end did not release its claim")
+        self.assertTrue(self.has_label(8, "in-progress"),
+                        "the Pi session's end released a co-located live claim")
+
     def test_claim_recording_no_session_is_left_to_the_lease(self):
         # A claim made outside any agent session (a bare shell) names no
         # session, so no SessionEnd can prove it owns it — the lease TTL (and

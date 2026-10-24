@@ -105,14 +105,16 @@ the agent when a task is actually startable, so an idle queue never spends a tok
 ### Pi does not read this file
 
 `--harness pi` drives the same loop with [Pi](https://pi.dev/) instead of `copilot`:
-`pi -p --skill "$KRAKEN/skills" -- "/skill:unleash OWNER/tasks --worker-name <worker-name>
---project <name> --once"`, run in the work repo. Pi auto-loads only the work repo's
-`AGENTS.md`, never this one, and reaches the contract through `--skill` alone — so
-anything a Pi worker must know, its `Co-Authored-By` identity included, lives under
-`skills/`, never only here. Pi denies only whole tools (`--exclude-tools`, which can
-take out the GitHub MCP merge and issue-write tools), never a command inside `bash`: until
-a Pi extension blocks `gh pr merge`, `gh repo delete` and `gh issue close`, those rest on
-the skill's prose. Install and the other gaps are in the [README](README.md#pi).
+`pi -p --skill "$KRAKEN/skills" -e "$KRAKEN/extensions/pi/kraken.ts" --exclude-tools
+'mcp__*__merge_pull_request,mcp__*__issue_write' -- "/skill:unleash OWNER/tasks
+--worker-name <worker-name> --project <name> --once"`, run in the work repo. Pi
+auto-loads only the work repo's `AGENTS.md`, never this one, and reaches the contract
+through `--skill` alone — so anything a Pi worker must know, its `Co-Authored-By`
+identity included, lives under `skills/`, never only here. The deny rules come in two
+halves: `--exclude-tools` takes out the GitHub MCP merge and issue-write tools whole, and
+the extension (`extensions/pi/`) refuses `gh pr merge`, `gh repo delete` and
+`gh issue close` inside `bash` — a word match, defense in depth rather than a sandbox.
+Install and the other gaps are in the [README](README.md#pi).
 
 ## Self-healing: the lease does it, the loop only does it faster
 
@@ -126,7 +128,9 @@ process is gone.
 The `hooks/` (SessionEnd, StopFailure) and the loop's release-on-exit are an
 **optimization** on top of that floor, not the floor itself. Copilot CLI loads the
 plugin's `hooks.json` too, so an installed plugin's SessionEnd hook releases a lease
-its own session still holds (the claim records `COPILOT_AGENT_SESSION_ID`).
+its own session still holds (the claim records `COPILOT_AGENT_SESSION_ID`); Pi's
+equivalent is the optional extension's `session_shutdown` (the claim records
+`PI_SESSION_ID`).
 `kraken.py` records the open
 claim in `$KRAKEN_STATE_DIR/claim-<worker>.json` (default `~/.kraken/`) and every
 terminal transition removes it, so if the `copilot` process exits with that file still
