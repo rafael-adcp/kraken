@@ -693,8 +693,11 @@ Checked against Pi 1.4.0's installed docs and `.d.ts` types:
 - **The extension needs the loop's `-e`** to matter for the main unattended path; the plan
   only had the settings pointer.
 - **`pi -p` hangs on a stdin that stays open** (it reads piped stdin into the prompt): the
-  smoke runs needed `</dev/null`. The loop runs in a terminal, so it is unaffected, but anyone
-  driving `pi -p` from another program should close stdin.
+  smoke runs needed `</dev/null`. A terminal is not guaranteed (ssh without a tty, systemd,
+  CI), so *fixed in PR 4:* `drain_pass` runs every harness's agent with `</dev/null`, pinned
+  by `test_agent_never_inherits_an_open_stdin` (a stub that reads stdin to EOF; it hangs
+  without the redirect). No test fed the agent stdin on purpose (the e2e suite already passes
+  `stdin=DEVNULL`).
 - **No usage-limit signal** for a `StopFailure` analogue (see the box above).
 
 ## Phase 3 — Native in-session ambush for Pi (optional, most ambitious)
