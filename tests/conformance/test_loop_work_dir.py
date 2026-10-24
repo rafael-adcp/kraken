@@ -149,9 +149,26 @@ class LoopWorkDirTests(KrakenConformanceTest):
         self.assertEqual(self.agent_name(), "pi")
         self.assert_ran_in(self.work)
         self.assertEqual(self.copilot_args(), [
-            "-p", "--skill", os.path.join(ROOT, "skills"), "--",
+            "-p", "--skill", os.path.join(ROOT, "skills"),
+            "-e", os.path.join(ROOT, "extensions", "pi", "kraken.ts"),
+            "--exclude-tools", "mcp__*__merge_pull_request,mcp__*__issue_write",
+            "--",
             "/skill:unleash %s --worker-name w1 --project app --once" % TASKS,
         ])
+
+    def test_pi_refuses_what_copilot_denies(self):
+        # Copilot's deny rules (scripts/lib-copilot-drain.sh) in Pi's two
+        # halves: the GitHub MCP merge / issue-write tools excluded whole, and
+        # the kraken extension that refuses the three `gh` commands in bash.
+        self.run_loop("--work-dir", self.work, "--harness", "pi")
+        args = self.copilot_args()
+        excluded = args[args.index("--exclude-tools") + 1].split(",")
+        self.assertEqual(sorted(excluded),
+                         ["mcp__*__issue_write", "mcp__*__merge_pull_request"])
+        extension = args[args.index("-e") + 1]
+        self.assertTrue(os.path.isfile(extension), extension)
+        self.assertLess(args.index("-e"), args.index("--"), "options after -- are prompt text")
+        self.assertLess(args.index("--exclude-tools"), args.index("--"))
 
     def test_harness_env_fallback_and_flag_precedence(self):
         proc = self.run_loop("--work-dir", self.work, env={"KRAKEN_HARNESS": "pi"})

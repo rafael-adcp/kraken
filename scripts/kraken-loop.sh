@@ -196,12 +196,15 @@ else
     # Pi loads the skills from the kraken checkout (it has no --add-dir) and
     # runs the skill itself. No -a/--approve: print mode never blocks on
     # project trust, so the work repo's .pi/ loads only if the operator already
-    # trusts it. KNOWN GAP: Pi has no --deny-tool, so merge, repo delete, issue
-    # close and the GitHub MCP writes are refused by SKILL.md's prose alone,
-    # not at the tool layer as on copilot. A Pi extension blocking those calls
-    # (its `tool_call` event can block) is planned with the session_shutdown
-    # release (PI-SUPPORT-PLAN.md, Phase 2).
-    pi) AGENT_CMD=(pi -p --skill "$REPO_DIR/skills" -- "/skill:unleash $TASKS --worker-name $WORKER --project $PROJECT --once") ;;
+    # trusts it. The deny rules copilot gets from KRAKEN_COPILOT_FLAGS come in
+    # two halves, as Pi has no command-pattern --deny-tool: --exclude-tools
+    # refuses the GitHub MCP merge / issue-write tools whole (Pi names them
+    # mcp__<server>__<tool>, so `*` catches any server name), and the kraken
+    # extension loaded with -e refuses `gh pr merge`, `gh repo delete` and
+    # `gh issue close` in the bash tool (extensions/pi/deny.py).
+    pi) AGENT_CMD=(pi -p --skill "$REPO_DIR/skills" -e "$REPO_DIR/extensions/pi/kraken.ts"
+                   --exclude-tools 'mcp__*__merge_pull_request,mcp__*__issue_write'
+                   -- "/skill:unleash $TASKS --worker-name $WORKER --project $PROJECT --once") ;;
   esac
 fi
 

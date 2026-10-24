@@ -164,10 +164,22 @@ def agent_session() -> str | None:
     """The agent session id this process runs in, or None — the id the
     SessionEnd hook receives. Inside Copilot its own id wins: a `copilot`
     launched from Claude Code inherits CLAUDE_CODE_SESSION_ID, and recording that
-    would let the Claude session's end release the Copilot session's claim."""
+    would let the Claude session's end release the Copilot session's claim.
+
+    Pi's bash tool sets PI_SESSION_ID to its own session (dropping any it
+    inherited), which the kraken Pi extension's session_shutdown releases by.
+    Pi nested with Claude Code or Copilot either way round leaves both ids in
+    the environment and nothing says which harness is innermost, so the claim
+    records none: a session we cannot name is one we cannot prove, and the
+    lease TTL (or the ambush loop's worker-scoped release) covers it."""
+    pi = os.environ.get("PI_SESSION_ID") or None
     if os.environ.get("COPILOT_CLI"):
+        if pi:
+            return None
         return os.environ.get("COPILOT_AGENT_SESSION_ID") or None
-    return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+    if pi and os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        return None
+    return pi or os.environ.get("CLAUDE_CODE_SESSION_ID") or None
 
 
 def write_claim_state(repo: Repo, issue: Issue, worker: Worker) -> None:

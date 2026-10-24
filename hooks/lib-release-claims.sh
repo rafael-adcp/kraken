@@ -8,7 +8,7 @@
 # won claim; deliver/escalate/release remove it. The release functions run
 # `kraken.py release` for every claim-*.json still present that the caller may
 # free: the ambush loop scopes by its worker, SessionEnd by the agent session
-# (Claude Code or Copilot CLI) the claim recorded (#173), StopFailure
+# (Claude Code, Copilot CLI or Pi) the claim recorded (#173), StopFailure
 # (account-wide) frees them all.
 #
 # Best-effort: a failed release falls back to the lease expiring on its own
@@ -67,8 +67,8 @@ release_all_claims() {
 }
 
 # release_session_claims REASON SESSION_ID — only the claims made inside that
-# agent session (`kraken.py claim` records CLAUDE_CODE_SESSION_ID, or under
-# Copilot CLI COPILOT_AGENT_SESSION_ID, as "session"). SessionEnd fires for
+# agent session (`kraken.py claim` records CLAUDE_CODE_SESSION_ID, under
+# Copilot CLI COPILOT_AGENT_SESSION_ID, under Pi PI_SESSION_ID, as "session"). SessionEnd fires for
 # every session on the host, so this is the only scope that cannot free another
 # session's live claim (#173).
 release_session_claims() {

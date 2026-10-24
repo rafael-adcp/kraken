@@ -103,6 +103,33 @@ class ClaimStateFileTests(KrakenConformanceTest):
                                   "CLAUDE_CODE_SESSION_ID": "claude-parent"}),
             "claim recorded a session Copilot did not name")
 
+    def test_claim_records_the_pi_session(self):
+        # Pi's bash tool exports its own session as PI_SESSION_ID, which the
+        # kraken Pi extension's session_shutdown releases by.
+        self.assertEqual(self.claimed_session({"PI_SESSION_ID": "pi-1"}), "pi-1",
+                         "claim did not record the Pi session")
+
+    # Pi inside Claude Code or Copilot CLI, or either inside Pi, leaves both
+    # ids in the environment and nothing says which harness is innermost.
+    # Recording either could let the wrong session's end free a live claim, so
+    # none is recorded and the lease TTL covers it.
+
+    def test_pi_nested_with_claude_code_records_none(self):
+        self.assertIsNone(
+            self.claimed_session({"PI_SESSION_ID": "pi-1",
+                                  "CLAUDE_CODE_SESSION_ID": "claude-1"}),
+            "claim recorded a session it cannot prove (Pi + Claude Code)")
+
+    def test_pi_nested_with_copilot_records_none(self):
+        self.assertIsNone(
+            self.claimed_session({"PI_SESSION_ID": "pi-1", "COPILOT_CLI": "1",
+                                  "COPILOT_AGENT_SESSION_ID": "cop-1"}),
+            "claim recorded a session it cannot prove (Pi + Copilot CLI)")
+
+    def test_pi_under_a_copilot_naming_no_session_records_none(self):
+        self.assertIsNone(
+            self.claimed_session({"PI_SESSION_ID": "pi-1", "COPILOT_CLI": "1"}),
+            "claim recorded a Pi session with Copilot CLI in the tree")
 
 if __name__ == "__main__":
     unittest.main()
