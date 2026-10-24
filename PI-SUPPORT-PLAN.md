@@ -22,7 +22,7 @@ Drafted 2026-10-22 against `kraken@0.7.1`; re-based 2026-10-23 onto `kraken@0.8.
 
 ## Status — where we left off
 
-**Phase 1: done. Phase 2: PR 4 in progress.** PR 1 (`feat/pi-harness-agnostic-loop`, [1.5](#15-scriptskraken-loopsh--generalize-the-harness)
+**Phase 1: done. Phase 2: PR 4 in review.** PR 1 (`feat/pi-harness-agnostic-loop`, [1.5](#15-scriptskraken-loopsh--generalize-the-harness)
 + the parametrized loop tests) is **merged** as
 [#183](https://github.com/rafael-adcp/kraken/pull/183). The Pi argv it ships is **verified for
 argument delivery** by spike 0.9: the `/skill:unleash <args>` form reaches the model.
@@ -38,7 +38,8 @@ open but low-stakes — see [Decisions needed](#decisions-needed).
 1.2, 1.3's prose sites, 1.4, 1.6, 1.7, the Pi case in the trailers test, and `make lint`.
 What it found wrong in this plan is in [Corrections found by PR 3](#corrections-found-by-pr-3).
 
-**PR 4 in progress** (`feat/pi-extension`, base `main`): all of Phase 2 — the extension
+**PR 4 in review** as [#186](https://github.com/rafael-adcp/kraken/pull/186)
+(`feat/pi-extension`, base `main`): all of Phase 2 — the extension
 (`extensions/pi/kraken.ts`), the deny matcher (`extensions/pi/deny.py` + its unit test),
 Pi session recording in `kraken.py claim`, and the loop's `-e` + `--exclude-tools`.
 Smoke-checked with real Pi 1.4.0 + `gpt-6-luna` (2026-10-24). What it found wrong in this
