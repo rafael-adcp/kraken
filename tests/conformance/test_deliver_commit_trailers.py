@@ -20,6 +20,9 @@ ISSUE = 7
 WORKER = "w1"
 # The agent's own identity line (this suite's driver is GitHub Copilot).
 COAUTHOR = "Co-Authored-By: GitHub Copilot <noreply@github.com>"
+# Pi runs over any provider, so its identity names harness and model
+# (skills/unleash/DELIVERY.md); it must fit the same shape.
+PI_COAUTHOR = "Co-Authored-By: Pi (gpt-6-luna) <noreply@pi.dev>"
 
 
 @unittest.skipUnless(shutil.which("git"), "git not found")
@@ -51,11 +54,11 @@ class DeliverCommitTrailerTests(KrakenConformanceTest):
         return subprocess.run(["git", "-C", self.work, *args], env=self.git_env,
                               input=stdin, capture_output=True, text=True)
 
-    def commit_delivered(self, path, line, trailer):
+    def commit_delivered(self, path, line, trailer, coauthor=COAUTHOR):
         with open(os.path.join(self.work, path), "a", encoding="utf-8") as f:
             f.write(line + "\n")
         self.git("add", "-A")
-        msg = "feat: %s change\n\nPart of the delivered work.\n\n%s\n%s\n" % (path, COAUTHOR, trailer)
+        msg = "feat: %s change\n\nPart of the delivered work.\n\n%s\n%s\n" % (path, coauthor, trailer)
         self.git("commit", "-q", "-F", "-", stdin=msg)
 
     def trailer_value(self, sha, key):
@@ -123,6 +126,17 @@ class DeliverCommitTrailerTests(KrakenConformanceTest):
         with self.assertRaises(AssertionError,
                                msg="assertion passed a malformed Kraken-Task trailer"):
             self.assert_delivered_commit(malformed, trailer)
+
+    def test_pi_identity_fits_the_trailer_shape(self):
+        trailer = self.kraken("contract", "task-trailer", "--repo", REPO_SLUG,
+                              "--issue", ISSUE, "--worker", WORKER).out
+        self.git("init", "-q")
+        self.git("checkout", "-q", "-b", "tasks-%d-delivery" % ISSUE)
+        self.commit_delivered("src.txt", "pi slice", trailer, coauthor=PI_COAUTHOR)
+        sha = self.git("rev-parse", "HEAD").stdout.strip()
+        self.assert_delivered_commit(sha, trailer)
+        self.assertEqual("Co-Authored-By: " + self.trailer_value(sha, "Co-Authored-By"),
+                         PI_COAUTHOR, "git parsed the Pi identity whole")
 
 
 if __name__ == "__main__":

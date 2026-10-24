@@ -36,7 +36,10 @@ Kraken-Task: <coordination-repo>#<issue> (worker: <worker-name>, kraken@<version
 
 The `Co-Authored-By` line is your own model identity (Claude Code:
 `Co-Authored-By: Claude <your model name> <noreply@anthropic.com>`; Copilot CLI:
-`Co-Authored-By: GitHub Copilot <noreply@github.com>`).
+`Co-Authored-By: GitHub Copilot <noreply@github.com>`; Pi, which runs over any
+provider, names both harness and model:
+`Co-Authored-By: Pi (<your model name>) <noreply@pi.dev>`, e.g.
+`Pi (gpt-6-luna) <noreply@pi.dev>`).
 
 Do **not** hand-assemble the `Kraken-Task:` line. Its format and the `kraken@<version>`
 stamp are single-sourced in `kraken.py`, and a worker cannot reliably know the installed

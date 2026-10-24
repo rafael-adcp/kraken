@@ -5,7 +5,7 @@
 **A kraken task is untrusted input that executes with your credentials.**
 
 Anyone who can open an issue in your coordination repo is, in effect, writing
-instructions that a Claude Code worker will carry out in your prepared
+instructions that a kraken worker will carry out in your prepared
 environment — reading your files, running your toolchain, and pushing branches
 authenticated as you. A task body (Goal / Acceptance / Notes) is free text an
 agent acts on; it cannot reliably tell a legitimate task from an injected one.
@@ -66,7 +66,9 @@ The hard guarantees come from the operator controls below.
    environments per worker, or one worker.
 5. **Keep the allowlist tight.** Pre-allow only what delivery needs — `git
    add`/`commit`/`push`, `gh pr create`, and the project's test runner. See the
-   worker-environment permissions example in the README.
+   worker-environment permissions example in the README. A harness with no
+   allowlist at all — Pi never asks before a tool call — leaves step 4 as your
+   only environment control: never run such a worker outside a container or VM.
 6. **A human reads every diff before merge.** The draft PR is the review gate;
    the value of "never merge" is that you get to look first.
 

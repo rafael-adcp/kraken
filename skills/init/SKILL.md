@@ -20,6 +20,9 @@ touch no issues — none read, none written.
 /kraken:init OWNER/tasks [--project <name>]
 ```
 
+The prefix is the harness's spelling (Pi: `/skill:init`); the arguments are the
+same everywhere.
+
 The `OWNER/tasks` argument is REQUIRED — the coordination repo to stand up. Missing? Do
 not guess. Ask for it and stop.
 
@@ -132,3 +135,4 @@ program, so there is no second copy to fall out of date.
   judgment.
 
 Coordination repo / flags / extra context: $ARGUMENTS
+(if that reads as a literal placeholder, they follow this skill as the request text)

@@ -20,6 +20,9 @@ its output. You read the queue; you never touch it.
 /kraken:status OWNER/tasks [--project <name>]
 ```
 
+The prefix is the harness's spelling (Pi: `/skill:status`); the arguments are the
+same everywhere.
+
 The `OWNER/tasks` argument is REQUIRED — the coordination repo whose queue you report
 on. Missing? Do not guess. Ask for it and stop.
 
@@ -144,7 +147,8 @@ guess, so there is nothing left to report.
   summary.
 - It does NOT write, comment, change labels, close issues, or merge anything — not even
   the orphan it flags. Every action is mine; the output tells me what needs me.
-- It does NOT invoke `/kraken:unleash` on my behalf — the launch lines are copy-paste;
+- It does NOT invoke `unleash` on my behalf — the launch lines are copy-paste;
   I launch workers deliberately.
 
 Coordination repo / flags / extra context: $ARGUMENTS
+(if that reads as a literal placeholder, they follow this skill as the request text)
