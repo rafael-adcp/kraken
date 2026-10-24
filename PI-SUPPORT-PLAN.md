@@ -22,7 +22,8 @@ Drafted 2026-10-22 against `kraken@0.7.1`; re-based 2026-10-23 onto `kraken@0.8.
 ## Status — where we left off
 
 **Phase 1: in progress.** PR 1 (`feat/pi-harness-agnostic-loop`, [1.5](#15-scriptskraken-loopsh--generalize-the-harness)
-+ the parametrized loop tests), rebased onto 0.8.0, is in review. The Pi argv it ships is
++ the parametrized loop tests), rebased onto 0.8.0, is in review as
+[#183](https://github.com/rafael-adcp/kraken/pull/183). The Pi argv it ships is
 **unverified against a live Pi** until the deferred spikes 0.3 and 0.9 run.
 
 Next step: **PR 2** — the harness-neutral launch line in `render.py` (1.3). Spikes 0.3 and 0.9
