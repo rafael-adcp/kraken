@@ -22,7 +22,7 @@ Drafted 2026-10-22 against `kraken@0.7.1`; re-based 2026-10-23 onto `kraken@0.8.
 
 ## Status — where we left off
 
-**Phase 1: in progress.** PR 1 (`feat/pi-harness-agnostic-loop`, [1.5](#15-scriptskraken-loopsh--generalize-the-harness)
+**Phase 1: done. Phase 2: PR 4 in progress.** PR 1 (`feat/pi-harness-agnostic-loop`, [1.5](#15-scriptskraken-loopsh--generalize-the-harness)
 + the parametrized loop tests) is **merged** as
 [#183](https://github.com/rafael-adcp/kraken/pull/183). The Pi argv it ships is **verified for
 argument delivery** by spike 0.9: the `/skill:unleash <args>` form reaches the model.
@@ -33,11 +33,17 @@ argument delivery** by spike 0.9: the `/skill:unleash <args>` form reaches the m
 Pi 1.4.0 + OpenAI `gpt-6-luna`, 2026-10-23). Decisions #1, #2 and #4 are made; #3 is still
 open but low-stakes — see [Decisions needed](#decisions-needed).
 
-**PR 3 in review** as [#185](https://github.com/rafael-adcp/kraken/pull/185)
-(`docs/pi-third-harness`, base `main` now that #184 merged): 1.0, 1.1,
+**PR 3 merged** as [#185](https://github.com/rafael-adcp/kraken/pull/185)
+(`docs/pi-third-harness`): 1.0, 1.1,
 1.2, 1.3's prose sites, 1.4, 1.6, 1.7, the Pi case in the trailers test, and `make lint`.
 What it found wrong in this plan is in [Corrections found by PR 3](#corrections-found-by-pr-3).
-Next after it: PR 4 (Phase 2).
+
+**PR 4 in progress** (`feat/pi-extension`, base `main`): all of Phase 2 — the extension
+(`extensions/pi/kraken.ts`), the deny matcher (`extensions/pi/deny.py` + its unit test),
+Pi session recording in `kraken.py claim`, and the loop's `-e` + `--exclude-tools`.
+Smoke-checked with real Pi 1.4.0 + `gpt-6-luna` (2026-10-24). What it found wrong in this
+plan is in [Findings from PR 4](#findings-from-pr-4). Next after it: PR 5 (Phase 3),
+optional.
 
 **Operator note (Phase 0).** The operator runs Pi with the **OpenAI provider**. A Pi worker
 needs a provider other than Anthropic OAuth, or paid extra usage (see the Claude-plan OAuth row
@@ -474,7 +480,7 @@ GitHub Copilot CLI tentacle". **Landed in PR 1** (line refs below are pre-0.8.0 
   generalized, together with the same phrase in `hooks/session-end-release.sh`.
 - [x] Rewrite `usage()` and the header comment as "for a tentacle in any harness without a
   native background watcher".
-- [ ] **Known gap — no deny-rule parity on Pi.** ~~Pi has no `--deny-tool`~~ — *overstated,
+- [x] **Known gap — no deny-rule parity on Pi.** *Closed by PR 4* (Phase 2). ~~Pi has no `--deny-tool`~~ — *overstated,
   corrected in PR 3 review:* Pi 1.4.0 has `-xt/--exclude-tools <list>`, a denylist of tool
   names or `*` patterns, MCP tools included, so the GitHub MCP merge / issue-write tools
   **can** be refused at the tool layer. What Pi cannot do is a command pattern inside one
@@ -555,7 +561,7 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-- [ ] **Deny-rule parity (the PR 1 gap).** Block the same calls `KRAKEN_COPILOT_FLAGS` denies
+- [x] **Deny-rule parity (the PR 1 gap).** Block the same calls `KRAKEN_COPILOT_FLAGS` denies
   (`scripts/lib-copilot-drain.sh`): `gh pr merge`, `gh repo delete`, `gh issue close` in the
   `bash` tool, and the GitHub MCP merge / issue-write tools. **Verified feasible:** Pi's
   `tool_call` event "can mutate input or block execution" — a handler returns
@@ -563,7 +569,11 @@ export default function (pi: ExtensionAPI) {
   (`docs/extensions.md`; `examples/extensions/permission-gate.ts`). Match on the command's
   words, like Copilot's `:*` rules, so `gh pr merge 1 --admin` is caught too. Test it the way
   2.1 settles; the copilot side is pinned by `tests/e2e/test_copilot_e2e.py` `DenyRuleTests`.
-- [ ] **The MCP half needs no extension.** Add
+  *Landed:* the matcher is `extensions/pi/deny.py` (stdlib, exit 2 = deny), pinned by
+  `tests/unit/test_pi_deny.py` (blocked, allowed and documented blind-spot cases, plus a check
+  that its three commands equal `KRAKEN_COPILOT_FLAGS`' `shell(...)` rules). A failed check
+  blocks (fail closed).
+- [x] **The MCP half needs no extension.** Add
   `--exclude-tools 'mcp__*__merge_pull_request,mcp__*__issue_write'` to the loop's Pi argv
   (`scripts/kraken-loop.sh`), mirroring the two `github-mcp-server(...)` rules in
   `scripts/lib-copilot-drain.sh:28-32`, and fix the argv comment's "no --deny-tool".
@@ -574,27 +584,53 @@ export default function (pi: ExtensionAPI) {
   patterns after all other selection options, MCP tools included" (`docs/cli.md`; patterns
   added per `CHANGELOG.md`). Pin it beside the Pi argv tests in `test_loop_work_dir.py`.
   The extension's `tool_call` handler then only has to match the three `gh` commands.
-- [ ] **Reuse `hooks/lib-release-claims.sh` via `bash`** — do not reimplement release logic in
+  *Landed,* together with `-e <kraken>/extensions/pi/kraken.ts` on the same argv (not in the
+  original scope: without it a loop worker, the main unattended path, would get the MCP half
+  only). Pinned by `test_pi_refuses_what_copilot_denies`.
+- [x] **Reuse `hooks/lib-release-claims.sh` via `bash`** — do not reimplement release logic in
   TypeScript. The extension is a ~30-line shim; the logic stays single-sourced.
-- [ ] **Good news on path resolution:** `lib-release-claims.sh:18-20` already falls back from
+  *Landed one step further:* the extension pipes a SessionEnd-shaped event into
+  `hooks/session-end-release.sh` itself, so it reuses the hook's detach, signal handling and
+  session scoping too, and the hook's existing conformance tests cover it.
+- [x] **Good news on path resolution:** `lib-release-claims.sh:18-20` already falls back from
   `CLAUDE_PLUGIN_ROOT` to `$(dirname "${BASH_SOURCE[0]}")/..`, so an extension that sources it
   by absolute path needs **no change to the library**. The extension does need to know where
   the checkout is — derive it from the extension file's own location, not an env var the
-  operator has to set.
-- [ ] `session_shutdown` ≡ `SessionEnd`. Pi's docs require idempotent cleanup ("cancellation,
+  operator has to set. *Landed:* `fileURLToPath(import.meta.url)` + `../..`, which works
+  under Pi's jiti loader (smoke check).
+- [x] `session_shutdown` ≡ `SessionEnd`. Pi's docs require idempotent cleanup ("cancellation,
   reload, session replacement, and process exit can converge on the same path") — our release
-  already is (a released claim leaves no state file), so this comes free.
-- [ ] Pass the worker name through so the release is **scoped**, the way
+  already is (a released claim leaves no state file), so this comes free. *Refined:* the
+  event carries `reason: "quit" | "reload" | "new" | "resume" | "fork"`; the extension skips
+  `reload` (the same session goes on) and `fork` (the conversation goes on in the fork).
+- [x] ~~Pass the worker name through~~ **Scope by session instead** so the release is **scoped**, the way
   `scripts/kraken-loop.sh` `release_own_claim` does with `release_all_claims "$1" "$WORKER"`
   (0.8.0 also added `release_session_claims`, but a Pi claim records no session id). An unscoped
   release in a co-located multi-worker environment would free another worker's live claim —
   the exact failure the loop's second argument exists to prevent.
-- [ ] Analogue of the `StopFailure` / `rate_limit` matcher: investigate `agent_end`,
+  *Wrong premise, corrected in PR 4:* a Pi claim **can** record a session id. Pi's `bash`
+  tool exports `PI_SESSION_ID` (= `ctx.sessionManager.getSessionId()`, inherited copies
+  deleted first; `docs/environment-variables.md`, `dist/core/tools/bash.js`), so
+  `agent_session()` in `kraken/lease.py` now records it and the extension calls the
+  session-scoped release, exactly like SessionEnd (#173). Worker scope was the weaker option:
+  the extension does not know the worker name, and two sessions can share one. Nesting:
+  Pi inside Claude Code / Copilot CLI, or either inside Pi, leaves two ids and nothing says
+  which harness is innermost, so the claim records **no** session (safe: nothing
+  session-scoped can free it; the TTL and the loop's worker-scoped release still do).
+- [x] Analogue of the `StopFailure` / `rate_limit` matcher — **no clean signal; Phase 2 is
+  declaredly partial here.** investigate `agent_end`,
   `after_provider_response` and `provider_stream_event` for a clean rate-limit signal, so the
   extension can stamp the wake-retry flag `kraken.py watch` consumes (`hooks/hooks.json`
   `StopFailure` block, coordination-repo #60). **If there is no clean signal, do not invent
   one** — the lease TTL covers it, and Phase 2 ships as declaredly partial.
-- [ ] `hooks/hooks.json` gains a note that its events are Claude-Code-specific and where the
+  *Finding (1.4.0 types):* `after_provider_response` gives an HTTP status per request, but
+  Pi auto-retries 429/overloaded, so a 429 there is not a dead turn; `agent_end` carries only
+  messages, `agent_settled` only `aborted`; the `auto_retry_end { success: false }` event
+  exists only on the JSON/RPC stream, not as an extension event. Telling a usage limit from
+  other errors would mean string-matching error text. Moot for now anyway: the wake-retry
+  flag feeds `kraken.py watch`, which no Pi path runs until Phase 3, and under the loop
+  `pi -p` exits on the failure and the loop releases.
+- [x] `hooks/hooks.json` gains a note that its events are Claude-Code-specific and where the
   Pi equivalent lives. (Its `description` already ends "A harness with no hook events is not a
   less conforming worker" — extend that sentence rather than adding a second one.)
 
@@ -610,21 +646,56 @@ testable that way without Node + `jiti` in CI, and `make test` is declaredly std
 
 The resolution to commit to:
 
-- [ ] Keep the TS shim thin enough that **the tested surface stays
+- [x] Keep the TS shim thin enough that **the tested surface stays
   `hooks/lib-release-claims.sh`**, which the existing conformance tests already pin. The
   extension contributes no release logic of its own — it is an event-to-`bash` adapter.
-- [ ] Cover the extension itself with a **hand-run smoke check** (start a session holding a
+  *Landed:* the tested surface is `hooks/session-end-release.sh` (new case
+  `test_pi_session_shutdown_releases_its_own_claim`), `agent_session()` (three new cases in
+  `test_claim_state_file.py`) and `extensions/pi/deny.py` (`tests/unit/test_pi_deny.py`).
+  No Node in CI, no CI job.
+- [x] Cover the extension itself with a **hand-run smoke check** (start a session holding a
   claim, kill it, assert the state file is gone), documented in the PR with its output pasted
   in — the same posture `CONTRIBUTING.md:49-63` already takes for `make test-agent`.
-- [ ] State explicitly that this is an **optimization over lease expiry, not a normative
+  *Done (pi 1.4.0 + `gpt-6-luna`, 2026-10-24, standalone gh stub, scratch
+  `KRAKEN_STATE_DIR`):* the extension loads; `gh pr merge 1 --repo acme/none` and
+  `cd /tmp && FOO=1 gh  repo delete acme/none --yes` came back as blocked tool results and a
+  fake `gh` on `PATH` never ran; a claim made from Pi's bash recorded the Pi session id and was
+  released (`released … "session ended"`) when `pi -p` exited, while a co-located claim of
+  another session stayed `in-progress`; run nested in a Claude Code session, the claim recorded
+  no session and was left alone. Outputs go in the PR body.
+- [x] State explicitly that this is an **optimization over lease expiry, not a normative
   clause** — the wording `hooks/hooks.json` already opens with — so `tests/COVERAGE.md` stays
   untouched and nothing normative rides on untested code.
-- [ ] Note that the extension is **not** installed by the Phase 1 settings pointer: `extensions`
+- [x] Note that the extension is **not** installed by the Phase 1 settings pointer: `extensions`
   is a separate key with no auto-load directory, so a Phase 1 operator is unaffected by Phase 2
-  existing. That is the argument for shipping them as separate PRs.
+  existing. That is the argument for shipping them as separate PRs. *Nuance:* the loop now
+  loads it with `-e`, so a loop-driven Pi worker gets it without any settings entry.
 
 Without this written down, Phase 2 arrives at review as "a new runtime dependency plus
 untested code", which is a fair reason to reject it.
+
+### Findings from PR 4
+
+Checked against Pi 1.4.0's installed docs and `.d.ts` types:
+
+- **"A Pi claim records no session id" was wrong.** Pi's `bash` tool exports `PI_SESSION_ID`
+  (and `PI_SESSION_FILE`, `PI_PROVIDER`, `PI_MODEL`); the release is session-scoped like
+  SessionEnd, not worker-scoped. It needed a four-line change to `agent_session()` in
+  `skills/unleash/kraken/lease.py`, which the plan did not foresee (it framed Phase 2 as
+  extension-only).
+- **Nesting is ambiguous.** Pi strips an inherited `PI_SESSION_ID` but nobody strips
+  `CLAUDE_CODE_SESSION_ID`/`COPILOT_*`, so Pi nested with another harness (either way round)
+  records no session. Before this PR a Pi worker launched from inside a Claude Code session
+  recorded the *Claude* session, so that session's end could free the Pi worker's live claim.
+  The existing Copilot-in-Claude precedence is unchanged.
+- **`session_shutdown` also fires on `reload` and `fork`**, where the work goes on. The plan's
+  "≡ SessionEnd" needed those two carved out.
+- **The extension needs the loop's `-e`** to matter for the main unattended path; the plan
+  only had the settings pointer.
+- **`pi -p` hangs on a stdin that stays open** (it reads piped stdin into the prompt): the
+  smoke runs needed `</dev/null`. The loop runs in a terminal, so it is unaffected, but anyone
+  driving `pi -p` from another program should close stdin.
+- **No usage-limit signal** for a `StopFailure` analogue (see the box above).
 
 ## Phase 3 — Native in-session ambush for Pi (optional, most ambitious)
 
@@ -768,7 +839,7 @@ protocol/9 abstraction worked.
 | 1 | `feat(loop): make kraken-loop.sh harness-agnostic` | 1.5 + the parametrized `test_loop_fast_release.py` + Pi cases in `test_loop_work_dir.py` (the `protocol/6` fixes landed upstream in 0.8.0). Mechanical, testable, independent of the prose |
 | 2 | `fix(status): name the Pi spelling in the launch recon` | 1.3's `render.py:159` (keeps the copy-paste `/kraken:unleash` lines, adds a Pi hint) + `test_status.py` assertion + the status skill's example. Small, has a test, and is the only *functional* bug in the set — ship it before the prose so the docs can describe real output |
 | 3 | `docs: add Pi as a third tentacle harness` | 1.1, 1.2 (incl. the never-copy rule and the `+grep` syntax trap), 1.3's prose sites, 1.4, 1.6, 1.7 + `make lint`. Carries 1.0 (the self-describing `$ARGUMENTS` line, decision #4) |
-| 4 | `feat(pi): extension for session_shutdown release and deny rules` | Phase 2 — the `session_shutdown` release **and** `tool_call` blocking for deny-rule parity |
+| 4 | `feat(pi): extension for claim release and deny parity` | Phase 2 — the `session_shutdown` release **and** `tool_call` blocking for deny-rule parity |
 | 5 | `feat(pi): native in-session ambush watcher` | Phase 3 |
 
 Branches in the `type/NN-slug` shape keyed to a task or issue, everything in English,
