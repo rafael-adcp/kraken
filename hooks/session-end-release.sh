@@ -23,7 +23,7 @@
 # opened to read a file included — so the hook matches the event's
 # `session_id` against the session `kraken.py claim` recorded. A claim naming
 # no session (a bare shell) or an event naming none releases nothing: the lease
-# TTL, and the Copilot loop's own release-on-exit, cover those.
+# TTL, and the ambush loop's own release-on-exit, cover those.
 #
 # Detached: the release runs in its own session and the hook returns at once.
 # Claude Code gives SessionEnd hooks 1.5s in total — a plugin cannot raise it —
