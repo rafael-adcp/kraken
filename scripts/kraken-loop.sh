@@ -227,7 +227,9 @@ drain_pass() {
     # release; a failure exits non-zero without saying whether it got as far
     # as a claim (`pi -p` exits 1 alike for a bad --model, an auth failure and
     # a refused request), so a surviving lease is released below either way.
-    "${AGENT_CMD[@]}"
+    # stdin is closed: a headless drain never reads it, and `pi -p` waits for
+    # EOF on an open non-tty stdin (ssh without a tty, systemd, CI) forever.
+    "${AGENT_CMD[@]}" </dev/null
     # A lease that survived the agent process is abandoned — nobody is left
     # to finish or renew it. Free the task now, not at the TTL.
     release_own_claim "$AGENT_NAME exited mid-drain"

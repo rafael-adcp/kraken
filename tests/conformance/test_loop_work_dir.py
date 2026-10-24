@@ -170,6 +170,37 @@ class LoopWorkDirTests(KrakenConformanceTest):
         self.assertLess(args.index("-e"), args.index("--"), "options after -- are prompt text")
         self.assertLess(args.index("--exclude-tools"), args.index("--"))
 
+    def test_agent_never_inherits_an_open_stdin(self):
+        # `pi -p` reads a non-tty stdin to EOF before it starts, so a loop
+        # launched over ssh without a tty, by systemd or in CI would hang on
+        # the stdin it was handed. The stub does the same read; the loop must
+        # give every harness /dev/null, so it finishes although the stdin it
+        # was given stays open.
+        for name in ("copilot", "pi"):
+            with open(os.path.join(self.bin_dir, name), "a", encoding="utf-8") as f:
+                f.write("cat >/dev/null\n")
+        for harness in ("copilot", "pi"):
+            with self.subTest(harness=harness):
+                env = self.base_env()
+                env["PATH"] = self.bin_dir + os.pathsep + env["PATH"]
+                for var in ("KRAKEN_WORK_DIR", "KRAKEN_HARNESS", "KRAKEN_AGENT_CMD"):
+                    env.pop(var, None)
+                proc = subprocess.Popen(
+                    ["bash", LOOP, TASKS, "--worker-name", "w1", "--project", "app",
+                     "--once", "--work-dir", self.work, "--harness", harness],
+                    cwd=ROOT, env=env, stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    rc = proc.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                    self.fail("the loop hung: %s read the loop's open stdin" % harness)
+                finally:
+                    proc.stdin.close()
+                self.assertEqual(rc, 0)
+                self.assertEqual(self.agent_name(), harness)
+
     def test_harness_env_fallback_and_flag_precedence(self):
         proc = self.run_loop("--work-dir", self.work, env={"KRAKEN_HARNESS": "pi"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
