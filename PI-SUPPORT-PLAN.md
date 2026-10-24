@@ -17,7 +17,8 @@ Drafted 2026-10-22 against `kraken@0.7.1`; re-based 2026-10-23 onto `kraken@0.8.
   Copilot sessions too; the hook is session-scoped (#173) and releases detached.
 - **Deny rules.** `KRAKEN_COPILOT_FLAGS` carries `--deny-tool` rules that block `gh pr merge`,
   `gh repo delete`, `gh issue close` and the GitHub MCP merge/issue writes at the tool layer.
-  **Pi has no equivalent** — see the deny-parity gap in [Phase 2](#phase-2--self-heal-and-deny-parity-via-a-pi-extension).
+  **Pi has only half an equivalent:** `--exclude-tools` refuses whole tools (MCP included),
+  but nothing matches a command inside `bash` — see the deny-parity gap in [Phase 2](#phase-2--self-heal-and-deny-parity-via-a-pi-extension).
 
 ## Status — where we left off
 
@@ -26,11 +27,16 @@ Drafted 2026-10-22 against `kraken@0.7.1`; re-based 2026-10-23 onto `kraken@0.8.
 [#183](https://github.com/rafael-adcp/kraken/pull/183). The Pi argv it ships is **verified for
 argument delivery** by spike 0.9: the `/skill:unleash <args>` form reaches the model.
 
-**PR 2 in review** as [#184](https://github.com/rafael-adcp/kraken/pull/184)
+**PR 2 merged** as [#184](https://github.com/rafael-adcp/kraken/pull/184)
 (`fix/pi-harness-neutral-launch-line`): the launch recon in `render.py` keeps its copy-paste
 `/kraken:unleash` lines and names Pi's spelling (1.3). Spikes 0.3 and 0.9 are **done** (operator,
 Pi 1.4.0 + OpenAI `gpt-6-luna`, 2026-10-23). Decisions #1, #2 and #4 are made; #3 is still
-open — see [Decisions needed](#decisions-needed).
+open but low-stakes — see [Decisions needed](#decisions-needed).
+
+**PR 3 in progress** (`docs/pi-third-harness`, base `main` now that #184 merged): 1.0, 1.1,
+1.2, 1.3's prose sites, 1.4, 1.6, 1.7, the Pi case in the trailers test, and `make lint`.
+What it found wrong in this plan is in [Corrections found by PR 3](#corrections-found-by-pr-3).
+Next after it: PR 4 (Phase 2).
 
 **Operator note (Phase 0).** The operator runs Pi with the **OpenAI provider**. A Pi worker
 needs a provider other than Anthropic OAuth, or paid extra usage (see the Claude-plan OAuth row
@@ -231,7 +237,7 @@ the skill block and the model parsed them), but it is exactly the kind of harnes
 
 **Decided (decision #4): reword the line, no Pi `prompts/` command.** Ships in **PR 3**.
 
-- [ ] **Keep the line, make it self-describing** in all three skills, so it reads correctly
+- [x] **Keep the line, make it self-describing** in all three skills, so it reads correctly
   whether or not the harness interpolates it, e.g.:
 
   ```
@@ -242,6 +248,8 @@ the skill block and the model parsed them), but it is exactly the kind of harnes
   Why: a weaker model could read the dead token as "no arguments" and trip the "do not start,
   ask for it" rule; it is three one-line edits with no change on Claude Code; and it helps any
   non-interpolating Agent Skills harness, not only Pi.
+  *Landed in PR 3* with exactly that wording. No test or lint rule pins the line (verified),
+  so nothing else moved.
 - ~~**Alternative:** ship a Pi `prompts/` command that forwards its own arguments into the
   skill.~~ **Rejected** — no `prompts/` command ships.
 
@@ -251,14 +259,18 @@ Today the file reads as if Copilot were its only reader. Full list of Copilot-sp
 verified: `:3`, `:26`, `:30`, `:42`, `:55`, `:72`, `:81`, `:87`, `:92`. It becomes
 harness-neutral with a small per-harness table at the end.
 
-- [ ] `AGENTS.md:6` — "the **second** implementation whose existence proves the protocol is
+- [x] `AGENTS.md:6` — "the **second** implementation whose existence proves the protocol is
   agent-agnostic" → third. Worth making the stronger claim: two harnesses with no deltas is a
-  coincidence, three is evidence.
-- [ ] `AGENTS.md:25-26` — names *Copilot's* `Co-Authored-By` identity inline. This is a second
+  coincidence, three is evidence. *Landed:* "three harnesses running one skill — the
+  evidence that the protocol is agent-agnostic".
+- [x] `AGENTS.md:25-26` — names *Copilot's* `Co-Authored-By` identity inline. This is a second
   copy of the fact 1.4 changes in `DELIVERY.md:37-39`; both move together or they drift.
-  **Blocked on decision #1.**
-- [ ] `AGENTS.md:30` — the worker-name example `kraken-copilot-1`. Add a Pi-shaped one.
-- [ ] "Driving it non-interactively" (`:50-73`) — today only a `copilot -p` block. Add the Pi
+  ~~Blocked on decision #1.~~ *Landed:* Copilot's identity stays (this file's reader is
+  Copilot) and the line now says DELIVERY.md names Claude Code's and Pi's beside it.
+- ~~`AGENTS.md:30` — the worker-name example `kraken-copilot-1`. Add a Pi-shaped one.~~
+  **Not done:** Pi never reads this file (see the correction below), so a Pi-shaped example
+  here reaches nobody. SKILL.md's "pick names that say where the work ran" covers it.
+- [x] "Driving it non-interactively" (`:50-73`) — today only a `copilot -p` block. Add the Pi
   block:
 
   ```bash
@@ -268,16 +280,21 @@ harness-neutral with a small per-harness table at the end.
   draft PR, then stop." --approve
   ```
 
-- [ ] `:72` — "only invokes `copilot` when a task is actually startable" → "the agent".
-- [ ] "Self-healing" (`:75-96`) — today it says the hooks "are Claude Code hook events and
+  **Not as written** — this block is wrong twice: Pi never auto-loads kraken's `AGENTS.md`
+  (it runs in the work repo), and the loop passes no `-a` (0.5). *Landed instead:* a short
+  "Pi does not read this file" subsection giving the loop's real Pi argv and the deny gap.
+- [x] `:72` — "only invokes `copilot` when a task is actually startable" → "the agent".
+- [x] "Self-healing" (`:75-96`) — today it says the hooks "are Claude Code hook events and
   still never fire around a `copilot` process". With Pi this becomes three cases: native
   hooks (Claude Code), an extension (Pi), an external loop (Copilot, and Pi until Phase 2).
   *Re-check against 0.8.0 before PR 3:* Copilot CLI now fires `SessionEnd` too, so this README
-  section was rewritten upstream and these line refs are stale.
+  section was rewritten upstream and these line refs are stale. *Landed:* the AGENTS.md
+  section stays Copilot-facing; Pi's case (lease + loop, no hooks until PR 4) is in the
+  AGENTS.md Pi subsection and in the README's per-harness parity table.
 
 ### 1.2 `README.md` — install and the harness framing
 
-- [ ] `:76-99` **Install** — today "Both agents install from the **same marketplace**". Becomes
+- [x] `:76-99` **Install** — today "Both agents install from the **same marketplace**". Becomes
   three sections; Pi's is a settings pointer, not a marketplace:
 
   ```json
@@ -291,7 +308,7 @@ harness-neutral with a small per-harness table at the end.
 
   Three things that snippet is carrying deliberately:
 
-  - [ ] **The pointer must be a checkout (or a symlink to the repo root) — never a copy, and
+  - [x] **The pointer must be a checkout (or a symlink to the repo root) — never a copy, and
     never a symlink to `skills/` alone.** Two separate paths resolve out of `SKILL_DIR/../..`:
 
     1. `PLUGIN_MANIFEST` (`contract.py:130-131`) → `.claude-plugin/plugin.json`. Missing, and
@@ -310,36 +327,47 @@ harness-neutral with a small per-harness table at the end.
     (`skills/unleash/SKILL.md:22`, `DELIVERY.md:4`) and `../../scripts/kraken-loop.sh`
     (`SKILL.md:185`) dangle too. The install section says all of this out loud, in one sentence
     plus the 0.10 table.
-  - [ ] `defaultTools` defaults to `read, bash, edit, write` — **no `grep`/`find`/`ls`**. A
+  - [x] `defaultTools` defaults to `read, bash, edit, write` — **no `grep`/`find`/`ls`**. A
     worker doing real coding work wants them. Note the syntax precisely: **plain names replace
     the defaults**, so it must be `["+grep", "+find", "+ls"]` and never
     `["grep", "find", "ls"]` — the latter would strip `bash`, `read`, `edit` and `write` and
     leave the worker unable to deliver anything.
-  - [ ] `defaultProjectTrust` is settable **only in the agent directory** — so document it at
+  - ~~`defaultProjectTrust` is settable **only in the agent directory** — so document it at
     `~/.pi/agent/settings.json`, and mention `-a/--approve` as the per-invocation alternative
-    for an operator who does not want a global `"always"`.
+    for an operator who does not want a global `"always"`.~~ **Dropped from the snippet:**
+    0.5 showed print mode needs no trust, so recommending a global `"always"` would widen
+    trust for nothing. The landed snippet carries `skills` and `defaultTools` only.
+  - [x] **Billing** (from the Claude-plan OAuth row): the Pi section says Anthropic OAuth is
+    extra usage, quotes the 400, and recommends an API key or another provider.
+  - [x] **Known gap** — stated in the Pi install section, the walkthrough's step 3, the
+    cheat sheet and the parity table: the MCP writes can be excluded with `--exclude-tools`;
+    the three `gh` commands in `bash` rest on the skill prose until PR 4.
 
-- [ ] `:9` (the blockquote), `:127` (the "Worker (tentacle)" row) and `:184-189` ("the GitHub
+- [x] `:9` (the blockquote), `:127` (the "Worker (tentacle)" row) and `:184-189` ("the GitHub
   Copilot CLI worker reuses it through `AGENTS.md` with **no deltas at all**") — include Pi.
   Note the `:184-189` claim needs the `$ARGUMENTS` caveat from 1.0 if we do not fix it.
-- [ ] `:239-241` — "the environment's agent settings must pre-allow the delivery commands …
+- [x] `:239-241` — "the environment's agent settings must pre-allow the delivery commands …
   (Copilot's equivalent is `--allow-all-tools --no-ask-user`)". **For Pi this sentence is
   false**: there is no permission prompt. Needs an aside — in Pi the risk inverts (everything
   is permitted, which is why Pi's own docs recommend a container/VM), so cite
   `pi.dev/docs/latest/security.md` and recommend an isolated environment. Cross-check
-  `SECURITY.md` for whether it makes the same per-tool-allowlist assumption.
-- [ ] `:319-327` **Staying in ambush** — Pi also has no Monitor tool, so it joins the
+  `SECURITY.md` for whether it makes the same per-tool-allowlist assumption. *Landed;*
+  `SECURITY.md` did assume it — its opening line said "a Claude Code worker" and its
+  checklist has no allowlist-free case. Both fixed in one sentence each.
+- [x] `:319-327` **Staying in ambush** — Pi also has no Monitor tool, so it joins the
   `kraken-loop.sh` paragraph (until Phase 3).
-- [ ] `:564-588` FAQ "Is the Copilot CLI worker as self-healing as the Claude Code one?" →
-  generalize into a per-harness parity table.
+- [x] `:564-588` FAQ "Is the Copilot CLI worker as self-healing as the Claude Code one?" →
+  generalize into a per-harness parity table. *Landed* as a five-row table in that FAQ, plus
+  a Pi column in the agent cheat sheet and a Pi line in the usage-limit, update and
+  uninstall FAQs.
 - [ ] `:377-384` "Why not just use X?" table — **leave alone**. Pi is a harness that becomes a
   tentacle, not an alternative to kraken.
-- [ ] **The `/kraken:` command blocks** — 16 sites, not the handful the earlier draft implied:
+- [x] **The `/kraken:` command blocks** — 16 sites, not the handful the earlier draft implied:
   `:28`, `:29`, `:88`, `:90`, `:114`, `:115`, `:116`, `:199`, `:281`, `:284`, `:285`, `:293`,
   `:319`, `:342`, `:462`, `:542`. Whatever 1.3 decides about the prefix has to be applied here
   consistently or the README contradicts the skills. Cheapest coherent story: keep `/kraken:`
   in the Claude Code / Copilot sections, and show `/skill:` once in the Pi section with one
-  sentence saying the prefix belongs to the harness.
+  sentence saying the prefix belongs to the harness. *Landed* that way.
 
 ### 1.3 The command prefix — prose in three skills, **and one Python emit site**
 
@@ -376,12 +404,17 @@ def _launch_lines(repo: str, projects: list[str]) -> list[str]:
   copy-paste contract) and the Pi hint as the last line.
 - [x] `skills/status/SKILL.md:81-82` — the documented *example* of that rendered output.
   Follows `render.py`, never leads it. *Landed in PR 2:* gains the Pi hint line (`:83`).
-- [ ] `skills/status/SKILL.md:146` — "It does NOT invoke `/kraken:unleash` on my behalf".
-- [ ] `skills/unleash/SKILL.md:28` — the **Invocation** block. Also `:197`, which offers
+- [x] `skills/status/SKILL.md:146` — "It does NOT invoke `/kraken:unleash` on my behalf".
+  *Landed:* "It does NOT invoke `unleash` on my behalf".
+- [x] `skills/unleash/SKILL.md:28` — the **Invocation** block. Also `:197`, which offers
   `/loop /kraken:unleash … --once` as the no-watcher fallback (note `/loop` is itself a Claude
   Code facility, so that sentence needs harness scoping regardless).
-- [ ] `skills/init/SKILL.md:20` — its own invocation block.
-- [ ] `skills/status/SKILL.md:20` — its own invocation block.
+  *Landed:* the fallback is now "a timed `--once` re-run (in Claude Code, `/loop …`;
+  elsewhere `scripts/kraken-loop.sh`)".
+- [x] `skills/init/SKILL.md:20` — its own invocation block.
+- [x] `skills/status/SKILL.md:20` — its own invocation block.
+  *All three landed* the same way: the `/kraken:` block stays, followed by "The prefix is
+  the harness's spelling (Pi: `/skill:<name>`); the arguments are the same everywhere."
 
 Harness-neutral fix for the invocation blocks: show the arguments, and note that the command
 *prefix* belongs to the harness, naming both spellings. Keep the wording conservative — this
@@ -398,9 +431,12 @@ time. Cheaper, and it keeps us out of the most dangerous material in the repo. I
 
 ### 1.4 `skills/unleash/DELIVERY.md:37-39` + `AGENTS.md:25-26` — attribution identity
 
-- [ ] `DELIVERY.md:37-39` names Claude Code's and Copilot's `Co-Authored-By` identities. Pi is
-  **model-agnostic**, so "Pi" alone misstates who wrote the code. **Blocked on decision #1.**
-- [ ] `AGENTS.md:26` repeats Copilot's identity — change both or they drift (see 1.1).
+- [x] `DELIVERY.md:37-39` names Claude Code's and Copilot's `Co-Authored-By` identities. Pi is
+  **model-agnostic**, so "Pi" alone misstates who wrote the code. ~~Blocked on decision #1.~~
+  *Landed:* `Co-Authored-By: Pi (<your model name>) <noreply@pi.dev>`, e.g.
+  `Pi (gpt-6-luna) <noreply@pi.dev>`. DELIVERY.md is the copy that matters: it is the only one
+  a Pi worker reads (SKILL.md links it; AGENTS.md never reaches Pi).
+- [x] `AGENTS.md:26` repeats Copilot's identity — change both or they drift (see 1.1).
 - `PROTOCOL.md` §8 defines the *shape* only and needs no amendment — verified.
 
 ### 1.5 `scripts/kraken-loop.sh` — generalize the harness
@@ -437,9 +473,14 @@ GitHub Copilot CLI tentacle". **Landed in PR 1** (line refs below are pre-0.8.0 
   generalized, together with the same phrase in `hooks/session-end-release.sh`.
 - [x] Rewrite `usage()` and the header comment as "for a tentacle in any harness without a
   native background watcher".
-- [ ] **Known gap — no deny-rule parity on Pi.** Pi has no `--deny-tool`, so on Pi merging,
-  repo delete, issue close and the GitHub MCP writes are refused by `SKILL.md`'s prose alone,
-  not at the tool layer as on copilot. Documented at the Pi argv line; fixed in PR 4 (Phase 2).
+- [ ] **Known gap — no deny-rule parity on Pi.** ~~Pi has no `--deny-tool`~~ — *overstated,
+  corrected in PR 3 review:* Pi 1.4.0 has `-xt/--exclude-tools <list>`, a denylist of tool
+  names or `*` patterns, MCP tools included, so the GitHub MCP merge / issue-write tools
+  **can** be refused at the tool layer. What Pi cannot do is a command pattern inside one
+  tool: `bash` is a single tool, so `gh pr merge`, `gh repo delete` and `gh issue close` rest
+  on `SKILL.md`'s prose. The loop's Pi argv passes no `--exclude-tools` yet, and its comment
+  at the Pi argv line still says "no --deny-tool" (PR 3 is docs-only). README and AGENTS.md
+  carry the corrected statement; both halves close in PR 4 (Phase 2).
 - Deviation (PR 1): the `--harness` / `KRAKEN_AGENT_CMD` **validation** runs above the `cd`,
   so a bad value fails before the EXIT trap is armed. The argv table itself sits next to the
   `lib-copilot-drain.sh` sourcing, after the GitHub-token precheck, because copilot's argv needs
@@ -447,23 +488,59 @@ GitHub Copilot CLI tentacle". **Landed in PR 1** (line refs below are pre-0.8.0 
 
 ### 1.6 Plugin metadata
 
-- [ ] `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`: both `description`
+- [x] `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`: both `description`
   strings say "(Claude Code, GitHub Copilot CLI, or any protocol-conforming tool)" and both
   `keywords` arrays end `claude-code`, `github-copilot`. Add Pi to all four. **Do not touch
   `version`** — `plugin.json` is what the release workflow bumps (`CONTRIBUTING.md:117-121`).
+  *Landed:* "Pi" in both descriptions and a `pi` keyword in both arrays; `version` untouched.
 
 ### 1.7 `CONTRIBUTING.md` — the contributor-facing framing
 
 Not in the earlier drafts, and small, but it is the first file a contributor reads:
 
-- [ ] `:4` "three Claude Code skills" → three agent skills.
-- [ ] `:9-10` "the protocol between a GitHub-Issues task queue and the Claude Code workers that
+- [x] `:4` "three Claude Code skills" → three agent skills. *Already true at 0.8.0;* PR 3
+  adds that Pi loads the skill with `--skill`.
+- [x] `:9-10` "the protocol between a GitHub-Issues task queue and the Claude Code workers that
   drain it" → harness-neutral.
-- [ ] `:51` "`make test-agent` drives **real** `/kraken:unleash --once` runs" — follows
+- [x] `:51` "`make test-agent` drives **real** `/kraken:unleash --once` runs" — follows
   whatever 1.3 decides, and note the harness is specifically `claude -p` here (by design).
+  *Stale at 0.8.0:* it is now `:89` and drives the Copilot drain pass too. PR 3 only adds
+  "Pi is not driven here".
 - `DESIGN-REVIEW-2026-08.md:141` also mentions `/kraken:init` — **leave alone**, it is a dated
   design-review record, not live guidance. Worth saying so in the PR body so a reviewer does
-  not flag the inconsistency.
+  not flag the inconsistency. *PR 3:* the file was removed in #181 (see the corrections).
+
+### Corrections found by PR 3
+
+Checked against `main` at `027525c` (0.8.0 + #183 + #184):
+
+- **AGENTS.md never reaches a Pi worker.** The loop runs Pi in the work repo, where it
+  auto-loads that repo's `AGENTS.md`, and passes kraken's contract only as
+  `--skill <kraken>/skills`. 1.1's premise (make AGENTS.md "any agents.md-aware CLI") and its
+  suggested Pi block (`Follow AGENTS.md …` + `--approve`) were both wrong. Audit of what a Pi
+  worker needs from AGENTS.md: the `Co-Authored-By` identity was the only fact missing from
+  the skill tree, and it now lives in `DELIVERY.md`. The watcher, context isolation, lease
+  and boundaries are already in `SKILL.md`, and the deny gap is the operator's to know, so it
+  sits in the README.
+- **Self-hosting edge.** Kraken's own backlog is a kraken queue, so a Pi worker whose *work*
+  repo is kraken does load kraken's `AGENTS.md` (written for Copilot, harmless to Pi) and
+  root `CLAUDE.md`. That is decision #3's whole remaining surface; PR 3
+  leaves `CLAUDE.md` alone.
+- **1.2's snippet.** `defaultProjectTrust: "always"` is dropped (0.5 makes it unnecessary),
+  and the `// ~/.pi/agent/settings.json` comment would fail `make lint`'s JSON snippet check.
+- **Line references.** Every README and AGENTS.md ref in 1.1–1.2 had shifted at 0.8.0
+  (e.g. README Install is `:76-115`, the self-healing FAQ `:645-674`; AGENTS.md "Driving" is
+  `:51-101`, "Self-healing" `:103-133`). The ones in 1.7 and the tests/agent item had too
+  (see their notes).
+- **"Pi has no `--deny-tool`" overstated the gap** (caught in review). `--exclude-tools`
+  refuses whole tools, MCP tools included; only command patterns inside `bash` are out of
+  reach. Corrected in the README, AGENTS.md and 1.5; the loop change is recorded under
+  Phase 2 for PR 4.
+- **0.10 is still open.** No symlink shape was verified, so the README recommends the
+  checkout pointer (or `--skill`) only and does not mention symlinks.
+- **Dated records.** `HISTORY.md` is left alone on purpose: its Claude-Code-only wording is
+  history, not live guidance. `DESIGN-REVIEW-2026-08.md`, which 1.7 says to leave alone, was
+  **removed from the tree in #181** — nothing to leave.
 
 ## Phase 2 — Self-heal and deny parity via a Pi extension
 
@@ -485,6 +562,17 @@ export default function (pi: ExtensionAPI) {
   (`docs/extensions.md`; `examples/extensions/permission-gate.ts`). Match on the command's
   words, like Copilot's `:*` rules, so `gh pr merge 1 --admin` is caught too. Test it the way
   2.1 settles; the copilot side is pinned by `tests/e2e/test_copilot_e2e.py` `DenyRuleTests`.
+- [ ] **The MCP half needs no extension.** Add
+  `--exclude-tools 'mcp__*__merge_pull_request,mcp__*__issue_write'` to the loop's Pi argv
+  (`scripts/kraken-loop.sh`), mirroring the two `github-mcp-server(...)` rules in
+  `scripts/lib-copilot-drain.sh:28-32`, and fix the argv comment's "no --deny-tool".
+  Naming verified in the installed 1.4.0 docs: tools are `mcp__<server>__<tool>`, with every
+  character other than letters, digits and `_` replaced by `_` (`docs/mcp.md`), so
+  `github-mcp-server` becomes `mcp__github_mcp_server__…` and the `*` server wildcard
+  catches it whatever the server is called; `--exclude-tools` "disables … tool names or
+  patterns after all other selection options, MCP tools included" (`docs/cli.md`; patterns
+  added per `CHANGELOG.md`). Pin it beside the Pi argv tests in `test_loop_work_dir.py`.
+  The extension's `tool_call` handler then only has to match the three `gh` commands.
 - [ ] **Reuse `hooks/lib-release-claims.sh` via `bash`** — do not reimplement release logic in
   TypeScript. The extension is a ~30-line shim; the logic stays single-sourced.
 - [ ] **Good news on path resolution:** `lib-release-claims.sh:18-20` already falls back from
@@ -581,10 +669,12 @@ Keep as a separate PR after Phases 1–2 are green — highest discovery risk.
   (Pi argv and work dir, `KRAKEN_HARNESS`, unknown harness, the no-eval `KRAKEN_AGENT_CMD`
   split) went into 0.8.0's `tests/conformance/test_loop_work_dir.py` instead, beside the
   copilot argv tests already there.
-- [ ] **`tests/conformance/test_deliver_commit_trailers.py:22`** — `COAUTHOR` is hardcoded to
+- [x] **`tests/conformance/test_deliver_commit_trailers.py:22`** — `COAUTHOR` is hardcoded to
   `GitHub Copilot`. The test asserts *shape* (`<[^>]+@[^>]+>`), not identity, so the constant
   and its comment just follow decision #1 — better, add a case using the Pi identity to prove
-  the shape holds.
+  the shape holds. *Landed:* `COAUTHOR` stays Copilot (the suite's driver); a new
+  `PI_COAUTHOR` and `test_pi_identity_fits_the_trailer_shape` prove the Pi line passes the
+  shape check and survives git's trailer parser whole.
 - [ ] **`tests/unit/test_kraken.py:549-581`** — already pins the `plugin_version()` fallback.
   No change needed; **cite it in the PR body** as the evidence behind 1.2's never-copy rule
   instead of pasting a manual run.
@@ -593,19 +683,23 @@ Keep as a separate PR after Phases 1–2 are green — highest discovery risk.
   disclaimer, relative links and snippet syntax. One correction to the earlier draft: its
   `sources` array at `:188` is seeded with `README`/`PROTOCOL`/`AGENTS` and then **auto-extended
   with `skills/*/SKILL.md` and `skills/*/*.md`** (`:189-196`) — so:
-  - [ ] only a new **root-level** doc needs adding to `:188` by hand; a new file under
+  - [x] only a new **root-level** doc needs adding to `:188` by hand; a new file under
     `skills/*/` joins automatically;
-  - [ ] re-run `make lint` after the README/AGENTS rewrites, since both are linted sources and
-    the relative-link check (`[4]`) is easy to break while moving sections.
-- [ ] **`tests/COVERAGE.md`** — no new normative clause expected, so **no new row**. If 1.3
+  - [x] re-run `make lint` after the README/AGENTS rewrites, since both are linted sources and
+    the relative-link check (`[4]`) is easy to break while moving sections. *PR 3:* no new
+    file, `make lint` green (41 relative links resolve).
+- [x] **`tests/COVERAGE.md`** — no new normative clause expected, so **no new row**. If 1.3
   touches something COVERAGE cites, update that row.
-- [ ] **`tests/agent/`** — three `/kraken:unleash` sites follow 1.3: `lib-agent.sh:98` (the
+- [x] **`tests/agent/`** — three `/kraken:unleash` sites follow 1.3: `lib-agent.sh:98` (the
   real prompt), `README.md:20`, `run-agent-tests.sh:5` (both prose). `lib-agent.sh:105` also
   invokes `claude -p` with `--plugin-dir`/`--dangerously-skip-permissions`, which are
   Claude-Code-only; **leave the harness alone** — this suite is deliberately the Claude Code
   judgment harness. Optionally run one scenario by hand against `pi -p` (the strongest proof
   available: the skill's *judgment* under a different harness), but it spends tokens and never
   runs in CI (`CONTRIBUTING.md:49-63`). Paste the evidence in the PR.
+  *PR 3: left alone.* The real prompt is now `lib-agent.sh:126`, and the suite drives
+  Copilot as well as Claude Code; both still invoke `/kraken:unleash`, which is right for
+  them. No hand-run Pi scenario yet.
 - `Makefile` — unchanged.
 
 ## What does NOT change — and that is the point
