@@ -150,7 +150,9 @@ def _orphan_lines(orphans: list[int]) -> list[str]:
 
 def _launch_lines(repo: str, projects: list[str]) -> list[str]:
     """The launch recon: the exact command that starts one worker per configured
-    project — the only section that tells the operator to DO something."""
+    project — the only section that tells the operator to DO something. The
+    lines stay copy-paste for the plugin spelling (Claude Code, Copilot CLI);
+    one hint names Pi's, the one harness that spells skills differently."""
     if not projects:
         return ["  🚀 Launch — no project: labels yet "
                 "(create one with init --project)"]
@@ -158,6 +160,7 @@ def _launch_lines(repo: str, projects: list[str]) -> list[str]:
     for name in projects:
         lines.append(f"     /kraken:unleash {repo} "
                      f"--worker-name <worker-name> --project {name}")
+    lines.append("     (Pi: /skill:unleash with the same arguments)")
     return lines
 
 

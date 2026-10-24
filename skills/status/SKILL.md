@@ -80,6 +80,7 @@ orchestration left to do by hand.
      🚀 Launch — one worker per prepared environment
         /kraken:unleash OWNER/tasks --worker-name <worker-name> --project <name-1>
         /kraken:unleash OWNER/tasks --worker-name <worker-name> --project <name-2>
+        (Pi: /skill:unleash with the same arguments)
    ```
 
    The PR link comes from the task's state record (PROTOCOL.md §3.1, §8) and from
