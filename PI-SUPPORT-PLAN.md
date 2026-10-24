@@ -23,12 +23,17 @@ Drafted 2026-10-22 against `kraken@0.7.1`; re-based 2026-10-23 onto `kraken@0.8.
 
 **Phase 1: in progress.** PR 1 (`feat/pi-harness-agnostic-loop`, [1.5](#15-scriptskraken-loopsh--generalize-the-harness)
 + the parametrized loop tests), rebased onto 0.8.0, is in review as
-[#183](https://github.com/rafael-adcp/kraken/pull/183). The Pi argv it ships is
-**unverified against a live Pi** until the deferred spikes 0.3 and 0.9 run.
+[#183](https://github.com/rafael-adcp/kraken/pull/183). The Pi argv it ships is **verified for
+argument delivery** by spike 0.9: the `/skill:unleash <args>` form reaches the model.
 
-Next step: **PR 2** — the harness-neutral launch line in `render.py` (1.3). Spikes 0.3 and 0.9
-are **deferred: to be run by the operator on Pi+OpenAI**; 0.9 must land before PR 3.
-Decisions #1 and #2 are made; #3 and #4 are still open — see [Decisions needed](#decisions-needed).
+**PR 2 in progress** (`fix/pi-harness-neutral-launch-line`, stacked on PR 1): the launch
+recon in `render.py` keeps its copy-paste `/kraken:unleash` lines and names Pi's spelling (1.3). Spikes 0.3 and 0.9 are **done** (operator,
+Pi 1.4.0 + OpenAI `gpt-6-luna`, 2026-10-23). Decisions #1, #2 and #4 are made; #3 is still
+open — see [Decisions needed](#decisions-needed).
+
+**Operator note (Phase 0).** The operator runs Pi with the **OpenAI provider**. A Pi worker
+needs a provider other than Anthropic OAuth, or paid extra usage (see the Claude-plan OAuth row
+in Reference facts).
 
 **Revision history of this plan.** First draft was research-only. Second pass over the repo
 found three gaps (the prefix is hardcoded in all three skills; the natural Pi install breaks
@@ -130,16 +135,20 @@ PR body.
 
 ### Still open
 
-- [ ] **0.3** **Print-mode exit codes** — the loop needs to tell "drained" from "died".
+- [x] **0.3** **Print-mode exit codes** — the loop needs to tell "drained" from "died".
   `pi -p "echo hi"; echo $?`, plus a forced-error case (bad model name, unreadable skill path)
   and a mid-run `SIGTERM`.
   **Partial (pi 1.4.0).** Observed exit **1** in three cases: a bad `--model` (`Error: Model
   "…" not found`), a revoked Copilot OAuth (refresh 403), and Anthropic OAuth refusing a
   third-party app (400, see Reference facts); an unreadable `--skill` path did not fail before
   auth. The docs (`cli-integration.md`) now say an `error`/`aborted`/`length` stop reason exits
-  nonzero. Still unverified: the success exit code and `SIGTERM` behaviour — **deferred: to be
-  run by the operator on Pi+OpenAI**. Either way the loop ignores the exit status (the surviving
-  lease decides), so this does not block PR 1.
+  nonzero.
+  **Done (operator, pi 1.4.0 + OpenAI `gpt-6-luna`, 2026-10-23).**
+  `pi -p --no-session --model gpt-6-luna "Reply with exactly: hi"` printed `hi` and exited
+  **0**; `SIGTERM` to a running `pi -p` exited **143** (128+15). With the three exit-1 cases
+  above, the exit code tells clean from failed but **not why** — and 0.9 showed a run that did
+  nothing also exits 0, so **exit 0 ≠ drained**. The loop's lease-based release (ignore the exit
+  status, let the surviving lease decide) stays right; PR 1 needs no change.
 - [ ] **0.4** Precedence of `AGENTS.md` vs `CLAUDE.md` — **Pi loads both**. *Mostly moot since
   0.8.0:* the loop runs Pi in the work repo, so a loop-driven worker loads the work repo's
   files, never kraken's contributor-facing root `CLAUDE.md`. It only matters for an operator
@@ -155,14 +164,28 @@ PR body.
 
 ### New — found by the third pass
 
-- [ ] **0.9** *(deferred: to be run by the operator on Pi+OpenAI, before PR 3; PR 1's Pi argv
-  stays unverified until then)* **How do the three required arguments actually land?** Run
+- [x] **0.9** **How do the three required arguments actually land?** Run
   `pi -p "/skill:unleash acme/tasks --worker-name w1 --project app --once"` and inspect the
   assembled prompt. Two things to record: (a) that the slug/worker/project reach the model as
   an appended user request, and (b) what the trailing literal `$ARGUMENTS` line looks like from
   the model's side. **This is the highest-value item in Phase 0** — if the arguments do not
   arrive, `SKILL.md`'s "do not start, ask for it" rule makes a Pi worker refuse to run, and
   there is no Pi support at all. Feeds decision #4.
+  **Done (operator, pi 1.4.0 + OpenAI `gpt-6-luna`, 2026-10-23).** Run in a scratch dir:
+  `pi -p --no-session --no-tools --model gpt-6-luna --mode json --skill <kraken>/skills --
+  "/skill:unleash acme/tasks --worker-name w1 --project app --once"`.
+  - (a) **The arguments arrive.** Pi expands the skill into the user message as
+    `<skill name="unleash" location="...">…</skill>`, then a blank line, then the raw args
+    `acme/tasks --worker-name w1 --project app --once`.
+  - (b) Inside the skill body, the literal line `Coordination repo / flags / extra context:
+    $ARGUMENTS` is left **un-interpolated** — a dead token.
+  - The model still parsed the args correctly ("I'll check the queue for `acme/tasks` as
+    worker `w1` on project `app`"); with no tools it said it could not run
+    `kraken.py next-action` and printed the exact command. It did **not** refuse for missing
+    args.
+  - That run exited **0** although nothing was done: exit 0 ≠ drained (see 0.3).
+  - **PR 1's Pi argv is verified for argument delivery**: the slash command plus args form
+    works.
 - [ ] **0.10** **Does a symlink install preserve the two `../../` resolutions?** Both
   `PLUGIN_MANIFEST` (`contract.py:130-131`) and `PROTOCOL_DOC` (`contract.py:137`) resolve from
   `SKILL_DIR` with `os.path.abspath`, which does **not** follow symlinks — so the symlink's
@@ -201,19 +224,25 @@ Skills spec, and Pi's documented behavior is different: arguments after `/skill:
 appended to the loaded instructions as a user request. So on Pi the data arrives and the token
 does not get substituted — the worker reads a literal `$ARGUMENTS`.
 
-That is a graceful degradation rather than a break (0.9 confirms), but it is exactly the kind
-of harness leak `AGENTS.md:46-48` says should not exist in `SKILL.md`. Options, cheapest first:
+That is a graceful degradation rather than a break (0.9 confirmed it: the args arrive after
+the skill block and the model parsed them), but it is exactly the kind of harness leak
+`AGENTS.md:46-48` says should not exist in `SKILL.md`.
 
-- [ ] **Keep the line, make it self-describing.** e.g. `Coordination repo / flags / extra
-  context: $ARGUMENTS` → a form that reads correctly whether or not it was substituted ("…the
-  arguments you were invoked with, below or interpolated here"). One-line change per skill, no
-  behavior change on Claude Code.
-- [ ] **Alternative:** ship a Pi `prompts/` command that forwards its own arguments into the
-  skill, leaving the skill bodies untouched. Interacts with the same decision as 1.3's
-  alternative — if we ship `prompts/` for the prefix, it solves this too.
+**Decided (decision #4): reword the line, no Pi `prompts/` command.** Ships in **PR 3**.
 
-**Blocked on decision #4.** Do not touch three executable prompts before 0.9 says what Pi
-actually renders.
+- [ ] **Keep the line, make it self-describing** in all three skills, so it reads correctly
+  whether or not the harness interpolates it, e.g.:
+
+  ```
+  Coordination repo / flags / extra context: $ARGUMENTS
+  (if that reads as a literal placeholder, they follow this skill as the request text)
+  ```
+
+  Why: a weaker model could read the dead token as "no arguments" and trip the "do not start,
+  ask for it" rule; it is three one-line edits with no change on Claude Code; and it helps any
+  non-interpolating Agent Skills harness, not only Pi.
+- ~~**Alternative:** ship a Pi `prompts/` command that forwards its own arguments into the
+  skill.~~ **Rejected** — no `prompts/` command ships.
 
 ### 1.1 `AGENTS.md` — generalize from "Copilot" to "any agents.md-aware CLI"
 
@@ -324,18 +353,28 @@ def _launch_lines(repo: str, projects: list[str]) -> list[str]:
                  f"--worker-name <worker-name> --project {name}")
 ```
 
-- [ ] **`render.py:166` — fix this first.** `_launch_lines` is called from `render.py:74`, so
+- [x] **`render.py:166` — fix this first.** `_launch_lines` is called from `render.py:74`, so
   **`kraken.py status` prints a Claude-Code-only command** to whatever harness ran it, and
   `skills/status/SKILL.md:146` promises those lines are copy-paste for the human. A Pi operator
   gets a launch line that does not work in their harness. Options: take the prefix from an env
   var / flag, or drop the prefix and print the arguments under a line naming the skill
   (`unleash OWNER/tasks …` + "prefix it the way your harness spells skills").
   **This moves PR 2 out of docs-only territory and gives it a real test.**
-- [ ] `tests/conformance/test_status.py:73-76` — asserts `"acme/tasks --worker-name
+  *Landed in PR 2* (at 0.8.0 the emit site is `render.py:159`, called from `:70`): neither
+  option as written. The launch lines stay `/kraken:unleash {repo} --worker-name
+  <worker-name> --project {name}` exactly as before — copy-paste for Claude Code and Copilot
+  CLI, which both invoke `/kraken:unleash` — and one hint line follows them:
+  `(Pi: /skill:unleash with the same arguments)`. No env var or flag: kraken cannot reliably
+  know which harness is reading.
+  *Rejected:* bare arguments under a hint naming both spellings — it breaks copy-paste for
+  Claude Code and Copilot to fix the one harness that differs.
+- [x] `tests/conformance/test_status.py:73-76` — asserts `"acme/tasks --worker-name
   <worker-name>"` and `--project <p>` for each project. It does **not** pin `/kraken:`, so the
   change above does not break it — but the new shape must be pinned here in the same PR.
-- [ ] `skills/status/SKILL.md:81-82` — the documented *example* of that rendered output.
-  Follows `render.py`, never leads it.
+  *Landed in PR 2:* pins each launch line as the full `/kraken:unleash …` command (the
+  copy-paste contract) and the Pi hint as the last line.
+- [x] `skills/status/SKILL.md:81-82` — the documented *example* of that rendered output.
+  Follows `render.py`, never leads it. *Landed in PR 2:* gains the Pi hint line (`:83`).
 - [ ] `skills/status/SKILL.md:146` — "It does NOT invoke `/kraken:unleash` on my behalf".
 - [ ] `skills/unleash/SKILL.md:28` — the **Invocation** block. Also `:197`, which offers
   `/loop /kraken:unleash … --once` as the no-watcher fallback (note `/loop` is itself a Claude
@@ -350,7 +389,7 @@ is executable prose, and `scripts/lint-skills.sh` pins **no** `/kraken:` string 
 `test_status.py:73-76` on the rendered launch line — which is why the `render.py` emit site is
 the safest part of 1.3 to change and the prose is the riskiest.
 
-**Alternative worth weighing first:** Pi exposes `prompts/` as slash commands. Shipping a
+**Alternative (rejected by decision #4 — no `prompts/` command ships):** Pi exposes `prompts/` as slash commands. Shipping a
 prompt there could give Pi operators a kraken-spelled command, leave the skills' invocation
 blocks **untouched**, and — if `prompts/` does interpolate arguments — solve 1.0 at the same
 time. Cheaper, and it keeps us out of the most dangerous material in the repo. It does not help
@@ -526,9 +565,9 @@ Keep as a separate PR after Phases 1–2 are green — highest discovery risk.
 
 ## Tests, lint and CI
 
-- [ ] **`tests/conformance/test_status.py:73-76`** — the launch-line shape assertion. Must move
-  with `render.py` in the same PR (1.3). Add a case proving the rendered line carries no
-  harness-specific prefix (or carries the configured one).
+- [x] **`tests/conformance/test_status.py:73-76`** — the launch-line shape assertion (PR 2). Must move
+  with `render.py` in the same PR (1.3). *Landed:* each line is pinned as the full
+  `/kraken:unleash …` command, and the Pi hint as the last line.
 - [x] **`tests/conformance/test_loop_fast_release.py`** — installs a fake `copilot` on `PATH`
   (`write_copilot_stub`, line 26) and its docstring is Copilot-specific (lines 1-9). Generalize
   to `write_agent_stub(harness, body)` and **parametrize the existing cases over `copilot` and
@@ -612,7 +651,13 @@ protocol/9 abstraction worked.
    to discuss.
 3. **The root `CLAUDE.md`** *(depends on spike 0.4)* — accept the graphify guidance leaking
    into a worker session, or move it into `CONTRIBUTING.md`?
-4. **Still open** — decided after spike 0.9, which runs before PR 3.
+4. **Decided:** reword the trailing `$ARGUMENTS` line in all three skills (init, status,
+   unleash) so it reads correctly whether or not the harness interpolates it — see
+   [1.0](#10-arguments--the-one-real-plumbing-dependency). **No Pi `prompts/` command.** Ships
+   in PR 3. Spike 0.9 showed the risk is low (the arguments do arrive; the line is a dead
+   token), but a weaker model could read the dead token as "no arguments" and trip the "do not
+   start, ask for it" rule; the fix is three one-line edits with no change on Claude Code, and
+   it helps any non-interpolating Agent Skills harness. Original question below.
    **How the Pi worker receives its three required arguments** *(new; depends on spike 0.9,
    blocks 1.0 and interacts with 1.3's alternative)* — rewrite the `$ARGUMENTS` line in all
    three skills to read correctly un-interpolated, or ship a Pi `prompts/` command that
@@ -625,8 +670,8 @@ protocol/9 abstraction worked.
 | PR | Title (conventional-commit) | Contents |
 | --- | --- | --- |
 | 1 | `feat(loop): make kraken-loop.sh harness-agnostic` | 1.5 + the parametrized `test_loop_fast_release.py` + Pi cases in `test_loop_work_dir.py` (the `protocol/6` fixes landed upstream in 0.8.0). Mechanical, testable, independent of the prose |
-| 2 | `fix(status): render a harness-neutral launch line` | 1.3's `render.py:166` + `test_status.py` assertion. Small, has a test, and is the only *functional* bug in the set — ship it before the prose so the docs can describe real output |
-| 3 | `docs: add Pi as a third tentacle harness` | 1.1, 1.2 (incl. the never-copy rule and the `+grep` syntax trap), 1.3's prose sites, 1.4, 1.6, 1.7 + `make lint`. Carries 1.0 if decision #4 lands on editing the skills |
+| 2 | `fix(status): name the Pi spelling in the launch recon` | 1.3's `render.py:159` (keeps the copy-paste `/kraken:unleash` lines, adds a Pi hint) + `test_status.py` assertion + the status skill's example. Small, has a test, and is the only *functional* bug in the set — ship it before the prose so the docs can describe real output |
+| 3 | `docs: add Pi as a third tentacle harness` | 1.1, 1.2 (incl. the never-copy rule and the `+grep` syntax trap), 1.3's prose sites, 1.4, 1.6, 1.7 + `make lint`. Carries 1.0 (the self-describing `$ARGUMENTS` line, decision #4) |
 | 4 | `feat(pi): extension for session_shutdown release and deny rules` | Phase 2 — the `session_shutdown` release **and** `tool_call` blocking for deny-rule parity |
 | 5 | `feat(pi): native in-session ambush watcher` | Phase 3 |
 
