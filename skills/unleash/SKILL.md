@@ -28,6 +28,9 @@ disagree, the spec wins.
 /kraken:unleash OWNER/tasks --worker-name <alias> --project <name> [--once]
 ```
 
+The prefix is the harness's spelling (Pi: `/skill:unleash`); the arguments are the
+same everywhere.
+
 **The first three arguments are REQUIRED.** If any is missing, do not start — ask for
 it. A slug that is still the doc placeholder (`OWNER/...`, or anything wearing `<`/`>`)
 is refused by the program itself, before any read or write: substitute your real
@@ -203,10 +206,10 @@ while nothing can reach the repo.
 Armed? Confirm what is watching (repo, project, worker name, cadence) and **end your
 turn** — do not keep polling yourself. On each `kraken-queue:` event, run **The loop**
 again until `idle`, then go quiet; the watcher stays armed (the `--exit-on-wake` one
-you re-arm yourself, as above). Cannot arm one? Say so,
-offer `/loop /kraken:unleash ... --once` as the fallback, and end the turn as if
-`--once` — do not improvise a watcher. When I say stop, stop it and confirm; either way
-it dies with the session.
+you re-arm yourself, as above). Cannot arm one? Say so, offer a timed `--once` re-run
+as the fallback (in Claude Code, `/loop /kraken:unleash ... --once`; elsewhere
+`scripts/kraken-loop.sh`), and end the turn as if `--once` — do not improvise a
+watcher. When I say stop, stop it and confirm; either way it dies with the session.
 
 ## Attribution
 
@@ -247,3 +250,4 @@ instead.
 - A task whose meaning is unclear gets an escalation, not improvisation.
 
 Coordination repo / flags / extra context: $ARGUMENTS
+(if that reads as a literal placeholder, they follow this skill as the request text)

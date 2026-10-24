@@ -3,9 +3,10 @@
 This file lets an `agents.md`-aware agent CLI (GitHub Copilot CLI, and others that
 auto-load `AGENTS.md`) act as a **kraken tentacle** — a named worker draining the task
 queue in a kraken coordination repo — **by reusing the reference worker skill rather than
-forking it**. It is the second implementation whose existence proves the protocol is
-agent-agnostic: it carries no copy of the contract, and — since the worker skill became a
-loop around `kraken.py next-action` — **no deltas either**.
+forking it**. With Claude Code and Pi, that is three harnesses running one skill — the
+evidence that the protocol is agent-agnostic. This file carries no copy of the contract,
+and — since the worker skill became a loop around `kraken.py next-action` — **no deltas
+either**.
 
 > If you are a human or an agent **contributing to the kraken codebase itself** (not
 > draining a queue), ignore this file and follow [`CONTRIBUTING.md`](CONTRIBUTING.md).
@@ -23,7 +24,8 @@ loop around `kraken.py next-action` — **no deltas either**.
 3. [`skills/unleash/DELIVERY.md`](skills/unleash/DELIVERY.md) — the delivery conventions
    SKILL.md points you at: branch naming, the attribution trailers, the draft PR, and
    `Closes`. It names your `Co-Authored-By` identity
-   (`Co-Authored-By: GitHub Copilot <noreply@github.com>`) alongside Claude Code's.
+   (`Co-Authored-By: GitHub Copilot <noreply@github.com>`) alongside Claude Code's and
+   Pi's.
 
 You are invoked with the same three required arguments SKILL.md documents — the
 coordination repo slug `OWNER/tasks`, a `--worker-name` (an identity that says where the
@@ -97,8 +99,20 @@ cd /path/to/work-repo
 ```
 
 Each poll runs the free, read-only `list-startable` check first and only invokes
-`copilot` when a task is actually startable, so an idle queue never spends a token. Pass
+the agent when a task is actually startable, so an idle queue never spends a token. Pass
 `--once` for a single bounded drain, or `--poll <seconds>` to change the 60s cadence.
+
+### Pi does not read this file
+
+`--harness pi` drives the same loop with [Pi](https://pi.dev/) instead of `copilot`:
+`pi -p --skill "$KRAKEN/skills" -- "/skill:unleash OWNER/tasks --worker-name <worker-name>
+--project <name> --once"`, run in the work repo. Pi auto-loads only the work repo's
+`AGENTS.md`, never this one, and reaches the contract through `--skill` alone — so
+anything a Pi worker must know, its `Co-Authored-By` identity included, lives under
+`skills/`, never only here. Pi denies only whole tools (`--exclude-tools`, which can
+take out the GitHub MCP merge and issue-write tools), never a command inside `bash`: until
+a Pi extension blocks `gh pr merge`, `gh repo delete` and `gh issue close`, those rest on
+the skill's prose. Install and the other gaps are in the [README](README.md#pi).
 
 ## Self-healing: the lease does it, the loop only does it faster
 

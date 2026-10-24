@@ -2,14 +2,15 @@
 
 Thanks for wanting to help. Kraken is a small, protocol-first tool: three
 agent skills (Claude Code plugin format; a GitHub Copilot CLI worker follows the
-same `SKILL.md` through [`AGENTS.md`](AGENTS.md)), a handful of shell scripts,
+same `SKILL.md` through [`AGENTS.md`](AGENTS.md), and Pi loads it with `--skill`),
+a handful of shell scripts,
 and a normative spec. That
 shape decides how contributions work, so this page is short on purpose.
 
 ## What Kraken is (and how the repo is shaped)
 
 Kraken ships **nothing you operate** — it's the protocol between a GitHub-Issues
-task queue and the agent workers (Claude Code, GitHub Copilot CLI) that drain it. Three layers, and they
+task queue and the agent workers (Claude Code, GitHub Copilot CLI, Pi) that drain it. Three layers, and they
 have a strict hierarchy when they disagree:
 
 | Layer | Lives in | What it is |
@@ -86,7 +87,7 @@ measured. It runs slower than `make check` (every spawned interpreter is traced)
 ### The agent-behavior harness (run by hand)
 
 `make test-agent` drives **real** `/kraken:unleash --once` runs (headless
-`claude -p`, and the Copilot CLI drain pass) against the `gh` stub and asserts on artifacts — the skill's
+`claude -p`, and the Copilot CLI drain pass; Pi is not driven here) against the `gh` stub and asserts on artifacts — the skill's
 *judgment*, not just the scripts. It is slow (several model runs) and **spends
 tokens**, so it is deliberately **not** wired into any hook or CI. Run it by
 hand when you change `skills/**` or `tests/agent/**`:
