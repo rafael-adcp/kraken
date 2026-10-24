@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""The Copilot-harness fast claim-release (scripts/kraken-loop.sh): the
-SessionEnd/StopFailure hooks only fire inside a Claude Code session, so the
-loop itself is the Copilot worker's self-heal. `kraken.py claim` writes
+"""The external loop's fast claim-release (scripts/kraken-loop.sh): the
+SessionEnd/StopFailure hooks only fire inside a plugin-loading session, and
+the loop runs none, so it is the self-heal for every harness it drives
+(PROTOCOL.md §5). `kraken.py claim` writes
 $KRAKEN_STATE_DIR/claim-<worker>.json and every terminal transition removes it,
-so a file that survives the `copilot` process is proof the drain died holding
-the claim — the loop releases it on the spot (and its EXIT/INT/TERM trap covers
-the loop itself being killed), scoped to its OWN worker only. A clean drain is
-a strict no-op. Best-effort: a failed release falls back to the reaper."""
+so a file that survives the agent process is proof the drain died holding the
+claim — the loop releases it on the spot (and its EXIT/INT/TERM trap covers the
+loop itself being killed), scoped to its OWN worker only. A clean drain is a
+strict no-op. Best-effort: a failed release falls back to the reaper.
+
+Every case runs once per `--harness` (CopilotLoopTests, PiLoopTests): the
+release path is harness-agnostic by construction. How each harness is launched
+(argv, work dir) is pinned in test_loop_work_dir.py."""
 import os
 import signal
 import stat
@@ -20,15 +25,21 @@ LOOP = os.path.join(ROOT, "scripts", "kraken-loop.sh")
 # kraken-loop.sh rejects the OWNER/* placeholder shape; the stub ignores the
 # slug, so any real-looking one works.
 TASKS = "acme/tasks"
+KRAKEN_PY = os.path.join(ROOT, "skills", "unleash", "kraken.py")
 
 
-class LoopFastReleaseTests(KrakenConformanceTest):
-    def write_copilot_stub(self, body):
-        """Install a fake `copilot` on PATH whose behavior is the given bash
-        body (the loop invokes it with -p/--allow-all-tools/--no-ask-user)."""
+class LoopFastReleaseCases:
+    """The cases, mixed into one KrakenConformanceTest subclass per harness.
+    HARNESS is both the --harness value and the binary the loop runs."""
+
+    HARNESS = None
+
+    def write_agent_stub(self, body):
+        """Install a fake HARNESS CLI on PATH whose behavior is the given bash
+        body (whatever flags the loop passes it are ignored)."""
         bin_dir = os.path.join(self.state, "bin")
         os.makedirs(bin_dir, exist_ok=True)
-        path = os.path.join(bin_dir, "copilot")
+        path = os.path.join(bin_dir, self.HARNESS)
         with open(path, "w", encoding="utf-8") as f:
             f.write("#!/usr/bin/env bash\n" + body + "\n")
         os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP)
@@ -37,11 +48,13 @@ class LoopFastReleaseTests(KrakenConformanceTest):
     def loop_env(self, bin_dir):
         env = self.base_env()
         env["PATH"] = bin_dir + os.pathsep + env["PATH"]
+        env.pop("KRAKEN_AGENT_CMD", None)  # would override --harness
         return env
 
     def run_loop_once(self, bin_dir, worker="w1"):
         proc = subprocess.run(
-            ["bash", LOOP, TASKS, "--worker-name", worker, "--project", "app", "--once"],
+            ["bash", LOOP, TASKS, "--worker-name", worker, "--project", "app", "--once",
+             "--harness", self.HARNESS],
             cwd=ROOT,
             env=self.loop_env(bin_dir),
             capture_output=True,
@@ -49,13 +62,12 @@ class LoopFastReleaseTests(KrakenConformanceTest):
         )
         return proc
 
-    def test_copilot_death_mid_drain_releases_the_claim(self):
+    def test_agent_death_mid_drain_releases_the_claim(self):
         # The stub claims and then dies without any terminal transition — a
         # crash / kill / rate-limit abort mid-drain.
         self.mk_issue(7, "abandoned mid-drain", "kraken-task", "project:app")
-        bin_dir = self.write_copilot_stub(
-            'python3 "%s" claim "%s" 7 w1 >/dev/null\nexit 1\n'
-            % (os.path.join(ROOT, "skills", "unleash", "kraken.py"), TASKS)
+        bin_dir = self.write_agent_stub(
+            'python3 "%s" claim "%s" 7 w1 >/dev/null\nexit 1\n' % (KRAKEN_PY, TASKS)
         )
 
         proc = self.run_loop_once(bin_dir)
@@ -63,10 +75,10 @@ class LoopFastReleaseTests(KrakenConformanceTest):
                          "loop --once must exit 0 (stderr: %s)" % proc.stderr)
 
         self.assertFalse(self.has_label(7, "in-progress"),
-                         "loop did not drop in-progress after copilot died mid-drain")
+                         "loop did not drop in-progress after the agent died mid-drain")
         self.assertFalse(os.path.isfile(self.claim_state_file("w1")),
                          "loop did not delete the claim state file")
-        self.assertIn('<!-- kraken {"type":"released","worker":"w1","reason":"copilot exited mid-drain"} -->',
+        self.assertIn('<!-- kraken {"type":"released","worker":"w1","reason":"%s exited mid-drain"} -->' % self.HARNESS,
                       self.last_comment(7),
                       "loop did not release via kraken.py (released marker missing)")
         self.assertFalse(self.claim_ref_exists(7), "loop release left the claim ref behind")
@@ -80,7 +92,7 @@ class LoopFastReleaseTests(KrakenConformanceTest):
         # claimed): the loop must write nothing to the queue.
         self.mk_issue(7, "untouched task", "kraken-task", "project:app")
         before = self.comment_count(7)
-        bin_dir = self.write_copilot_stub("exit 0")
+        bin_dir = self.write_agent_stub("exit 0")
 
         proc = self.run_loop_once(bin_dir)
         self.assertEqual(proc.returncode, 0)
@@ -97,7 +109,7 @@ class LoopFastReleaseTests(KrakenConformanceTest):
         self.assertTrue(os.path.isfile(self.claim_state_file("other")),
                         "setup: claim did not write state file for 'other'")
         before8 = self.comment_count(8)
-        bin_dir = self.write_copilot_stub("exit 1")
+        bin_dir = self.write_agent_stub("exit 1")
 
         proc = self.run_loop_once(bin_dir, worker="w1")
         self.assertEqual(proc.returncode, 0)
@@ -110,22 +122,25 @@ class LoopFastReleaseTests(KrakenConformanceTest):
 
     def test_sigint_on_the_polling_loop_releases_the_claim(self):
         # Ctrl-C story: the polling loop (no --once) is interrupted while the
-        # copilot process holds the claim; the trap must release before exit.
+        # agent process holds the claim; the trap must release before exit.
         self.mk_issue(7, "interrupted task", "kraken-task", "project:app")
         # The stub announces itself only once `claim` has RETURNED. Interrupting
         # on the claim state file instead would race: kraken.py writes it before
         # the label/comment writes, so the SIGINT could land on the still-running
         # python3 — which exits on KeyboardInterrupt with an ordinary status, and
         # a bash script whose foreground child was not itself killed by SIGINT
-        # carries on to the next command (`sleep 60`), stalling the loop.
-        ready = os.path.join(self.state, "copilot-ready")
-        bin_dir = self.write_copilot_stub(
-            'python3 "%s" claim "%s" 7 w1 >/dev/null\ntouch "%s"\nsleep 60\n'
-            % (os.path.join(ROOT, "skills", "unleash", "kraken.py"), TASKS, ready)
+        # carries on to the next command (`sleep 60`), stalling the loop. The
+        # sentinel is written by a shell builtin, not `touch`, for the same
+        # reason: no external child for the SIGINT to land on and outlive.
+        ready = os.path.join(self.state, "agent-ready")
+        bin_dir = self.write_agent_stub(
+            'python3 "%s" claim "%s" 7 w1 >/dev/null\n: > "%s"\nsleep 60\n'
+            % (KRAKEN_PY, TASKS, ready)
         )
 
         proc = subprocess.Popen(
-            ["bash", LOOP, TASKS, "--worker-name", "w1", "--project", "app"],
+            ["bash", LOOP, TASKS, "--worker-name", "w1", "--project", "app",
+             "--harness", self.HARNESS],
             cwd=ROOT,
             env=self.loop_env(bin_dir),
             stdout=subprocess.DEVNULL,
@@ -141,7 +156,7 @@ class LoopFastReleaseTests(KrakenConformanceTest):
                     break
                 time.sleep(0.1)
             else:
-                self.fail("copilot stub never finished its claim (sentinel missing)")
+                self.fail("agent stub never finished its claim (sentinel missing)")
             self.assertTrue(os.path.isfile(self.claim_state_file("w1")),
                             "setup: stub claim did not write the state file")
             os.killpg(os.getpgid(proc.pid), signal.SIGINT)
@@ -159,6 +174,14 @@ class LoopFastReleaseTests(KrakenConformanceTest):
                       "interrupted loop did not post the released marker")
         self.assertFalse(self.claim_ref_exists(7),
                          "interrupted loop left the claim ref behind")
+
+
+class CopilotLoopTests(LoopFastReleaseCases, KrakenConformanceTest):
+    HARNESS = "copilot"
+
+
+class PiLoopTests(LoopFastReleaseCases, KrakenConformanceTest):
+    HARNESS = "pi"
 
 
 if __name__ == "__main__":

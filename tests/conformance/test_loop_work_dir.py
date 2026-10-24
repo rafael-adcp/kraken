@@ -5,7 +5,12 @@ the draft PR live — never in the kraken checkout the script sits in. The work
 dir defaults to the directory the loop was launched from; `--work-dir` (or
 KRAKEN_WORK_DIR) points it elsewhere. The contract files stay in the kraken
 checkout, so the prompt names them by absolute path and `--add-dir` grants
-copilot read access to that checkout."""
+copilot read access to that checkout.
+
+`--harness pi` (or KRAKEN_HARNESS=pi) runs `pi` in the same work dir, loading
+the skills from the kraken checkout with `--skill`; KRAKEN_AGENT_CMD runs an
+unlisted CLI, split into argv without ever being evaluated. Copilot stays the
+default — every test here that names no harness pins that."""
 import os
 import stat
 import subprocess
@@ -22,18 +27,22 @@ TASKS = "acme/tasks"
 class LoopWorkDirTests(KrakenConformanceTest):
     def setUp(self):
         super().setUp()
-        # The stub records where it ran and what it was handed, so every test
-        # asserts on the invocation the loop actually made.
+        # Each stub records which agent ran, where, and what it was handed, so
+        # every test asserts on the invocation the loop actually made.
         self.cwd_file = os.path.join(self.state, "copilot-cwd")
         self.args_file = os.path.join(self.state, "copilot-args")
+        self.name_file = os.path.join(self.state, "agent-name")
         bin_dir = os.path.join(self.state, "bin")
         os.makedirs(bin_dir)
-        stub = os.path.join(bin_dir, "copilot")
-        with open(stub, "w", encoding="utf-8") as f:
-            f.write("#!/usr/bin/env bash\n"
-                    'pwd > "%s"\n'
-                    "printf '%%s\\0' \"$@\" > \"%s\"\n" % (self.cwd_file, self.args_file))
-        os.chmod(stub, os.stat(stub).st_mode | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP)
+        for name in ("copilot", "pi", "mycli"):
+            stub = os.path.join(bin_dir, name)
+            with open(stub, "w", encoding="utf-8") as f:
+                f.write("#!/usr/bin/env bash\n"
+                        'echo %s > "%s"\n'
+                        'pwd > "%s"\n'
+                        "printf '%%s\\0' \"$@\" > \"%s\"\n"
+                        % (name, self.name_file, self.cwd_file, self.args_file))
+            os.chmod(stub, os.stat(stub).st_mode | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP)
         self.bin_dir = bin_dir
         self.work = os.path.join(self.state, "work-repo")
         os.makedirs(self.work)
@@ -45,8 +54,10 @@ class LoopWorkDirTests(KrakenConformanceTest):
         full_env["PATH"] = self.bin_dir + os.pathsep + full_env["PATH"]
         for var in unset:
             full_env.pop(var, None)
-        if not env or "KRAKEN_WORK_DIR" not in env:
-            full_env.pop("KRAKEN_WORK_DIR", None)
+        # Only what the test says: never the invoking shell's loop settings.
+        for var in ("KRAKEN_WORK_DIR", "KRAKEN_HARNESS", "KRAKEN_AGENT_CMD"):
+            if not env or var not in env:
+                full_env.pop(var, None)
         return subprocess.run(
             ["bash", LOOP, TASKS, "--worker-name", "w1", "--project", "app", "--once", *flags],
             cwd=cwd, env=full_env, capture_output=True, text=True,
@@ -59,6 +70,10 @@ class LoopWorkDirTests(KrakenConformanceTest):
     def copilot_args(self):
         with open(self.args_file, encoding="utf-8") as f:
             return f.read().split("\0")[:-1]
+
+    def agent_name(self):
+        with open(self.name_file, encoding="utf-8") as f:
+            return f.read().strip()
 
     def assert_ran_in(self, expected):
         self.assertTrue(os.path.isfile(self.cwd_file), "the loop never invoked copilot")
@@ -120,6 +135,60 @@ class LoopWorkDirTests(KrakenConformanceTest):
                          "copilot ran although the work dir does not exist")
         self.assertTrue(self.has_label(7, "kraken-task"), "the queue must be untouched")
         self.assertFalse(self.has_label(7, "in-progress"), "the queue must be untouched")
+
+    # --- the harness: copilot by default, pi, or an unlisted CLI ---------------
+
+    def test_copilot_is_the_default_harness(self):
+        proc = self.run_loop("--work-dir", self.work)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.agent_name(), "copilot")
+
+    def test_pi_runs_in_the_work_dir_with_the_skills_from_the_checkout(self):
+        proc = self.run_loop("--work-dir", self.work, "--harness", "pi")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.agent_name(), "pi")
+        self.assert_ran_in(self.work)
+        self.assertEqual(self.copilot_args(), [
+            "-p", "--skill", os.path.join(ROOT, "skills"), "--",
+            "/skill:unleash %s --worker-name w1 --project app --once" % TASKS,
+        ])
+
+    def test_harness_env_fallback_and_flag_precedence(self):
+        proc = self.run_loop("--work-dir", self.work, env={"KRAKEN_HARNESS": "pi"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.agent_name(), "pi")
+
+        proc = self.run_loop("--work-dir", self.work, "--harness", "copilot",
+                             env={"KRAKEN_HARNESS": "pi"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.agent_name(), "copilot")
+
+    def test_unknown_harness_refuses_before_invoking_any_agent(self):
+        proc = self.run_loop("--work-dir", self.work, "--harness", "nope")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("unknown harness 'nope'", proc.stderr)
+        self.assertFalse(os.path.isfile(self.cwd_file), "an agent ran under an unknown harness")
+        self.assertFalse(self.has_label(7, "in-progress"), "the queue must be untouched")
+
+    def test_agent_cmd_is_split_into_argv_and_never_evaluated(self):
+        # Whitespace-split, the generic drain prompt appended last, shell
+        # metacharacters passed through literally — and --harness ignored.
+        canary = os.path.join(self.state, "pwned")
+        proc = self.run_loop("--work-dir", self.work, "--harness", "ignored",
+                             env={"KRAKEN_AGENT_CMD": "  mycli --print  $(touch %s) *  " % canary})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.agent_name(), "mycli")
+        self.assert_ran_in(self.work)
+        args = self.copilot_args()
+        self.assertEqual(args[:-1], ["--print", "$(touch", "%s)" % canary, "*"])
+        self.assertIn("Act as kraken worker w1, draining project:app from %s." % TASKS, args[-1])
+        self.assertFalse(os.path.exists(canary), "KRAKEN_AGENT_CMD was evaluated")
+
+    def test_blank_agent_cmd_refuses(self):
+        proc = self.run_loop("--work-dir", self.work, env={"KRAKEN_AGENT_CMD": "   "})
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("KRAKEN_AGENT_CMD", proc.stderr)
+        self.assertFalse(os.path.isfile(self.cwd_file), "an agent ran with no command")
 
     # --- the queue read has to be possible, and a failed one has to show ------
 

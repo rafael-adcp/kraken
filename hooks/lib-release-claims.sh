@@ -1,13 +1,13 @@
 # lib-release-claims.sh — the shared claim-release loop behind the lifecycle
-# hooks (session-end-release.sh, stop-failure-release.sh) and the Copilot
-# ambush loop (scripts/kraken-loop.sh). Source it, then call
+# hooks (session-end-release.sh, stop-failure-release.sh) and the external
+# ambush loop (scripts/kraken-loop.sh, any harness). Source it, then call
 # `release_all_claims "<reason>" [worker]` or
 # `release_session_claims "<reason>" <session-id>`. Not a hook itself.
 #
 # Discovery: `kraken.py claim` writes $KRAKEN_STATE_DIR/claim-<worker>.json on a
 # won claim; deliver/escalate/release remove it. The release functions run
 # `kraken.py release` for every claim-*.json still present that the caller may
-# free: the Copilot loop scopes by its worker, SessionEnd by the agent session
+# free: the ambush loop scopes by its worker, SessionEnd by the agent session
 # (Claude Code or Copilot CLI) the claim recorded (#173), StopFailure
 # (account-wide) frees them all.
 #
