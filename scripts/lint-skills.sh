@@ -2,8 +2,9 @@
 # Deterministic lint for the kraken skill sources — no tokens, no network.
 # Guards the silent-breakage classes that a prose skill is exposed to:
 #   label drift across files, protocol-version drift, orphan "step N"
-#   references, task-template field drift, broken relative links/images, and
-#   invalid shell/YAML/JSON snippets.
+#   references, task-template field drift, broken relative links/images,
+#   invalid shell/YAML/JSON snippets, and the loss of prose rules nothing else
+#   enforces (the attribution disclaimer, the acceptance-evidence rules).
 # Runs as a CI gate (.github/workflows/lint.yml) and locally via `make lint`.
 set -uo pipefail
 
@@ -18,6 +19,7 @@ PROTOCOL="PROTOCOL.md"
 AGENTS="AGENTS.md"
 PLUGIN=".claude-plugin/plugin.json"
 TEMPLATE="skills/unleash/task-template.yml"
+DELIVERY="skills/unleash/DELIVERY.md"
 # KRAKEN is the executable entry point (what `kcontract` below runs); the
 # emitters live in the package behind it, one module per layer, so each
 # per-emitter check below resolves to the module that actually owns the string.
@@ -125,6 +127,25 @@ if command -v python3 >/dev/null 2>&1; then
 else
   note "python3 unavailable — skipping contract-derived checks (1b–1d)"
 fi
+
+# --- 1g. The acceptance evidence is reproducible ----------------------------
+# PROTOCOL.md §8 makes executing the acceptance normative; these are the
+# operational rules that decide whether that execution is worth anything a day
+# later — the exact command, the real output, and the script committed to the
+# branch instead of left in a container's /tmp. Pure prose that nothing else
+# enforces, and the first real Pi delivery is what showed the cost of its
+# absence (#190): a genuine HTTP smoke test, run honestly, that no reviewer
+# could repeat from the delivered branch. Pinned so dropping it is a decision.
+echo "[1g] acceptance-evidence guidance ($DELIVERY + $SKILL)"
+fail_before=$fail
+LC_ALL=C grep -qF -- '## The acceptance evidence' "$DELIVERY" \
+  || err "$DELIVERY no longer has an 'The acceptance evidence' section"
+LC_ALL=C grep -qF -- '/tmp' "$DELIVERY" \
+  || err "$DELIVERY no longer rules out ephemeral (/tmp) evidence"
+LC_ALL=C grep -qF -- 'reproducible' "$SKILL" \
+  || err "$SKILL's validate step no longer asks for reproducible evidence"
+[ "$fail" -eq "$fail_before" ] \
+  && note "acceptance evidence must be reproducible, in both the skill and $DELIVERY"
 
 # --- 1e. Protocol version is single-sourced in PROTOCOL.md ------------------
 # The spec wins on any disagreement (CONTRIBUTING.md), so PROTOCOL.md's own
