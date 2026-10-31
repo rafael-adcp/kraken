@@ -970,7 +970,7 @@ smallest and loudest first:
 
 | PR | Issue | Title (conventional-commit) | Contents |
 | --- | --- | --- | --- |
-| 5 | [#188](https://github.com/rafael-adcp/kraken/issues/188) | `fix(pi): expose the extension through package discovery` | **Written, not yet opened.** `extensions/pi/index.ts` (the shim), `tests/unit/test_pi_discovery.py`, the README's `pi install git:` section. Spike **0.10** closed on the way. Owed before the PR: the fake-`gh` + two-session smoke run on a host with `python3` and a logged-in Pi |
+| 5 | [#188](https://github.com/rafael-adcp/kraken/issues/188) | `fix(pi): expose the extension through package discovery` | **In review** as [#191](https://github.com/rafael-adcp/kraken/pull/191) (`fix/188-pi-package-discovery`, base `main`). `extensions/pi/index.ts` (the shim), `tests/unit/test_pi_discovery.py`, the README's `pi install git:` section. Spike **0.10** closed on the way. Still owed: the fake-`gh` + two-session smoke run on a host with `python3` and a logged-in Pi |
 | 6 | [#190](https://github.com/rafael-adcp/kraken/issues/190) | `docs(delivery): require reproducible acceptance evidence` | `skills/unleash/DELIVERY.md` + task-writing guidance. Harness-agnostic: it is not part of Pi support at all, it was just found here |
 | 7 | [#189](https://github.com/rafael-adcp/kraken/issues/189) | `feat(pi): native in-session ambush watcher` | Phase 3, including the post-settlement wake-up case the design was missing. Gated on spike **0.8**; last, because the loop fallback works |
 
