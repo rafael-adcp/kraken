@@ -22,7 +22,13 @@ Drafted 2026-10-22 against `kraken@0.7.1`; re-based 2026-10-23 onto `kraken@0.8.
 
 ## Status — where we left off
 
-**Phase 1: done. Phase 2: PR 4 in review.** PR 1 (`feat/pi-harness-agnostic-loop`, [1.5](#15-scriptskraken-loopsh--generalize-the-harness)
+**Phases 1 and 2: done and shipped in `kraken@0.9.0`. Phase 3: not started — it is now
+[#189](https://github.com/rafael-adcp/kraken/issues/189).** The first real deployment (Pi +
+OpenAI, an operator's work environment, 2026-10-26) opened three issues; what they change in
+this plan is in [Field findings](#field-findings--the-first-real-pi-deployment-188190), and the
+agreed order of work is **#188 → #190 → #189**.
+
+PR 1 (`feat/pi-harness-agnostic-loop`, [1.5](#15-scriptskraken-loopsh--generalize-the-harness)
 + the parametrized loop tests) is **merged** as
 [#183](https://github.com/rafael-adcp/kraken/pull/183). The Pi argv it ships is **verified for
 argument delivery** by spike 0.9: the `/skill:unleash <args>` form reaches the model.
@@ -38,13 +44,14 @@ open but low-stakes — see [Decisions needed](#decisions-needed).
 1.2, 1.3's prose sites, 1.4, 1.6, 1.7, the Pi case in the trailers test, and `make lint`.
 What it found wrong in this plan is in [Corrections found by PR 3](#corrections-found-by-pr-3).
 
-**PR 4 in review** as [#186](https://github.com/rafael-adcp/kraken/pull/186)
-(`feat/pi-extension`, base `main`): all of Phase 2 — the extension
+**PR 4 merged** as [#186](https://github.com/rafael-adcp/kraken/pull/186)
+(`feat/pi-extension`): all of Phase 2 — the extension
 (`extensions/pi/kraken.ts`), the deny matcher (`extensions/pi/deny.py` + its unit test),
 Pi session recording in `kraken.py claim`, and the loop's `-e` + `--exclude-tools`.
 Smoke-checked with real Pi 1.4.0 + `gpt-6-luna` (2026-10-24). What it found wrong in this
-plan is in [Findings from PR 4](#findings-from-pr-4). Next after it: PR 5 (Phase 3),
-optional.
+plan is in [Findings from PR 4](#findings-from-pr-4). **Released as `v0.9.0`**
+([#187](https://github.com/rafael-adcp/kraken/pull/187), `82ac102`) — which is the version the
+field findings below were found against.
 
 **Operator note (Phase 0).** The operator runs Pi with the **OpenAI provider**. A Pi worker
 needs a provider other than Anthropic OAuth, or paid extra usage (see the Claude-plan OAuth row
@@ -69,6 +76,91 @@ reference in the file against the working tree and found **five more**, two of t
   (`scripts/kraken-loop.sh:14`, `hooks/session-end-release.sh:9`). *Fixed upstream in 0.8.0.*
 - The "no safety net" claim about the launch block was wrong:
   `tests/conformance/test_status.py:73-76` pins its shape.
+
+## Field findings — the first real Pi deployment (#188–#190)
+
+`v0.9.0` was deployed for real work (Pi + OpenAI, an operator's work environment, 2026-10-26):
+a worker claimed a task, validated its change against a compiled app, delivered a draft PR, and
+reached `idle`. **The protocol held** — no unauthorized operation, no lost claim. Three issues
+came out of it, and the agreed order of work is the order below.
+
+**1. [#188](https://github.com/rafael-adcp/kraken/issues/188) `fix(pi)`: the extension is
+invisible to Pi's package manager.** *A gap this plan never considered.* Installed the natural
+way — Pi's `DefaultPackageManager` against `git:github.com/rafael-adcp/kraken@v0.9.0` — Pi
+resolved `skills: init, status, unleash` and **`extensions: []`**. There is no root
+`package.json` with a `pi.extensions` manifest and no `extensions/pi/index.ts`, so conventional
+discovery never reaches `extensions/pi/kraken.ts` at that depth. The plan knows exactly two
+install paths for the extension — the `settings.json` `extensions` pointer (1.2, `README.md:127`)
+and the loop's own `-e` (Phase 2) — and [2.1](#21-how-the-extension-gets-tested--settle-this-before-writing-it)'s
+last bullet even states "the extension is **not** installed by the Phase 1 settings pointer",
+treating that as a *feature*. A package install is a third path, and it is the one an operator
+reaches for first.
+
+Why this is the worst-shaped failure of the three: the install **looks successful** and the
+worker **delivers correctly**, so nothing in the output distinguishes "extension loaded" from
+"extension silently absent". What is absent is both halves of Phase 2 — the `gh pr
+merge`/`repo delete`/`issue close` deny check and the fast session-end release. The lease TTL
+still recovers the claim (PROTOCOL.md §5), which is why this is a gap and not an incident, but
+successful skill discovery must stop implying extension discovery.
+
+- [x] **Decided: auto-discover, via `extensions/pi/index.ts`** — a one-line re-export of
+  `kraken.ts`, inside the directory that is already 100% Pi. The operator's objection ("I did
+  not want to write harness customizations") is the right instinct and it holds where it
+  matters: `PROTOCOL.md` names Pi **zero** times, and in `skills/` every mention is prose
+  naming a spelling, the `DELIVERY.md` attribution line, or a comment — the only code is
+  `lease.py:175-182`, which reads one env var per harness, Pi being the third row of the same
+  table rather than a branch. `extensions/pi/` is the adapter layer, where `hooks/hooks.json`
+  (Claude Code's event names) and `KRAKEN_COPILOT_FLAGS` (Copilot's flags) already live; the
+  shim adds a file there, not a new category.
+- [x] **Why not a `pi` manifest in a root `package.json`** — two findings in Pi 1.4.0's
+  `package-manager.js`, both verified by reading it:
+  1. `installGit` runs `npm install --omit=dev --legacy-peer-deps` inside **any** git-installed
+     package whose root has a `package.json`, and its `catch` does
+     `rmSync(targetDir, recursive)` before rethrowing. A missing or broken npm would turn an
+     install that works today into no install at all — on a repo that needs only `bash` and
+     `python3` (`CONTRIBUTING.md:25`).
+  2. A `pi` manifest **replaces** conventional discovery instead of adding to it
+     (`collectPackageResources:1866-1872` returns before the directory scan). Measured: a
+     manifest carrying only `pi.extensions` resolved `extensions: 1, skills: 0` — one that
+     forgot `skills` would ship no skills at all.
+- [x] **Verified against a release-shaped checkout**, by calling
+  `DefaultPackageManager.collectPackageResources` directly — the same method the git, npm and
+  local install paths all call (`:1040`, `:1055`, `:1082`), so no model request and no write to
+  the operator's settings. Before: `skills: 3, extensions: 0`, reproducing the field report
+  byte for byte. After: `skills: 3, extensions: 1`. Pi's own jiti loader
+  (`extensions/loader.js:480-488`) then loads the shim and registers `tool_call` and
+  `session_shutdown` — same as loading `kraken.ts` directly.
+- [x] **0.10 is answered, favorably.** `installGit` is `git clone <repo> <dir>` +
+  `git checkout <ref>` — a **full repo clone**, so `skills/unleash/kraken/../..` is the clone
+  root, which has `.claude-plugin/plugin.json` and `PROTOCOL.md`. A package install satisfies
+  the never-copy rule: the trailer keeps its real `kraken@<version>` and
+  `kraken.py contract boundary` answers. No symlink shape needs recommending after all.
+- [x] **One nuance the shim introduces.** Pi dedupes extensions by resolved path, and
+  `index.ts` and `kraken.ts` are different paths — so an operator who both package-installs
+  kraken *and* runs the loop (which passes `-e …/kraken.ts`) registers both handlers twice.
+  Wasteful, not harmful: the release is idempotent by design and a refused command is refused
+  either way. Recorded in `index.ts`'s header so it is a known cost, not a surprise.
+- [ ] Re-prove the guards on the chosen path with a fake `gh` on `PATH` and a two-session
+  release check — the same smoke shape 2.1 already documents. **Still owed:** needs a host with
+  `python3` and a logged-in Pi (the authoring machine had neither), so it is the one acceptance
+  criterion carried into the PR as a hand-run.
+
+**2. [#190](https://github.com/rafael-adcp/kraken/issues/190) `docs(delivery)`: acceptance
+evidence must be reproducible.** **Not a Pi issue** — it surfaced on a Pi delivery but names a
+hole in `skills/unleash/DELIVERY.md` that every harness falls through. The worker ran a real
+HTTP smoke test that showed the defect before the fix and the expected behavior after, and was
+honest about what stayed unverified (production ingestion) — but the script lived in `/tmp` and
+the draft PR described the method without letting anyone re-run it from the delivered branch.
+The task's acceptance criteria named outcomes, not executable checks. Scope: `DELIVERY.md` plus
+task-writing guidance; no new subsystem, no authorization change. It is second in the order
+because it applies to all three harnesses, and every delivery made before it lands is evidence
+nobody can reproduce.
+
+**3. [#189](https://github.com/rafael-adcp/kraken/issues/189) `feat(pi)`: native ambush —
+and the timing case [Phase 3](#phase-3--native-in-session-ambush-for-pi-optional-most-ambitious)
+is missing.** This is PR 5, unchanged in intent, but the run exposed a real hole in the design
+below: see the **post-settlement wake-up** item there. Last in the order — highest discovery
+risk, gated on spike 0.8, and `kraken-loop.sh --harness pi` is a working fallback meanwhile.
 
 ## The headline
 
@@ -217,6 +309,10 @@ PR body.
   Command: `python3 <path>/kraken.py contract task-trailer --repo acme/tasks --issue 1 --worker w1`
   and `python3 <path>/kraken.py contract boundary` — the first must not say `kraken@unknown`,
   the second must not print nothing.
+  **Now has a fourth row to verify and an owner:** a **package install** (Pi's package manager
+  against the repo, the shape [#188](https://github.com/rafael-adcp/kraken/issues/188) used).
+  Whatever layout it lays down decides both resolutions, so answer 0.10 inside that work rather
+  than as a standalone spike.
 
 > **0.4 shrank with 0.8.0.** A loop-driven Pi worker runs in the work repo and never sees
 > kraken's root `CLAUDE.md`; only a hand-launched Pi inside the kraken checkout would receive
@@ -671,6 +767,10 @@ The resolution to commit to:
   is a separate key with no auto-load directory, so a Phase 1 operator is unaffected by Phase 2
   existing. That is the argument for shipping them as separate PRs. *Nuance:* the loop now
   loads it with `-e`, so a loop-driven Pi worker gets it without any settings entry.
+  **Incomplete — see [#188](https://github.com/rafael-adcp/kraken/issues/188):** this bullet
+  counted two install paths and missed the third. A **package install** (Pi's package manager
+  against the repo) discovers the skills and silently discovers no extension, so "unaffected by
+  Phase 2 existing" became "believes Phase 2 is there when it is not". The first field finding.
 
 Without this written down, Phase 2 arrives at review as "a new runtime dependency plus
 untested code", which is a fair reason to reject it.
@@ -708,6 +808,18 @@ have one: extensions may start long-lived processes in `session_start`, and
 `agent_before_settle` allows "appending final entries or requesting one last model request
 before settlement". That is a buildable Monitor.
 
+**Tracked as [#189](https://github.com/rafael-adcp/kraken/issues/189)**, which is also where the
+real-run evidence lives: a `v0.9.0` worker drained without `--once`, delivered, reached `idle`,
+and correctly reported that no watcher was armed, offering the external-loop fallback.
+
+- [ ] **Post-settlement wake-up — the hole in this design.** `agent_before_settle` only covers
+  an event that arrives *while the turn is still settling*. It says nothing about an event that
+  arrives **minutes after the session is already idle**, which is the common case and the one
+  the real run hit. Both timing cases have to be specified and tested against supported
+  extension APIs, and the answer must keep the watcher zero-token — never poll by issuing model
+  requests. If no supported API can start a turn in a settled session, say so and stop here:
+  Phase 3 then reduces to "Pi reaches parity only under the loop", which is the status quo and
+  an honest finding, not a workaround to invent.
 - [ ] `session_start` → spawn `kraken.py watch OWNER/tasks <project>`.
 - [ ] Read its stdout for the `kraken-queue:` line. Handle the exit-`20` case
   (`KRAKEN_WATCH_MAX_FAILURES` consecutive failed reads, README `:313-315`) as a visible dead
@@ -751,6 +863,13 @@ Keep as a separate PR after Phases 1–2 are green — highest discovery risk.
   the shape holds. *Landed:* `COAUTHOR` stays Copilot (the suite's driver); a new
   `PI_COAUTHOR` and `test_pi_identity_fits_the_trailer_shape` prove the Pi line passes the
   shape check and survives git's trailer parser whole.
+- [x] **`tests/unit/test_pi_discovery.py`** (new, PR 5 / #188) — pins the shape that makes Pi's
+  package discovery work, since no Node runs in CI: `extensions/pi/index.ts` exists and
+  re-exports `kraken.ts`'s default export, `kraken.ts` is still the path
+  `scripts/kraken-loop.sh` passes to `-e` (so the shim's header and the loop cannot drift),
+  there is **no root `package.json`** (with the npm and manifest-exclusivity reasons in the
+  docstring), `extensions/` holds no loose `.ts` that would load as a second extension, and the
+  README names the `pi install git:` path. Stdlib only; 7 cases.
 - [ ] **`tests/unit/test_kraken.py:549-581`** — already pins the `plugin_version()` fallback.
   No change needed; **cite it in the PR body** as the evidence behind 1.2's never-copy rule
   instead of pasting a manual run.
@@ -844,7 +963,16 @@ protocol/9 abstraction worked.
 | 2 | `fix(status): name the Pi spelling in the launch recon` | 1.3's `render.py:159` (keeps the copy-paste `/kraken:unleash` lines, adds a Pi hint) + `test_status.py` assertion + the status skill's example. Small, has a test, and is the only *functional* bug in the set — ship it before the prose so the docs can describe real output |
 | 3 | `docs: add Pi as a third tentacle harness` | 1.1, 1.2 (incl. the never-copy rule and the `+grep` syntax trap), 1.3's prose sites, 1.4, 1.6, 1.7 + `make lint`. Carries 1.0 (the self-describing `$ARGUMENTS` line, decision #4) |
 | 4 | `feat(pi): extension for claim release and deny parity` | Phase 2 — the `session_shutdown` release **and** `tool_call` blocking for deny-rule parity |
-| 5 | `feat(pi): native in-session ambush watcher` | Phase 3 |
+
+PRs 1–4 are **merged** and released as `v0.9.0`. What the first real deployment of that release
+found reorders what is left — the three [field findings](#field-findings--the-first-real-pi-deployment-188190),
+smallest and loudest first:
+
+| PR | Issue | Title (conventional-commit) | Contents |
+| --- | --- | --- | --- |
+| 5 | [#188](https://github.com/rafael-adcp/kraken/issues/188) | `fix(pi): expose the extension through package discovery` | **In review** as [#191](https://github.com/rafael-adcp/kraken/pull/191) (`fix/188-pi-package-discovery`, base `main`). `extensions/pi/index.ts` (the shim), `tests/unit/test_pi_discovery.py`, the README's `pi install git:` section. Spike **0.10** closed on the way. Still owed: the fake-`gh` + two-session smoke run on a host with `python3` and a logged-in Pi |
+| 6 | [#190](https://github.com/rafael-adcp/kraken/issues/190) | `docs(delivery): require reproducible acceptance evidence` | `skills/unleash/DELIVERY.md` + task-writing guidance. Harness-agnostic: it is not part of Pi support at all, it was just found here |
+| 7 | [#189](https://github.com/rafael-adcp/kraken/issues/189) | `feat(pi): native in-session ambush watcher` | Phase 3, including the post-settlement wake-up case the design was missing. Gated on spike **0.8**; last, because the loop fallback works |
 
 Branches in the `type/NN-slug` shape keyed to a task or issue, everything in English,
 `make check` green (`CONTRIBUTING.md:65-100`).
