@@ -147,9 +147,13 @@ Then, inside an `execute`:
    comment policy). Keep changes scoped to the task. If the environment genuinely
    cannot host it — missing access, missing services — run `then.release`, which hands
    the task back honestly instead of failing it.
-3. **Validate against the `acceptance` field — for real.** Run it and report the real
-   outcome. A task whose acceptance was not executed does not move forward. If it
-   fails, say it failed and show the output.
+3. **Validate against the `acceptance` field — for real.** Name the checks you are about
+   to run *before* running them, so one that turns out to be unrunnable shows up as a
+   stated gap instead of a silence. Then run them and report the real outcome. A task
+   whose acceptance was not executed does not move forward. If it fails, say it failed
+   and show the output. Leave the evidence **reproducible** — exact command,
+   prerequisites, runtime, real output, and any script committed to the branch rather
+   than left in `/tmp` ([`DELIVERY.md`](DELIVERY.md)).
 4. **Record the outcome.** Write the result comment — what was done, how the acceptance
    was executed and what it actually printed, links to the PR and commits — to a file,
    and run `then.deliver` with the PR URL. Delivery conventions (branch naming,

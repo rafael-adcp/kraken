@@ -17,7 +17,7 @@ body:
     id: acceptance
     attributes:
       label: Acceptance
-      description: Executable, observable proof that the Goal was met — exact commands/tests and their expected results. The worker must run these for real before the task moves forward, so anything a worker cannot execute on its own will stall the task.
+      description: Executable, observable proof that the Goal was met — exact commands/tests and their expected results, written so the worker and a later reviewer run the same thing. Name anything the check needs in place first (a service, a fixture, a runtime version). The worker must run these for real before the task moves forward, so anything a worker cannot execute on its own will stall the task.
       placeholder: "`npm test -- things.spec` passes; `curl :3000/v2/things?limit=2` returns 200 with a `next_cursor` field."
     validations:
       required: true
