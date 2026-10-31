@@ -118,7 +118,19 @@ startable task, with no session to watch.
 
 ### Pi
 
-Clone kraken and point [Pi](https://pi.dev/) at the checkout's `skills/` — in
+Install kraken as a Pi package, which carries the three skills and the
+extension together and pins to a release tag:
+
+```bash
+pi install git:github.com/rafael-adcp/kraken@v0.9.0
+```
+
+Pi clones the repo and loads `skills/` plus `extensions/pi/`, so the commit
+trailers keep their real version stamp and `kraken.py contract boundary`
+answers — the two things a copied `skills/` tree breaks (see below). `pi list`
+shows what resolved; `pi config` turns individual resources off.
+
+Or point [Pi](https://pi.dev/) at a checkout's `skills/` yourself — in
 `~/.pi/agent/settings.json`, or per run with `--skill /path/to/kraken/skills`:
 
 ```json
@@ -137,14 +149,15 @@ Clone kraken and point [Pi](https://pi.dev/) at the checkout's `skills/` — in
 - **Mind the `+`.** Pi's default tools are `read`, `bash`, `edit` and `write`;
   `+name` adds one, while a plain name *replaces* the defaults — so
   `["grep", "find", "ls"]` would leave the worker unable to edit or deliver.
-- **The `extensions` entry is optional.** It loads kraken's Pi extension, which
-  does for Pi what `hooks.json` does for the other two: hands the session's
-  claim back when the session ends (only that session's — `kraken.py claim`
-  records Pi's `PI_SESSION_ID`), and refuses `gh pr merge`, `gh repo delete` and
-  `gh issue close` in the `bash` tool. Pi compiles it on load; nothing to build.
-  The loop loads it on its own (`-e`), so this entry matters for the sessions
-  you start yourself. Without it a worker still conforms — an abandoned claim
-  frees itself within one lease TTL.
+- **The `extensions` entry is optional, and only this install needs it.** It
+  loads kraken's Pi extension, which does for Pi what `hooks.json` does for the
+  other two: hands the session's claim back when the session ends (only that
+  session's — `kraken.py claim` records Pi's `PI_SESSION_ID`), and refuses
+  `gh pr merge`, `gh repo delete` and `gh issue close` in the `bash` tool. Pi
+  compiles it on load; nothing to build. A package install discovers it, and
+  the loop passes it with `-e`, so this entry is for sessions you start by hand
+  off a bare `skills` pointer. Without it a worker still conforms — an
+  abandoned claim frees itself within one lease TTL.
 - **Pick a model provider other than a Claude plan's OAuth.** Pi on Anthropic
   OAuth is billed as extra usage, not against your plan limits — Anthropic
   answers `400 invalid_request_error: "Third-party apps now draw from your extra
