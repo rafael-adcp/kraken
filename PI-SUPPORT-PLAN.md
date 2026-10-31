@@ -156,6 +156,18 @@ task-writing guidance; no new subsystem, no authorization change. It is second i
 because it applies to all three harnesses, and every delivery made before it lands is evidence
 nobody can reproduce.
 
+*Landed (PR 6):* a new **"The acceptance evidence"** section in `DELIVERY.md` — the exact
+command with its prerequisites and runtime, the real output, the check committed to the branch
+rather than left in `/tmp`, an explicit proportionality clause (a `curl` belongs in the PR body,
+not in a new file), and the rule to name what a local or mocked run does **not** establish.
+`SKILL.md`'s validate step gains "name the checks before running them, so an unrunnable one is
+a stated gap instead of a silence" plus the reproducibility pointer; `task-template.yml`'s
+Acceptance field now asks for something a later reviewer runs identically, naming its
+prerequisites. **No protocol change** — §8 already requires the execution; this is the
+operational half. Pinned by a new lint check `[1g]` (verified to fail when the guidance is
+removed), and `tests/COVERAGE.md`'s §2 Acceptance row moves from 🧠 agent to 🧠 agent / 🧹 lint,
+since whether a worker *follows* the guidance stays judgment.
+
 **3. [#189](https://github.com/rafael-adcp/kraken/issues/189) `feat(pi)`: native ambush —
 and the timing case [Phase 3](#phase-3--native-in-session-ambush-for-pi-optional-most-ambitious)
 is missing.** This is PR 5, unchanged in intent, but the run exposed a real hole in the design
@@ -971,7 +983,7 @@ smallest and loudest first:
 | PR | Issue | Title (conventional-commit) | Contents |
 | --- | --- | --- | --- |
 | 5 | [#188](https://github.com/rafael-adcp/kraken/issues/188) | `fix(pi): expose the extension through package discovery` | **In review** as [#191](https://github.com/rafael-adcp/kraken/pull/191) (`fix/188-pi-package-discovery`, base `main`). `extensions/pi/index.ts` (the shim), `tests/unit/test_pi_discovery.py`, the README's `pi install git:` section. Spike **0.10** closed on the way. Still owed: the fake-`gh` + two-session smoke run on a host with `python3` and a logged-in Pi |
-| 6 | [#190](https://github.com/rafael-adcp/kraken/issues/190) | `docs(delivery): require reproducible acceptance evidence` | `skills/unleash/DELIVERY.md` + task-writing guidance. Harness-agnostic: it is not part of Pi support at all, it was just found here |
+| 6 | [#190](https://github.com/rafael-adcp/kraken/issues/190) | `docs(delivery): require reproducible acceptance evidence` | **In review** as [#192](https://github.com/rafael-adcp/kraken/pull/192) (`docs/190-reproducible-acceptance-evidence`), **stacked on PR 5** — both branches touch this file, so its base is `fix/188-pi-package-discovery` and it retargets to `main` once #191 lands. `DELIVERY.md`'s evidence section, `SKILL.md`'s validate step, `task-template.yml`, lint `[1g]`, the `COVERAGE.md` row. Harness-agnostic: not part of Pi support at all, it was just found here |
 | 7 | [#189](https://github.com/rafael-adcp/kraken/issues/189) | `feat(pi): native in-session ambush watcher` | Phase 3, including the post-settlement wake-up case the design was missing. Gated on spike **0.8**; last, because the loop fallback works |
 
 Branches in the `type/NN-slug` shape keyed to a task or issue, everything in English,
