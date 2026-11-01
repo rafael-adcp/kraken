@@ -41,7 +41,7 @@ every PR:
 
 ```bash
 make test       # conformance + unit suites (native `python3 -m unittest`) — stdlib only
-make test-e2e   # the real Copilot CLI and Claude Code against a scripted fake model
+make test-e2e   # the real Copilot CLI, Claude Code and Pi against a scripted fake model
 make lint       # deterministic skill lint (bash scripts/lint-skills.sh)
 make check      # all of the above
 ```
@@ -71,12 +71,13 @@ make check      # all of the above
   `/kraken:unleash` slash command expanding `SKILL.md`; the CLIs' shell tools and
   permission layers; the `hooks.json` hooks; `kraken.py` against the stub; and a
   git work repo with a bare remote. It proves the **wiring**, not the model's
-  judgment: a whole drain to a draft PR on each CLI, Copilot's deny rules
-  blocking merge/delete/close, SessionEnd releasing only its own session's claim
-  on each CLI, and StopFailure releasing on a rate limit (Claude Code, in an
+  judgment: a whole drain to a draft PR on each CLI, Copilot's deny rules and
+  the Pi extension's deny check blocking merge/delete/close, SessionEnd (Pi:
+  `session_shutdown`, loaded through package discovery) releasing only its own
+  session's claim on each CLI, and StopFailure releasing on a rate limit (Claude Code, in an
   interactive session on a pseudo-terminal). Each CLI's module skips when that
-  CLI is not on PATH (`npm install -g @github/copilot @anthropic-ai/claude-code`);
-  CI pins both versions and sets `KRAKEN_E2E_REQUIRE=1`, so there a missing CLI
+  CLI is not on PATH (`npm install -g @github/copilot @anthropic-ai/claude-code
+  @earendil-works/pi-coding-agent`); CI pins every version and sets `KRAKEN_E2E_REQUIRE=1`, so there a missing CLI
   fails instead of skipping.
 
 ### Line coverage (run by hand)

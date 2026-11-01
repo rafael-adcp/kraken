@@ -32,11 +32,11 @@ jobs:
           python3 -m unittest discover -s tests/conformance -p 'test_*.py' -v
 
   e2e:
-    # The real agent CLIs — GitHub Copilot CLI (BYOK offline) and Claude Code
-    # (ANTHROPIC_BASE_URL) — against the scripted fake model in
+    # The real agent CLIs — GitHub Copilot CLI (BYOK offline), Claude Code
+    # (ANTHROPIC_BASE_URL) and Pi (its own models.json) — against the scripted fake model in
     # tests/fake-model/: the loop's prompt and deny rules, the plugin and the
     # /kraken:unleash skill, the shell tools, the SessionEnd and StopFailure
-    # hooks, kraken.py against the stub and a real git work repo — the wiring
+    # hooks, the Pi extension's deny check and session_shutdown release, kraken.py against the stub and a real git work repo — the wiring
     # between the two suites above. Still no secrets and no tokens: the "model"
     # is a local script. The CLI versions are pinned so a CLI release can only
     # change this job through a PR that bumps them; KRAKEN_E2E_REQUIRE=1 turns a
@@ -45,6 +45,7 @@ jobs:
     env:
       COPILOT_CLI_VERSION: "1.0.88"
       CLAUDE_CODE_VERSION: "2.1.283"
+      PI_VERSION: "1.4.0"
       KRAKEN_E2E_REQUIRE: "1"
     steps:
       - uses: actions/checkout@v4
@@ -54,8 +55,10 @@ jobs:
       - name: Install the agent CLIs
         run: |
           npm install -g "@github/copilot@${COPILOT_CLI_VERSION}" \
-                         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+                         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+                         "@earendil-works/pi-coding-agent@${PI_VERSION}"
           copilot --version
           claude --version
+          pi --version
       - name: Run the harness e2e suite
         run: python3 -m unittest discover -s tests/e2e -p 'test_*.py' -v

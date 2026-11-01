@@ -10,10 +10,11 @@ resolved the three skills and `extensions: []` — an install that looks
 successful while the deny check and the session-end release are both absent
 (#188).
 
-These tests pin the shape that makes discovery work, not Pi's behavior: there
-is no Node in CI (`make test` is stdlib-only), so the loader itself is covered
-by the hand-run smoke check documented in PI-SUPPORT-PLAN.md. What a stdlib
-test *can* guarantee is that nobody renames, empties or re-points the
+These tests pin the shape that makes discovery work, not Pi's behavior:
+`make test` is stdlib-only, so the loader itself is covered by the e2e suite
+(tests/e2e/test_pi_e2e.py loads the checkout as a directory extension, the
+package-install path, and checks the deny check and the release fire). What a
+stdlib test *can* guarantee is that nobody renames, empties or re-points the
 entrypoint without deciding to.
 """
 import os
