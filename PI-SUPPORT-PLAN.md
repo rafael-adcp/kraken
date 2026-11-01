@@ -22,8 +22,10 @@ Drafted 2026-10-22 against `kraken@0.7.1`; re-based 2026-10-23 onto `kraken@0.8.
 
 ## Status — where we left off
 
-**Phases 1 and 2: done and shipped in `kraken@0.9.0`. Phase 3: not started — it is now
-[#189](https://github.com/rafael-adcp/kraken/issues/189), the only issue still open.** The
+**Phases 1 and 2: done and shipped in `kraken@0.9.0`. Phase 3: DROPPED (2026-11-01) —
+[#189](https://github.com/rafael-adcp/kraken/issues/189) closed as not planned; see
+[Phase 3](#phase-3--native-in-session-ambush-for-pi-optional-most-ambitious). The plan is
+complete.** The
 first real deployment (Pi + OpenAI, an operator's work environment, 2026-10-26) opened three
 issues; what they change in this plan is in
 [Field findings](#field-findings--the-first-real-pi-deployment-188190), and the agreed order of
@@ -34,10 +36,10 @@ work was **#188 → #190 → #189**.
 [#192](https://github.com/rafael-adcp/kraken/pull/192) (`74255af`). Both sit on `main`
 **unreleased** — `.claude-plugin/plugin.json` is still `0.9.0`, so the next release is the one
 that ships them. One acceptance criterion outlived its PR: the fake-`gh` + two-session smoke
-run owed by #188 (its last bullet below). **What is left is #189 alone**, with
-`kraken-loop.sh --harness pi` as the working fallback meanwhile.
+run owed by #188 (its last bullet below). #189 was then dropped,
+so `kraken-loop.sh --harness pi` is Pi's ambush for good, not a fallback.
 
-**#189 is no longer gated (2026-10-31).** Both unknowns were answered by reading Pi 1.4.0's
+**#189 was no longer gated (2026-10-31)** — before it was dropped: Both unknowns were answered by reading Pi 1.4.0's
 installed source and docs — no model request, the same technique that verified #188:
 
 - **Spike [0.8](#still-open) is answered, and its premise was wrong.** `builtin:tool-search`
@@ -885,6 +887,25 @@ Checked against Pi 1.4.0's installed docs and `.d.ts` types:
 
 ## Phase 3 — Native in-session ambush for Pi (optional, most ambitious)
 
+> **Dropped (2026-11-01), #189 closed as not planned.** The extension was built and then
+> discarded on purpose: a `kraken_watch` tool in `extensions/pi/` that ran `kraken.py watch`
+> as a child and woke the session with `pi.sendUserMessage()` (holding a mid-run wake until
+> `agent_settled`, re-arming across `fork`/`reload`, refusing in print mode). A token-free
+> e2e suite against the real Pi 1.4.0 (`pi --mode rpc` + the fake model) passed all 7
+> acceptance cases — so it was **feasible**, and the post-settlement wake-up is real.
+> Why it was dropped anyway (operator decision):
+> - **One flow for every non-Claude harness.** `scripts/kraken-loop.sh` already serves Copilot
+>   and Pi identically; a Pi-only in-session watcher would be ~250 lines of harness-specific
+>   TypeScript (plus a `kraken.py watch --exit-with-parent` flag only it would use) to
+>   maintain for one harness.
+> - **Context.** An in-session watcher drains every woken task into the *same* conversation,
+>   so the context grows with the work done; each loop pass starts fresh, which is the better
+>   shape for a long unattended worker.
+>
+> What stays: the loop (`--harness pi`) is Pi's ambush, by design, and `SKILL.md`'s
+> "Cannot arm one? … `scripts/kraken-loop.sh`" branch is the correct Pi behavior — exactly
+> what the field run did. The checklist below is kept as the record of the design.
+
 Today only Claude Code has a zero-token watcher *inside* the session (the Monitor tool). Pi can
 have one: extensions may start long-lived processes in `session_start`, and
 `agent_before_settle` allows "appending final entries or requesting one last model request
@@ -1077,10 +1098,10 @@ smallest and loudest first:
 | --- | --- | --- | --- |
 | 5 | [#188](https://github.com/rafael-adcp/kraken/issues/188) | `fix(pi): expose the extension through package discovery` | **Merged** as [#191](https://github.com/rafael-adcp/kraken/pull/191) (`68ac0ff`, 2026-10-31). `extensions/pi/index.ts` (the shim), `tests/unit/test_pi_discovery.py`, the README's `pi install git:` section. Spike **0.10** closed on the way. Still owed: the fake-`gh` + two-session smoke run on a host with `python3` and a logged-in Pi |
 | 6 | [#190](https://github.com/rafael-adcp/kraken/issues/190) | `docs(delivery): require reproducible acceptance evidence` | **Merged** as [#192](https://github.com/rafael-adcp/kraken/pull/192) (`74255af`, 2026-10-31), having been stacked on PR 5 and retargeted to `main` once #191 landed. `DELIVERY.md`'s evidence section, `SKILL.md`'s validate step, `task-template.yml`, lint `[1g]`, the `COVERAGE.md` row. Harness-agnostic: not part of Pi support at all, it was just found here |
-| 7 | [#189](https://github.com/rafael-adcp/kraken/issues/189) | `feat(pi): native in-session ambush watcher` | Phase 3, including the post-settlement wake-up case the design was missing. **Next and last — no longer gated:** spike **0.8** is answered (no deferral to mind) and the wake-up has a supported API (`pi.sendUserMessage()`). Last because the loop fallback works. Acceptance needs a working Pi provider, which no host has yet |
+| 7 | [#189](https://github.com/rafael-adcp/kraken/issues/189) | `feat(pi): native in-session ambush watcher` | **Dropped (2026-11-01), closed as not planned** — built, proven by a 7-case e2e against real Pi, then discarded in favor of the one loop-driven flow; see Phase 3. Original scope: Phase 3, including the post-settlement wake-up case the design was missing. **Next and last — no longer gated:** spike **0.8** is answered (no deferral to mind) and the wake-up has a supported API (`pi.sendUserMessage()`). Last because the loop fallback works. Acceptance needs a working Pi provider, which no host has yet |
 
-PRs 5 and 6 are merged but **not released** — `plugin.json` is still `0.9.0`. #189 is the only
-open issue.
+PRs 5 and 6 are merged but **not released** — `plugin.json` is still `0.9.0`. #189 is closed
+as not planned, so no Pi issue remains open; the #188 smoke run is the only item still owed.
 
 Branches in the `type/NN-slug` shape keyed to a task or issue, everything in English,
 `make check` green (`CONTRIBUTING.md:65-100`).
