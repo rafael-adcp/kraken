@@ -1,6 +1,6 @@
 # Kraken developer tasks — a thin front-end over the checks in tests/ and
 # scripts/. Requires `python3` (stdlib only — no `jq`, no `gh`). `test-e2e`
-# drives the real `copilot` and `claude` CLIs against a scripted fake model
+# drives the real `copilot`, `claude` and `pi` CLIs against a scripted fake model
 # (token-free; each CLI's tests skip when it is not on PATH). `test-agent`
 # runs the agent-behavior harness on every agent CLI (one `test-agent-<cli>`
 # target each); it needs those CLIs logged in and spends
@@ -20,7 +20,7 @@ test: ## Test suite — conformance + unit, mechanical, token-free (stdlib only)
 	python3 -m unittest discover -s tests/unit -p 'test_*.py'
 	python3 -m unittest discover -s tests/conformance -p 'test_*.py'
 
-test-e2e: ## Real Copilot CLI + Claude Code vs a scripted fake model — token-free
+test-e2e: ## Real Copilot CLI + Claude Code + Pi vs a scripted fake model — token-free
 	python3 -m unittest discover -s tests/e2e -p 'test_*.py'
 
 coverage: ## Line coverage of kraken.py across unit + conformance + e2e, HTML in htmlcov/ (a measurement, not a gate)

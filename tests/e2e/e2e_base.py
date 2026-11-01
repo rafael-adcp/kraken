@@ -1,5 +1,5 @@
 """Shared world for the harness e2e suite (tests/e2e/test_*_e2e.py): a REAL
-agent CLI — GitHub Copilot CLI or Claude Code — driven by the scripted fake
+agent CLI — GitHub Copilot CLI, Claude Code or Pi — driven by the scripted fake
 model in tests/fake-model/model_server.py.
 
 The conformance suite proves kraken.py's transitions with no agent in the loop;
