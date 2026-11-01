@@ -434,8 +434,10 @@ the queue outside the model, invoking the agent in that work repo only when a ta
 is actually startable — the same zero-token idle behavior as the Monitor watcher,
 without copying anything out of a session folder. The contract files stay in the
 kraken checkout the script sits in; the loop hands them to `copilot` by absolute
-path, and to Pi with `--skill`. Pi has no in-session watcher yet, so the loop
-(`--harness pi`) is how a Pi worker stays in ambush.
+path, and to Pi with `--skill`. For Pi the loop (`--harness pi`) is *the* ambush,
+by design: kraken ships no in-session watcher for Pi, so every Pi worker follows
+the same loop-driven flow as a headless Copilot one, each drain starting from a
+fresh context (#189).
 
 ```
 cd /path/to/my_app

@@ -47,7 +47,7 @@ REAL_API_LATENCY = 0.3
 
 # The scripted steps every CLI's drain shares: its shell tool runs them, so they
 # are plain commands, identical whichever CLI carries them.
-NEXT_ACTION = "python3 %s next-action %s %s %s" % (KRAKEN, COORD, PROJECT, WORKER)
+NEXT_ACTION = "python3 \"%s\" next-action %s %s %s" % (KRAKEN, COORD, PROJECT, WORKER)
 
 
 def _unusable(reason):
@@ -87,7 +87,7 @@ def require_cli(name, probe_env, probe_argv):
 def deliver_script(coauthor):
     """Claim, branch + commit with both trailers + push, open a draft PR,
     deliver — a whole task, as scripted shell steps."""
-    trailer = "$(python3 %s contract task-trailer --repo %s --issue %d)" % (KRAKEN, COORD, ISSUE)
+    trailer = "$(python3 \"%s\" contract task-trailer --repo %s --issue %d)" % (KRAKEN, COORD, ISSUE)
     commit_msg = "feat: greet in feature.txt\n\n%s\n%s" % (coauthor, trailer)
     return [
         {"bash": NEXT_ACTION},
@@ -97,7 +97,7 @@ def deliver_script(coauthor):
         {"bash": ('gh pr create --draft --repo %s --head %s --base main --title "Add greet" '
                   '--body "Closes the kraken task." > .e2e-pr-url' % (WORK_SLUG, BRANCH))},
         {"bash": ('printf "Added greet() to feature.txt." > "$HOME/result.md" && '
-                  'python3 %s deliver %s %d %s "$HOME/result.md" "$(cat .e2e-pr-url)"'
+                  'python3 "%s" deliver %s %d %s "$HOME/result.md" "$(cat .e2e-pr-url)"'
                   % (KRAKEN, COORD, ISSUE, WORKER))},
         {"say": "Delivered task #%d as a draft PR." % ISSUE},
     ]
