@@ -23,10 +23,37 @@ Drafted 2026-10-22 against `kraken@0.7.1`; re-based 2026-10-23 onto `kraken@0.8.
 ## Status — where we left off
 
 **Phases 1 and 2: done and shipped in `kraken@0.9.0`. Phase 3: not started — it is now
-[#189](https://github.com/rafael-adcp/kraken/issues/189).** The first real deployment (Pi +
-OpenAI, an operator's work environment, 2026-10-26) opened three issues; what they change in
-this plan is in [Field findings](#field-findings--the-first-real-pi-deployment-188190), and the
-agreed order of work is **#188 → #190 → #189**.
+[#189](https://github.com/rafael-adcp/kraken/issues/189), the only issue still open.** The
+first real deployment (Pi + OpenAI, an operator's work environment, 2026-10-26) opened three
+issues; what they change in this plan is in
+[Field findings](#field-findings--the-first-real-pi-deployment-188190), and the agreed order of
+work was **#188 → #190 → #189**.
+
+**#188 and #190 are merged and closed** (2026-10-31) as
+[#191](https://github.com/rafael-adcp/kraken/pull/191) (`68ac0ff`) and
+[#192](https://github.com/rafael-adcp/kraken/pull/192) (`74255af`). Both sit on `main`
+**unreleased** — `.claude-plugin/plugin.json` is still `0.9.0`, so the next release is the one
+that ships them. One acceptance criterion outlived its PR: the fake-`gh` + two-session smoke
+run owed by #188 (its last bullet below). **What is left is #189 alone**, with
+`kraken-loop.sh --harness pi` as the working fallback meanwhile.
+
+**#189 is no longer gated (2026-10-31).** Both unknowns were answered by reading Pi 1.4.0's
+installed source and docs — no model request, the same technique that verified #188:
+
+- **Spike [0.8](#still-open) is answered, and its premise was wrong.** `builtin:tool-search`
+  defers nothing; it registers one tool, *inactive*. A `direct` tool is activated on
+  registration, so a watcher tool the extension registers **is** in the model's initial tool
+  list. This *removes* a Phase 3 requirement instead of adding one — and it retracts the claim
+  that `SKILL.md:181-184`'s deferral warning generalizes to Pi.
+- **The post-settlement wake-up hole is closed by a supported API**: `pi.sendUserMessage()`
+  "always triggers a turn", from idle as well as mid-stream. See the two-row timing table in
+  [Phase 3](#phase-3--native-in-session-ambush-for-pi-optional-most-ambitious). Phase 3 does
+  **not** reduce to "parity only under the loop".
+
+What no host has yet is a **working Pi provider**: the only auth available is `github-copilot`
+and it is revoked, so the #188 smoke run stayed inconclusive and 0.8 has no empirical
+confirmation to go with its static answer. Neither blocks writing #189; both block signing off
+on it.
 
 PR 1 (`feat/pi-harness-agnostic-loop`, [1.5](#15-scriptskraken-loopsh--generalize-the-harness)
 + the parametrized loop tests) is **merged** as
@@ -141,9 +168,33 @@ successful skill discovery must stop implying extension discovery.
   Wasteful, not harmful: the release is idempotent by design and a refused command is refused
   either way. Recorded in `index.ts`'s header so it is a known cost, not a surprise.
 - [ ] Re-prove the guards on the chosen path with a fake `gh` on `PATH` and a two-session
-  release check — the same smoke shape 2.1 already documents. **Still owed:** needs a host with
-  `python3` and a logged-in Pi (the authoring machine had neither), so it is the one acceptance
-  criterion carried into the PR as a hand-run.
+  release check — the same smoke shape 2.1 already documents. **Still owed, and now past the
+  merge:** #191 shipped it as a hand-run and it is still unrun. What it would add is end-to-end
+  proof that the guards fire *through the shim's load path*; the logic itself and the shim's
+  shape are already pinned in CI by `tests/unit/test_pi_discovery.py`,
+  `tests/unit/test_pi_deny.py` and `tests/conformance/test_session_end_release.py:123`.
+  **Attempted 2026-10-31 and INCONCLUSIVE — no provider.** Pi 1.4.0 + `python3` were both
+  present, but `pi` has only a `github-copilot` auth and it is revoked:
+  `OAuth refresh failed for github-copilot: 403 Forbidden … "Your Copilot access has been
+  revoked by the providing organization or enterprise"`. `gpt-6-luna` routes **through that
+  provider** (it is `/github-copilot/models[18]` in `models-store.json`, not a direct OpenAI
+  model), so no model request succeeds on this host. What the attempt did establish:
+  - **The right way to exercise the #188 path is `pi -e <kraken-root>`.** `docs/packages.md:40`:
+    "A file path loads one extension. **A directory follows normal package discovery rules.**"
+    So a directory `-e` reproduces the field install's discovery without a network install or a
+    settings write — cheaper than the `pi install git:` shape #188 was reported against.
+  - **The naive version of this check passes vacuously**, which is worth knowing before anyone
+    re-runs it. Every assertion is "the guard removed/refused something", and all of them are
+    trivially true when the Pi run did nothing at all: with a dead provider the first draft
+    reported 6 of 7 checks green — including "the fake `gh` was never executed" (nothing ran)
+    and "the claim was released" (no claim was ever made). The re-runnable script therefore
+    asserts two preconditions first and exits **3 = inconclusive** rather than passing: the run
+    produced a bash tool call, and the claim comment for `pi-1` exists on the task. A fitting
+    illustration of [#190](https://github.com/rafael-adcp/kraken/issues/190)'s point, found by
+    tripping over it.
+  - `pi -p --mode json` exited **0** on the failed run while the plain `pi -p` exited **1**.
+    Harmless for kraken (the loop passes no `--mode json`) but it sharpens 0.3: exit 0 ≠
+    drained, and under `--mode json` exit 0 does not even mean the provider answered.
 
 **2. [#190](https://github.com/rafael-adcp/kraken/issues/190) `docs(delivery)`: acceptance
 evidence must be reproducible.** **Not a Pi issue** — it surfaced on a Pi delivery but names a
@@ -219,7 +270,7 @@ Pi is *more* compatible with kraken than Copilot CLI is on two counts, and less 
 | Skill discovery | "Pi scans configured skill locations and adds each skill's name, description, and path to the system prompt"; **directories containing `SKILL.md` are discovered recursively** |
 | Skill invocation | model-triggered, or explicitly as `/skill:<name>`; "arguments after `/skill:name` are **appended to the loaded instructions as a user request**" — no `$ARGUMENTS`-style interpolation documented |
 | `defaultTools` default | `read`, `bash`, `edit`, `write` — **no `grep`/`find`/`ls`**; plain names *replace* the defaults, `+name` adds, `-name` removes |
-| Builtin extensions | `builtin:mcp`, `builtin:llama.cpp`, `builtin:codemode`, `builtin:tool-search`, all on by default, disabled with `-builtin:<name>`. **`tool-search` means Pi defers tool schemas** |
+| Builtin extensions | `builtin:mcp`, `builtin:llama.cpp`, `builtin:codemode`, `builtin:tool-search`, all on by default, disabled with `-builtin:<name>`. ~~**`tool-search` means Pi defers tool schemas**~~ — **wrong, corrected by spike 0.8:** it registers the `tool_search` tool *inactive*; deferral is per-tool `exposure`, and a `direct` tool is activated on registration |
 | Extension shape | TypeScript in `~/.pi/agent/extensions/`, `export default function (pi: ExtensionAPI)`, compiled at runtime via `jiti` — no build step |
 | Lifecycle events | `project_trust`, `session_start`, `session_shutdown`, `resources_discover`, `input`, `before_agent_start`, `agent_start`, `agent_end`, `agent_before_settle`, `agent_settled`, `turn_start`/`turn_end`, `context`, provider events, message events, tool events |
 | Security posture | no per-tool allowlist; the docs recommend running "entirely inside a container, virtual machine, or sandbox" |
@@ -277,9 +328,28 @@ PR body.
   `"ask"` (the default) and no saved decision it skips the protected `.pi/` resources and runs.
   Context files and explicit `--skill` paths load regardless. The loop therefore passes no
   `-a`: the work repo's `.pi/` loads only if the operator already trusts it.
-- [ ] **0.8** Confirm `builtin:tool-search` actually defers tool schemas in a `-p` run, since
+- [x] **0.8** Confirm `builtin:tool-search` actually defers tool schemas in a `-p` run, since
   `skills/unleash/SKILL.md:181-184` already instructs a worker to *load* a missing tool rather
   than conclude it has none. Prerequisite for Phase 3.
+  **Answered — and the premise was wrong (Pi 1.4.0 source + docs, 2026-10-31).**
+  **`builtin:tool-search` does not defer anything.** It loads by default, but all it does is
+  register one tool, inactive: `pi.registerTool({ ...createToolSearchToolDefinition(...),
+  defaultActive: false })` (`dist/extensions/tool-search/index.js`). `docs/cli.md:182` —
+  "`tool_search` is **off by default**; enable it with `"defaultTools": ["+tool_search"]` or
+  `--tools`" — so in a default `-p` run `tool_search` is not even declared to the model.
+  Deferral is a property of **each tool's own `exposure`**, not a mode `tool-search` switches
+  on (`docs/extensions.md:269-277`): `direct` (the default) and `model-only` are "declared to
+  the model while active", and **"registering a `direct` or `model-only` tool activates it"**,
+  while only `codemode` and `deferred` are withheld — the two `tool_search` can load
+  (`isSearchable()`, `dist/extensions/tool-search/tool.js`). MCP tools are the real deferral
+  case (`docs/mcp.md`), which is why the tool's own description talks about them.
+  **Consequence for Phase 3:** a watcher tool the kraken extension registers with the default
+  `direct` exposure **is** in the model's initial tool list. The deferral worry was unfounded
+  unless kraken deliberately chooses `deferred`, and the claim that `SKILL.md:181-184`
+  "generalizes to Pi" is **not supported** — see the corrected Phase 3 bullet.
+  *Not confirmed empirically:* a `-p` run on this host died at the provider, see the #188
+  smoke note. The static evidence is the implementation plus two doc pages that agree, so the
+  gate is answered; an empirical tool-list dump would be confirmation, not the answer.
 
 ### New — found by the third pass
 
@@ -824,14 +894,32 @@ before settlement". That is a buildable Monitor.
 real-run evidence lives: a `v0.9.0` worker drained without `--once`, delivered, reached `idle`,
 and correctly reported that no watcher was armed, offering the external-loop fallback.
 
-- [ ] **Post-settlement wake-up — the hole in this design.** `agent_before_settle` only covers
-  an event that arrives *while the turn is still settling*. It says nothing about an event that
-  arrives **minutes after the session is already idle**, which is the common case and the one
-  the real run hit. Both timing cases have to be specified and tested against supported
-  extension APIs, and the answer must keep the watcher zero-token — never poll by issuing model
-  requests. If no supported API can start a turn in a settled session, say so and stop here:
-  Phase 3 then reduces to "Pi reaches parity only under the loop", which is the status quo and
-  an honest finding, not a workaround to invent.
+- [x] **Post-settlement wake-up — the hole in this design. Closed: a supported API exists.**
+  `agent_before_settle` only covers an event that arrives *while the turn is still settling*. It
+  says nothing about an event that arrives **minutes after the session is already idle**, which
+  is the common case and the one the real run hit. The answer, verified against Pi 1.4.0's
+  types and docs (2026-10-31):
+
+  | Timing of the queue event | Supported API |
+  | --- | --- |
+  | While the turn is still settling | `agent_before_settle` returning `continue: true` — "their handlers can chain proposed entries and return `continue: true` for one next model request" (`docs/extensions.md:230`) |
+  | Minutes after the session is idle | **`pi.sendUserMessage(content, opts?)`** — `ExtensionAPI` (`dist/core/extensions/types.d.ts:1267`, interface at `:1186`): *"Send a user message to the agent. **Always triggers a turn.** When the agent is streaming, use `deliverAs` to specify how to queue the message."* |
+
+  So Phase 3 does **not** reduce to "Pi reaches parity only under the loop". `sendUserMessage`
+  is a first-class `ExtensionAPI` method, listed in the integration-point table
+  (`docs/extensions.md:179`), and `before_agent_start` names it explicitly as a run starter:
+  `event.messageType` is `"user"` for "a prompt or `pi.sendUserMessage()`" (`:216`). `deliverAs`
+  (`"steer" | "followUp"`) only matters *while streaming*; from idle the call simply starts the
+  run. The watcher stays **zero-token**: `kraken.py watch` is an external process, and
+  `sendUserMessage` is called only when it reports an event — no polling by model request.
+  - Useful neighbours found with it, all on `ExtensionAPI`/`ExtensionContext`: `isIdle()` to
+    tell settled from streaming, `hasPendingMessages()`, `pi.exec(command, args, options)` so
+    the extension spawns the watcher without hand-rolling `child_process`, and `appendEntry()`
+    to persist the "a watcher is already armed" flag the one-watcher rule needs.
+  - Still to specify in the PR: the guard against an unconditional continuation
+    (`docs/extensions.md:230` — "guard continuation conditions because an unconditional
+    continuation can loop"), and what the injected message *says*, since it has to re-enter
+    **The loop** without re-reading the whole skill.
 - [ ] `session_start` → spawn `kraken.py watch OWNER/tasks <project>`.
 - [ ] Read its stdout for the `kraken-queue:` line. Handle the exit-`20` case
   (`KRAKEN_WATCH_MAX_FAILURES` consecutive failed reads, README `:313-315`) as a visible dead
@@ -843,12 +931,17 @@ and correctly reported that no watcher was armed, offering the external-loop fal
 - [ ] If this works, `SKILL.md:180-187` ("in Claude Code, the Monitor tool … Elsewhere,
   `scripts/kraken-loop.sh`") gains a third path, and Pi reaches **full** parity with Claude
   Code.
-- [ ] Mind the deferral (0.8): Pi loads `builtin:tool-search`, so a watcher tool registered by
-  the extension may not be in the model's initial tool list. `SKILL.md:181-184` **already**
-  handles exactly this case — "if Monitor is not in your tool list, load it first rather than
-  concluding you have none; some harnesses defer tool schemas" — which is evidence that
-  warning generalizes rather than being a Claude-Code quirk. If Phase 3 lands, that sentence
-  should name Pi as the second harness it applies to.
+- [x] ~~Mind the deferral (0.8): Pi loads `builtin:tool-search`, so a watcher tool registered by
+  the extension may not be in the model's initial tool list.~~ **Dropped — 0.8 says there is no
+  deferral to mind.** A tool registered with the default `direct` exposure is activated on
+  registration and declared to the model, and `tool_search` is itself inactive by default. So:
+  register the watcher tool `direct` (do **not** choose `codemode`/`deferred`, which are the
+  only exposures that would withhold it) and the initial tool list contains it.
+  Two consequences for the PR: the extension must not rely on `tool_search` being available to
+  recover its own tool, and **`SKILL.md:181-184` must not gain Pi as a second harness** — the
+  earlier claim that its "some harnesses defer tool schemas" warning generalizes to Pi is not
+  supported. It stays a Claude Code quirk; the honest cross-harness statement is that Pi defers
+  only MCP tools (`docs/mcp.md`).
 
 Keep as a separate PR after Phases 1–2 are green — highest discovery risk.
 
@@ -982,9 +1075,12 @@ smallest and loudest first:
 
 | PR | Issue | Title (conventional-commit) | Contents |
 | --- | --- | --- | --- |
-| 5 | [#188](https://github.com/rafael-adcp/kraken/issues/188) | `fix(pi): expose the extension through package discovery` | **In review** as [#191](https://github.com/rafael-adcp/kraken/pull/191) (`fix/188-pi-package-discovery`, base `main`). `extensions/pi/index.ts` (the shim), `tests/unit/test_pi_discovery.py`, the README's `pi install git:` section. Spike **0.10** closed on the way. Still owed: the fake-`gh` + two-session smoke run on a host with `python3` and a logged-in Pi |
-| 6 | [#190](https://github.com/rafael-adcp/kraken/issues/190) | `docs(delivery): require reproducible acceptance evidence` | **In review** as [#192](https://github.com/rafael-adcp/kraken/pull/192) (`docs/190-reproducible-acceptance-evidence`), **stacked on PR 5** — both branches touch this file, so its base is `fix/188-pi-package-discovery` and it retargets to `main` once #191 lands. `DELIVERY.md`'s evidence section, `SKILL.md`'s validate step, `task-template.yml`, lint `[1g]`, the `COVERAGE.md` row. Harness-agnostic: not part of Pi support at all, it was just found here |
-| 7 | [#189](https://github.com/rafael-adcp/kraken/issues/189) | `feat(pi): native in-session ambush watcher` | Phase 3, including the post-settlement wake-up case the design was missing. Gated on spike **0.8**; last, because the loop fallback works |
+| 5 | [#188](https://github.com/rafael-adcp/kraken/issues/188) | `fix(pi): expose the extension through package discovery` | **Merged** as [#191](https://github.com/rafael-adcp/kraken/pull/191) (`68ac0ff`, 2026-10-31). `extensions/pi/index.ts` (the shim), `tests/unit/test_pi_discovery.py`, the README's `pi install git:` section. Spike **0.10** closed on the way. Still owed: the fake-`gh` + two-session smoke run on a host with `python3` and a logged-in Pi |
+| 6 | [#190](https://github.com/rafael-adcp/kraken/issues/190) | `docs(delivery): require reproducible acceptance evidence` | **Merged** as [#192](https://github.com/rafael-adcp/kraken/pull/192) (`74255af`, 2026-10-31), having been stacked on PR 5 and retargeted to `main` once #191 landed. `DELIVERY.md`'s evidence section, `SKILL.md`'s validate step, `task-template.yml`, lint `[1g]`, the `COVERAGE.md` row. Harness-agnostic: not part of Pi support at all, it was just found here |
+| 7 | [#189](https://github.com/rafael-adcp/kraken/issues/189) | `feat(pi): native in-session ambush watcher` | Phase 3, including the post-settlement wake-up case the design was missing. **Next and last — no longer gated:** spike **0.8** is answered (no deferral to mind) and the wake-up has a supported API (`pi.sendUserMessage()`). Last because the loop fallback works. Acceptance needs a working Pi provider, which no host has yet |
+
+PRs 5 and 6 are merged but **not released** — `plugin.json` is still `0.9.0`. #189 is the only
+open issue.
 
 Branches in the `type/NN-slug` shape keyed to a task or issue, everything in English,
 `make check` green (`CONTRIBUTING.md:65-100`).
