@@ -228,19 +228,6 @@ def open_claim_record(worker: Worker) -> ClaimRecord | None:
     }
 
 
-def wake_retry_flag_path() -> str:
-    return os.path.join(state_dir(), "wake-retry")
-
-
-def wake_retry_mtime() -> float | None:
-    """mtime of the flag the StopFailure hook stamps when a usage limit kills a
-    turn, or None."""
-    try:
-        return os.path.getmtime(wake_retry_flag_path())
-    except OSError:
-        return None
-
-
 def format_iso(epoch: Epoch) -> str:
     """Epoch seconds as ISO-8601 UTC (…Z); `parse_iso`'s inverse."""
     return datetime.datetime.fromtimestamp(

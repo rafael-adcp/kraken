@@ -232,21 +232,19 @@ class PluginHookTests(ClaudeE2ETest):
         self.assertNotEqual(proc.returncode, 0, "a rate-limited turn must not exit clean" + self.detail())
         self.assertIn("429", self.transcript)
         self.assert_claimed_then_released("usage limit", requests)
-        self.assertTrue(os.path.isfile(os.path.join(self.kraken_state_dir, "wake-retry")),
-                        "StopFailure did not stamp the wake-retry flag" + self.detail(requests))
 
-    def test_stop_failure_on_rate_limit_releases_and_stamps_the_retry_flag(self):
+    def test_stop_failure_on_rate_limit_releases_the_claim(self):
         # The model claims, then the account hits its usage limit mid-drain: the
         # turn dies with a 429, which fires StopFailure (matcher rate_limit) —
         # while the session itself lives on, so SessionEnd cannot be what frees it.
-        flag = os.path.join(self.kraken_state_dir, "wake-retry")
+        # Wait on the "usage limit" release itself: the session is still up when
+        # it lands, so it can only be StopFailure's.
         requests, screen = self.unleash_interactive(
             [{"bash": NEXT_ACTION}, RATE_LIMIT],
-            until=lambda: os.path.isfile(flag) and not os.path.exists(self.claim_state_file(WORKER)))
+            until=lambda: "usage limit" in self.last_comment(ISSUE)
+            and not os.path.exists(self.claim_state_file(WORKER)))
         self.assertIn("429", screen, "the scripted rate limit never surfaced" + self.detail(requests))
         self.assert_claimed_then_released("usage limit", requests)
-        self.assertTrue(os.path.isfile(flag),
-                        "StopFailure did not stamp the wake-retry flag" + self.detail(requests))
 
 if __name__ == "__main__":
     unittest.main()

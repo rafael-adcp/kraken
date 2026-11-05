@@ -3,15 +3,11 @@
 # `rate_limit`).
 #
 # A usage limit kills the turn but not the session, so SessionEnd never fires and
-# a held lease would squat on in-progress until its TTL runs out — and the wake
-# the watcher spent on the dead turn would be lost (the queue snapshot no longer
-# changes). StopFailure is the one event that DOES fire there, so this hook:
-#   1. stamps the wake-retry flag ($KRAKEN_STATE_DIR/wake-retry); `kraken.py
-#      watch` re-emits its wake when the flag is newer than its last emission, so
-#      the drain resumes on its own once the limit window resets;
-#   2. releases every open claim on this machine (reason "usage limit"): the task
-#      requeues in seconds, and this worker re-claims it after reset via the
-#      retry wake and continues on the existing branch.
+# a held lease would squat on in-progress until its TTL runs out. StopFailure is
+# the one event that DOES fire there, so this hook releases every open claim on
+# this machine (reason "usage limit"): the task requeues in seconds, and the next
+# drain — a fresh `kraken-loop.sh` pass once the limit window resets — re-claims
+# it and continues on the existing branch.
 #
 # Matcher is `rate_limit` only: a usage limit is account-wide, so any session's
 # rate_limit failure implies the worker sessions here are limited too — releasing
@@ -25,16 +21,10 @@
 set -u
 # Under `claude -p` the process exits on the failed turn and signals its hooks
 # ~15ms after starting them (verified on Claude Code 2.1.283): ignore that, so
-# the hook lives long enough to stamp the flag and hand the release off.
+# the hook lives long enough to hand the release off.
 trap '' HUP INT TERM
 
 . "$(dirname "$0")/lib-release-claims.sh"
-
-# Flag first, release second: even with no claim held, the consumed wake must be
-# retried — and if the release fails, the retry still has to happen. mtime is the
-# signal the watcher reads; the timestamp content is for humans.
-mkdir -p "$KRAKEN_STATE" 2>/dev/null || true
-date -u +"%Y-%m-%dT%H:%M:%SZ" > "$KRAKEN_STATE/wake-retry" 2>/dev/null || true
 
 # Detached, like SessionEnd's: under `claude -p` the process exits on the failed
 # turn and would kill a release still in flight (see release_detached).

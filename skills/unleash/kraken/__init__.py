@@ -22,7 +22,6 @@ acyclic:
     claim        taking a task and holding it: the CAS, the guard, the drain
     terminal     how a turn ends: escalate, deliver, release (§7-§9)
     next_action  the driver loop as one envelope
-    watch        the zero-token ambush
     status       the read-only console
     workflow     init, validate, cleanup
     cli          argument parsing and dispatch
@@ -63,8 +62,7 @@ from .lease import (
     Lease, NO_LEASE, UNREADABLE_LEASE, claim_state_path, clear_claim_state,
     format_age, format_iso, holder_shas, lease_renew_seconds, lease_state,
     lease_ttl_seconds, live_leases, open_claim_record, parse_iso,
-    state_dir, wake_retry_flag_path, wake_retry_mtime,
-    write_claim_state
+    state_dir, write_claim_state
 )
 from .refs import (
     Advance, CLAIM_REF_PREFIX, EMPTY_TREE_SHA, Hold, KRAKEN_REF_NAMESPACE, Refs,
@@ -104,10 +102,6 @@ from .next_action import (
     cmd_next_action, feedback_since, issue_is_finished, lease_block,
     next_action, next_action_envelope, resume_verdict, task_brief,
     then_commands
-)
-from .watch import (
-    WATCH_MAX_FAILURES, WATCH_WARN_EVERY, cmd_watch, snapshot_state,
-    wake_retry_due, watch, watch_failure_action
 )
 from .status import (
     StatusReport, cmd_status, parse_github_pr_url, pr_is_merged, queue_hygiene

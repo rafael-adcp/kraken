@@ -287,7 +287,7 @@ class Queue:
         walk. GraphQL's `labels:` filter is a UNION,
         so only `kraken-task` is filtered server-side.
 
-        This is the hot read (every watcher, every minute), so it carries the
+        This is the hot read (every ambush loop, every poll), so it carries the
         comment COUNT and never a comment body."""
         owner, name = self.api.repo.split("/", 1)
         tasks = []

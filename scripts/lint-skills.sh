@@ -25,7 +25,6 @@ DELIVERY="skills/unleash/DELIVERY.md"
 # per-emitter check below resolves to the module that actually owns the string.
 KRAKEN="skills/unleash/kraken.py"
 PKG="skills/unleash/kraken"
-WATCHER="$PKG/watch.py"
 # The held labels are spelled once, in HELD_LABELS; the lister and the claim
 # guard read that tuple rather than the strings.
 CONTRACT="$PKG/contract.py"
@@ -63,7 +62,7 @@ check_label "awaiting-merge" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$
 check_label "priority:high"  "$INIT" "$README" "$PROTOCOL" "$LISTER"
 # common typo class: labels use hyphens, never underscores
 for bad in kraken_task in_progress needs_decision awaiting_merge; do
-  grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$TEMPLATE" "$WATCHER" "$CONTRACT" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER" "$HEARTBEAT" 2>/dev/null \
+  grep -qInF -- "$bad" "$SKILL" "$INIT" "$STATUS" "$README" "$PROTOCOL" "$TEMPLATE" "$CONTRACT" "$LISTER" "$CLAIM" "$RELEASE" "$ESCALATE" "$DELIVER" "$HEARTBEAT" 2>/dev/null \
     && err "underscore variant '$bad' found (labels use hyphens)"
 done
 [ "$fail" -eq 0 ] && note "4 canonical labels + priority:high aligned across files"

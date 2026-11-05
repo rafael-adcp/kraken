@@ -26,11 +26,12 @@ from harness import KrakenConformanceTest, ROOT
 
 API_LATENCY = 0.3   # per request: a release (~9 calls) takes ~3s
 DEADLINE = 1.5      # Claude Code's SessionEnd budget
-# A `date` that takes a second: holds the StopFailure hook mid-run (it stamps
-# the wake-retry flag with `date`) while the harness signals it.
-SLOW_DATE = """#!/usr/bin/env bash
+# A `python3` that takes a second to start: holds the StopFailure hook mid-run
+# (its first command is the `python3` that hands the release off) while the
+# harness signals it.
+SLOW_PYTHON = """#!/usr/bin/env bash
 sleep 1
-PATH="${PATH#*:}" exec date "$@"
+PATH="${PATH#*:}" exec python3 "$@"
 """
 
 
@@ -40,7 +41,7 @@ class DetachedHookReleaseTests(KrakenConformanceTest):
         returns. With `term`, the group is SIGTERMed while the hook is still
         running — as an exiting harness does — and only then fed its event: the
         hook is either blocked reading it (SessionEnd) or held in a slow step
-        (see SLOW_DATE). Returns how long the hook itself took."""
+        (see SLOW_PYTHON). Returns how long the hook itself took."""
         env = self.base_env(env)
         env.pop("KRAKEN_HOOK_WAIT", None)
         start = time.time()
@@ -96,9 +97,6 @@ class DetachedHookReleaseTests(KrakenConformanceTest):
         self.assert_detached_release("hooks/stop-failure-release.sh",
                                      '{"hook_event_name":"StopFailure","error":"rate_limit"}',
                                      "usage limit")
-        # The wake-retry flag is stamped inline, before the hook returns.
-        self.assertTrue(os.path.isfile(os.path.join(self.kraken_state_dir, "wake-retry")))
-
 
     def test_session_end_survives_the_harness_signalling_it(self):
         self.mk_issue(7, "task", "kraken-task", "project:app")
@@ -111,9 +109,9 @@ class DetachedHookReleaseTests(KrakenConformanceTest):
         self.kraken("claim", "acme/tasks", 7, "w1")
         slow = os.path.join(self.state, "slow-bin")
         os.makedirs(slow)
-        with open(os.path.join(slow, "date"), "w", encoding="utf-8") as f:
-            f.write(SLOW_DATE)
-        os.chmod(os.path.join(slow, "date"), 0o755)
+        with open(os.path.join(slow, "python3"), "w", encoding="utf-8") as f:
+            f.write(SLOW_PYTHON)
+        os.chmod(os.path.join(slow, "python3"), 0o755)
         self.assert_detached_release("hooks/stop-failure-release.sh", '{"error":"rate_limit"}',
                                      "usage limit", term=True,
                                      env={"PATH": slow + os.pathsep + os.environ["PATH"]})
