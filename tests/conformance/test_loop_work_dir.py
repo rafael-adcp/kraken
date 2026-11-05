@@ -7,11 +7,15 @@ KRAKEN_WORK_DIR) points it elsewhere. The contract files stay in the kraken
 checkout, so the prompt names them by absolute path and `--add-dir` grants
 copilot read access to that checkout.
 
-`--harness pi` (or KRAKEN_HARNESS=pi) runs `pi` in the same work dir, loading
-the skills from the kraken checkout with `--skill`; KRAKEN_AGENT_CMD runs an
+`--harness claude` runs `claude -p` in the same work dir on the shared skill
+itself — the checkout loaded as the plugin, `/kraken:unleash ... --once` — under
+lib-claude-drain.sh's permission and deny flags. `--harness pi` (or
+KRAKEN_HARNESS=pi) runs `pi` likewise, loading the skills from the kraken
+checkout with `--skill`; KRAKEN_AGENT_CMD runs an
 unlisted CLI, split into argv without ever being evaluated. Copilot stays the
 default — every test here that names no harness pins that."""
 import os
+import re
 import stat
 import subprocess
 import unittest
@@ -22,6 +26,15 @@ LOOP = os.path.join(ROOT, "scripts", "kraken-loop.sh")
 # kraken-loop.sh rejects the OWNER/* placeholder shape; the stub ignores the
 # slug, so any real-looking one works.
 TASKS = "acme/tasks"
+LIB_CLAUDE = os.path.join(ROOT, "scripts", "lib-claude-drain.sh")
+
+
+def claude_flags():
+    """KRAKEN_CLAUDE_FLAGS as bash expands it — the single source."""
+    out = subprocess.run(
+        ["bash", "-c", '. "$0"; printf "%s\\0" "${KRAKEN_CLAUDE_FLAGS[@]}"', LIB_CLAUDE],
+        capture_output=True, text=True, check=True).stdout
+    return out.split("\0")[:-1]
 
 
 class LoopWorkDirTests(KrakenConformanceTest):
@@ -34,7 +47,7 @@ class LoopWorkDirTests(KrakenConformanceTest):
         self.name_file = os.path.join(self.state, "agent-name")
         bin_dir = os.path.join(self.state, "bin")
         os.makedirs(bin_dir)
-        for name in ("copilot", "pi", "mycli"):
+        for name in ("copilot", "claude", "pi", "mycli"):
             stub = os.path.join(bin_dir, name)
             with open(stub, "w", encoding="utf-8") as f:
                 f.write("#!/usr/bin/env bash\n"
@@ -156,6 +169,34 @@ class LoopWorkDirTests(KrakenConformanceTest):
             "/skill:unleash %s --worker-name w1 --project app --once" % TASKS,
         ])
 
+    def test_claude_runs_the_shared_skill_in_the_work_dir(self):
+        proc = self.run_loop("--work-dir", self.work, "--harness", "claude")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.agent_name(), "claude")
+        self.assert_ran_in(self.work)
+        self.assertEqual(self.copilot_args(), [
+            "-p", "/kraken:unleash %s --worker-name w1 --project app --once" % TASKS,
+            "--plugin-dir", ROOT,
+            *claude_flags(),
+        ])
+
+    def test_claude_refuses_what_copilot_denies(self):
+        # Copilot's deny rules (scripts/lib-copilot-drain.sh), in Claude Code's
+        # permission-rule syntax — and never bought by bypassing the
+        # permission layer: no prompt to stall on, nothing outside the allow
+        # list, and the deny list wins over the allow list.
+        flags = claude_flags()
+        self.assertNotIn("--dangerously-skip-permissions", flags)
+        self.assertEqual(flags[flags.index("--permission-mode") + 1], "dontAsk")
+        denied = flags[flags.index("--disallowedTools") + 1].split(",")
+        self.assertEqual(sorted(denied), sorted([
+            "Bash(gh pr merge:*)", "Bash(gh repo delete:*)", "Bash(gh issue close:*)",
+            "mcp__github__merge_pull_request", "mcp__github__issue_write"]))
+        allowed = flags[flags.index("--allowedTools") + 1].split(",")
+        self.assertIn("Bash", allowed)
+        self.assertFalse([t for t in allowed if re.match(r"mcp__", t)],
+                         "the loop must not allow an MCP tool on the operator's behalf")
+
     def test_pi_refuses_what_copilot_denies(self):
         # Copilot's deny rules (scripts/lib-copilot-drain.sh) in Pi's two
         # halves: the GitHub MCP merge / issue-write tools excluded whole, and
@@ -176,10 +217,10 @@ class LoopWorkDirTests(KrakenConformanceTest):
         # the stdin it was handed. The stub does the same read; the loop must
         # give every harness /dev/null, so it finishes although the stdin it
         # was given stays open.
-        for name in ("copilot", "pi"):
+        for name in ("copilot", "claude", "pi"):
             with open(os.path.join(self.bin_dir, name), "a", encoding="utf-8") as f:
                 f.write("cat >/dev/null\n")
-        for harness in ("copilot", "pi"):
+        for harness in ("copilot", "claude", "pi"):
             with self.subTest(harness=harness):
                 env = self.base_env()
                 env["PATH"] = self.bin_dir + os.pathsep + env["PATH"]

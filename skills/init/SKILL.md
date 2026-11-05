@@ -108,7 +108,8 @@ program, so there is no second copy to fall out of date.
    worker-environment permissions example in `README.md`, which stays the source
    of truth. A GitHub Copilot CLI worker takes its permissions as launch flags
    instead: point the operator at `scripts/kraken-copilot.sh` (interactive) or
-   `scripts/kraken-loop.sh` (headless) in a kraken checkout, which pass them.
+   `scripts/kraken-loop.sh` (the ambush, on every harness — `--harness claude`
+   passes Claude Code's own) in a kraken checkout, which pass them.
 
 4. **Nothing else.** No issues are read or written; no worker is launched. Point
    the operator at `status` (the queue's console, with ready-to-paste launch

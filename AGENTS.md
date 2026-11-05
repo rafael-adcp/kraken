@@ -34,13 +34,13 @@ work ran, e.g. `kraken-copilot-1`), and a `--project` (only take `project:<name>
 ## Why there are no deltas any more
 
 SKILL.md used to assume two Claude Code facilities, and this file used to substitute for
-them. It no longer has to, because the skill now states both as harness-neutral options:
+them. It no longer has to: one is gone, and the skill states the other as an option.
 
-- **The watcher.** SKILL.md asks for a *background process* running `kraken.py watch`.
-  Interactively (`/kraken:unleash` inside `copilot`), Copilot's `bash` tool in `async`
-  mode wakes you when a command **exits**, not per output line, so SKILL.md has you arm
-  `watch --exit-on-wake --worker <name>` and re-arm it after each drain. Headless, use
-  [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh), which polls from outside the model.
+- **Continuous ambush.** SKILL.md no longer keeps a watcher inside the session on any
+  harness: it drains once per invocation and ends the turn. Staying in ambush is
+  [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh), which polls from outside the model
+  and starts a fresh `--once` drain only when a task is startable — the same supervisor
+  for Copilot, Claude Code and Pi.
 - **Per-task context isolation.** SKILL.md calls the subagent an explicit optimization
   and says to run the task inline when the harness has none. A fresh `copilot` process
   per pass gives you the same isolation anyway.
@@ -74,8 +74,9 @@ execute the task it hands you end to end, deliver it as a draft PR, then stop." 
 ```
 
 For an interactive session instead — `/kraken:unleash` in a `copilot` you can talk
-to, staying in ambush — use [`scripts/kraken-copilot.sh`](scripts/kraken-copilot.sh),
-which opens it in the work repo under these same flags.
+to, which drains once and then stays open for you — use
+[`scripts/kraken-copilot.sh`](scripts/kraken-copilot.sh), which opens it in the work repo
+under these same flags.
 
 The deny rules hold the authorization boundaries at the tool layer — Copilot
 applies them even over `--allow-all-tools`, so a task body ordering a merge, a
@@ -101,6 +102,18 @@ cd /path/to/work-repo
 Each poll runs the free, read-only `list-startable` check first and only invokes
 the agent when a task is actually startable, so an idle queue never spends a token. Pass
 `--once` for a single bounded drain, or `--poll <seconds>` to change the 60s cadence.
+
+### Claude Code does not need this file
+
+`--harness claude` drives the same loop with Claude Code: `claude -p "/kraken:unleash
+OWNER/tasks --worker-name <worker-name> --project <name> --once" --plugin-dir "$KRAKEN"`,
+run in the work repo — the shared skill itself, from the checkout the loop sits in,
+with its lifecycle hooks loaded alongside. The permission flags come from
+[`scripts/lib-claude-drain.sh`](scripts/lib-claude-drain.sh): `--permission-mode
+dontAsk` (nothing outside the allow list runs, and nothing waits on a prompt), the
+worker's tools allowed, and deny rules for `gh pr merge`, `gh repo delete`,
+`gh issue close` and the GitHub MCP server's merge / issue-write tools — which Claude Code
+checks before the allow list.
 
 ### Pi does not read this file
 

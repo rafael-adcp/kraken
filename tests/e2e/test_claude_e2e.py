@@ -3,12 +3,13 @@
 model over the Anthropic Messages wire (ANTHROPIC_BASE_URL) — see e2e_base.py
 for the shared world.
 
-Claude Code's side of the wiring: the plugin loaded with --plugin-dir, the
-`/kraken:unleash` slash command expanding SKILL.md into the model's prompt
-(the invocation an operator — and tests/agent/lib-agent.sh's drive_claude —
-runs), the Bash tool under --dangerously-skip-permissions, and both lifecycle
-hooks in hooks.json: SessionEnd, and StopFailure on a rate limit, which the
-fake model triggers with a scripted HTTP 429.
+Claude Code's side of the wiring: scripts/kraken-loop.sh --harness claude (the
+continuous ambush an operator runs, and its argv from lib-claude-drain.sh), the
+plugin loaded with --plugin-dir, the `/kraken:unleash` slash command expanding
+SKILL.md into the model's prompt, the Bash tool under the loop's permission
+flags — its deny rules refusing what a worker may never do — and both
+lifecycle hooks in hooks.json: SessionEnd, and StopFailure on a rate limit,
+which the fake model triggers with a scripted HTTP 429.
 
 StopFailure is exercised both in an INTERACTIVE session (a pseudo-terminal),
 the case the hook exists for — a usage limit kills the turn but not the session
@@ -28,8 +29,10 @@ import subprocess
 import time
 import unittest
 
-from e2e_base import (COORD, ISSUE, NEXT_ACTION, PROJECT, ROOT, WORKER, E2ETest,
+from e2e_base import (COORD, ISSUE, NEXT_ACTION, PROJECT, ROOT, WORK_SLUG, WORKER, E2ETest,
                       deliver_script, model_server, require_cli)
+
+LOOP = os.path.join(ROOT, "scripts", "kraken-loop.sh")
 
 COAUTHOR = "Co-Authored-By: Claude <noreply@anthropic.com>"
 UNLEASH = "/kraken:unleash %s --worker-name %s --project %s --once" % (COORD, WORKER, PROJECT)
@@ -71,6 +74,11 @@ class ClaudeE2ETest(E2ETest):
         harness's drive_claude) does: the slash command, the repo as plugin."""
         return self.play(turns, [CLAUDE, "-p", prompt, "--plugin-dir", ROOT,
                                  "--dangerously-skip-permissions", "--max-turns", "20"])
+
+    def run_loop_once(self, turns):
+        """One drain pass exactly as an operator runs it: scripts/kraken-loop.sh."""
+        return self.play(turns, ["bash", LOOP, COORD, "--worker-name", WORKER, "--project", PROJECT,
+                                 "--work-dir", self.work, "--harness", "claude", "--once"])
 
     def unleash_interactive(self, turns, until, timeout=60):
         """The same slash command in an INTERACTIVE session on a pseudo-terminal,
@@ -130,6 +138,66 @@ class UnleashDrainTests(ClaudeE2ETest):
                       "the /kraken:unleash arguments never reached the model")
         self.assertIn("Bash", [t.get("name") for t in agent[0]["tools"]])
         self.assert_delivered(requests, COAUTHOR)
+
+
+class LoopDrainTests(ClaudeE2ETest):
+    """scripts/kraken-loop.sh --harness claude --once: the shared supervisor
+    carrying a whole task, claim to draft PR, through the shared skill."""
+
+    def test_drain_pass_carries_a_task_to_a_draft_pr(self):
+        proc, requests = self.run_loop_once(deliver_script(COAUTHOR))
+        self.assertEqual(proc.returncode, 0, self.detail(requests))
+        agent = [r for r in requests if r.get("tools")]
+        self.assertGreaterEqual(len(agent), 5, "claude stopped before the script ended" + self.detail(requests))
+        first = self.user_text(agent[0])
+        # The loop runs the skill itself, not a forked prompt.
+        self.assertIn(SKILL_MARK, first,
+                      "SKILL.md never reached the model: the plugin or the slash command broke")
+        self.assertIn(UNLEASH.split(" ", 1)[1], first,
+                      "the loop's /kraken:unleash arguments never reached the model")
+        self.assert_delivered(requests, COAUTHOR)
+
+    def test_an_abandoned_lease_is_released_when_claude_exits(self):
+        # Two releases race here, both correct: the plugin's SessionEnd hook
+        # (detached, "session ended") and the loop's own release-on-exit
+        # ("claude exited mid-drain"). Whichever lands first frees the task.
+        proc, requests = self.run_loop_once([{"bash": NEXT_ACTION}, {"say": "Stopping here."}])
+        self.assertEqual(proc.returncode, 0, self.detail(requests))
+        self.assert_claimed_then_released("", requests)
+        self.assertRegex(self.last_comment(ISSUE), r"session ended|claude exited mid-drain")
+
+
+class DenyRuleTests(ClaudeE2ETest):
+    """SKILL.md's Authorization boundaries, enforced by Claude Code's permission
+    layer under the loop's own flags (lib-claude-drain.sh) — the Bash tool is
+    allowed whole, and the deny rules still win."""
+
+    FORBIDDEN = [
+        ("gh pr merge 1 --admin --squash", "pr merge"),
+        ("cd /tmp && gh repo delete %s --yes" % WORK_SLUG, "repo delete"),
+        ("gh issue close %d --repo %s" % (ISSUE, COORD), "issue close"),
+    ]
+
+    def test_forbidden_commands_never_reach_gh(self):
+        self.mk_pr(1, "OPEN")
+        turns = [{"bash": cmd} for cmd, _ in self.FORBIDDEN]
+        # A control: an allowed gh call in the same session does reach the stub,
+        # so "nothing in the log" means denied, not "the stub was never on PATH".
+        turns.append({"bash": "gh pr view https://github.com/%s/pull/1 --json state" % WORK_SLUG})
+        turns.append({"say": "done"})
+        self.truncate_log()
+        proc, requests = self.run_loop_once(turns)
+        self.assertEqual(proc.returncode, 0, self.detail(requests))
+
+        log = self.log_text()
+        self.assertIn("pr view", log, "control gh call never reached the stub" + self.detail(requests))
+        for cmd, needle in self.FORBIDDEN:
+            self.assertNotIn(needle, log, "%r ran despite the deny rule" % cmd + self.detail(requests))
+        results = self.tool_results(requests)
+        for i in range(1, len(self.FORBIDDEN) + 1):
+            self.assertRegex(results.get("call_%d" % i, ""), r"(?i)denied|not allowed|permission",
+                             "call %d was not reported as denied" % i + self.detail(requests))
+        self.assertEqual(self.labels(ISSUE), ["kraken-task", "project:" + PROJECT])
 
 
 class PluginHookTests(ClaudeE2ETest):

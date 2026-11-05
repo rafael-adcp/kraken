@@ -66,13 +66,13 @@ make check      # all of the above
   (`ANTHROPIC_BASE_URL`, Anthropic Messages, with a fake key). The "model" plays
   a fixed list of tool calls (or a scripted HTTP error), so the run is
   deterministic and needs no credentials. Everything around the model is real:
-  `scripts/kraken-loop.sh` and the prompt and deny rules in
-  `scripts/lib-copilot-drain.sh`; the plugin loaded with `--plugin-dir` and the
+  `scripts/kraken-loop.sh` on every harness, with the prompt and deny rules in
+  `scripts/lib-copilot-drain.sh` and `scripts/lib-claude-drain.sh`; the plugin loaded with `--plugin-dir` and the
   `/kraken:unleash` slash command expanding `SKILL.md`; the CLIs' shell tools and
   permission layers; the `hooks.json` hooks; `kraken.py` against the stub; and a
   git work repo with a bare remote. It proves the **wiring**, not the model's
-  judgment: a whole drain to a draft PR on each CLI, Copilot's deny rules and
-  the Pi extension's deny check blocking merge/delete/close, SessionEnd (Pi:
+  judgment: a whole drain to a draft PR on each CLI, Copilot's and Claude Code's
+  deny rules and the Pi extension's deny check blocking merge/delete/close, SessionEnd (Pi:
   `session_shutdown`, loaded through package discovery) releasing only its own
   session's claim on each CLI, and StopFailure releasing on a rate limit (Claude Code, in an
   interactive session on a pseudo-terminal). Each CLI's module skips when that
@@ -114,7 +114,8 @@ key) and self-skips cleanly when it can't run for real (the CLI not on PATH, a
 spend/rate limit, or the stub can't be reached). A change to `AGENTS.md`,
 `scripts/kraken-loop.sh`, `scripts/kraken-copilot.sh` or
 `scripts/lib-copilot-drain.sh` is a Copilot-side change: run
-`make test-agent-copilot` for it.
+`make test-agent-copilot` for it. A change to `scripts/lib-claude-drain.sh` (or the
+loop's `--harness claude` line) is a Claude-side change: run `make test-agent-claude`.
 
 ## Pull request conventions
 

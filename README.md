@@ -92,6 +92,15 @@ Zero to a draining queue in four commands:
 /kraken:unleash OWNER/tasks --worker-name env-1 --project my_app
 ```
 
+`/kraken:unleash` drains the queue once, in the session you are talking to. To
+keep a worker in ambush, run the shared loop from the work repo's checkout
+instead — it starts a fresh `claude -p` drain whenever a task is startable:
+
+```
+cd /path/to/my_app
+/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness claude
+```
+
 ### GitHub Copilot CLI
 
 Same plugin, same commands — Copilot CLI reads the Claude Code plugin format and
@@ -112,9 +121,9 @@ cd /path/to/my_app
 /path/to/kraken/scripts/kraken-loop.sh    OWNER/tasks --worker-name env-1 --project my_app   # headless
 ```
 
-`kraken-copilot.sh` opens a Copilot session running `/kraken:unleash` that stays
-in ambush and that you can talk to; `kraken-loop.sh` runs one `copilot -p` per
-startable task, with no session to watch.
+`kraken-copilot.sh` opens a Copilot session running `/kraken:unleash` that drains
+the queue once and stays open for you to talk to; `kraken-loop.sh` is the ambush —
+one fresh `copilot -p` drain whenever a task is startable, with no session to watch.
 
 ### Pi
 
@@ -198,7 +207,7 @@ Three skills ship in the box:
 | Skill              | Role                                                                                                                     |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
 | `/kraken:init`     | The bootstrap — stands up a coordination repo: private repo, templates, canonical labels                                 |
-| `/kraken:unleash`  | The worker — claims one task at a time, executes, validates, delivers a draft PR; then lurks behind a zero-token watcher |
+| `/kraken:unleash`  | The worker — claims one task at a time, executes, validates, delivers a draft PR, until the queue is idle; `scripts/kraken-loop.sh` keeps it in ambush |
 | `/kraken:status`   | The console — review + decision queues, what's in flight with PR links, and ready-to-paste `unleash` launch lines        |
 
 ## Concepts
@@ -330,7 +339,12 @@ reuses it through [`AGENTS.md`](AGENTS.md), and Pi loads it directly with
    `--deny-tool='shell(gh pr merge:*)'`, `'shell(gh repo delete:*)'`,
    `'shell(gh issue close:*)'`, and the GitHub MCP server's
    `merge_pull_request` / `issue_write`; `scripts/kraken-copilot.sh` and
-   `scripts/kraken-loop.sh` pass all of them.) Pi inverts the problem: it never
+   `scripts/kraken-loop.sh` pass all of them. Claude Code under
+`scripts/kraken-loop.sh --harness claude` gets the same floor from
+[`scripts/lib-claude-drain.sh`](scripts/lib-claude-drain.sh): `--permission-mode
+dontAsk`, the worker's tools allowed, and deny rules for the same three `gh`
+commands and the GitHub MCP server's two tools — never
+`--dangerously-skip-permissions`.) Pi inverts the problem: it never
    asks before a tool call, so there is nothing to pre-allow, and it can deny
    only whole tools, never a `gh` command inside `bash`. Its own [security
    notes](https://pi.dev/docs/latest/security.md) recommend running it inside a
@@ -381,11 +395,10 @@ reuses it through [`AGENTS.md`](AGENTS.md), and Pi loads it directly with
    /kraken:unleash OWNER/tasks --worker-name data-env-2 --project your_project_2
    ```
 
-   On **GitHub Copilot CLI**, launch each one from its work repo with
-   `scripts/kraken-copilot.sh` (interactive) or `scripts/kraken-loop.sh`
-   (headless) and the same three arguments; on **Pi**, with
-   `scripts/kraken-loop.sh ... --harness pi` — see the [agent cheat
-   sheet](#agent-cheat-sheet).
+   Each of those drains once. To keep a worker in ambush, launch it from its
+   work repo with `scripts/kraken-loop.sh` and the same three arguments, plus
+   `--harness claude` or `--harness pi` (Copilot is the default) — see [Keep it
+   draining](#keep-it-draining) and the [agent cheat sheet](#agent-cheat-sheet).
 
    Workers deliver on **work branches + draft PRs** — never the default branch,
    never a merge. Branches follow each work repo's own naming convention (CI
@@ -403,46 +416,39 @@ reuses it through [`AGENTS.md`](AGENTS.md), and Pi loads it directly with
 
 ## Keep it draining
 
-An empty queue doesn't stop a worker: after the drain, `unleash` arms an
-event-driven watcher — a background shell script (via Claude Code's Monitor
-tool) polls the queue every 60s with a free `gh` call and wakes the worker
-**only when a startable task appears** — an idle queue costs zero LLM tokens.
-Each wake is an ordinary drain: same one task at a time, same claim-ref CAS.
-Enqueue from anywhere (`gh issue create`, web UI, mobile app) and the worker
-picks it up within a minute; the watcher lives until the session closes or you
-say stop. A watcher that can no longer *read* the queue (expired token, dead
-network, revoked access) says so on stderr instead of impersonating an idle
-queue, and gives up with exit `20` after 60 consecutive failed reads
-(`KRAKEN_WATCH_MAX_FAILURES`) — a dead monitor entry you can see, rather than a
-live one that wakes nobody.
-
-Want a bounded run instead — a scheduled container, a one-off drain? Pass
-`--once`: drain and exit. A harness with neither the Monitor tool nor background
-commands that wake the agent on exit falls back to `--once` automatically; in
-Claude Code, a dumb timer (`/loop 15m /kraken:unleash ... --once`) still works —
-it just costs one full LLM turn per fire even when the queue is empty.
-
-Inside an interactive **GitHub Copilot CLI** session, `/kraken:unleash` stays in
-ambush too: Copilot's background shell wakes the agent when a command exits, so
-the worker arms `kraken.py watch --exit-on-wake` — a watcher that exits on its
-first wake and is re-armed after each drain — with the same zero-token idle.
-
-For a **headless** Copilot CLI or Pi worker — no session to talk to — the shipped
-[`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) is the ready-made ambush loop:
-launch it from the work repo's checkout (or point `--work-dir` at it) and it polls
-the queue outside the model, invoking the agent in that work repo only when a task
-is actually startable — the same zero-token idle behavior as the Monitor watcher,
-without copying anything out of a session folder. The contract files stay in the
-kraken checkout the script sits in; the loop hands them to `copilot` by absolute
-path, and to Pi with `--skill`. For Pi the loop (`--harness pi`) is *the* ambush,
-by design: kraken ships no in-session watcher for Pi, so every Pi worker follows
-the same loop-driven flow as a headless Copilot one, each drain starting from a
-fresh context (#189).
+An empty queue doesn't have to stop a worker. Continuous ambush has one
+supervisor on every harness — [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh),
+run from the work repo's checkout (or pointed at it with `--work-dir`). Each poll
+runs the free, read-only `kraken.py list-startable`; only when a task is actually
+startable does it start the agent — one fresh `--once` drain pass, the shared
+`/kraken:unleash` skill carrying tasks until the queue is idle again. An idle
+queue costs zero LLM tokens. Enqueue from anywhere (`gh issue create`, web UI,
+mobile app) and the worker picks it up within a poll (60s; `--poll` changes it).
 
 ```
 cd /path/to/my_app
-/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app
+/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app                    # Copilot CLI
+/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness claude   # Claude Code
+/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness pi       # Pi
 ```
+
+The shell owns the supervision — polling, starting the agent, Ctrl-C, and
+handing back a claim a dead drain left behind (see the [self-healing
+FAQ](#faq)); the skill owns the work. The contract stays in the kraken checkout
+the script sits in: Claude Code loads it as the plugin (`--plugin-dir`), Copilot
+gets it by absolute path, Pi with `--skill`. The loop never outlives its
+terminal, and a queue it cannot *read* (expired token, dead network) is reported
+on stderr, never as an idle queue.
+
+**One process per pass, so no conversation carries over.** Each drain starts a
+fresh agent with a fresh context — the isolation a subagent would give, and on
+purpose for unattended work. What a worker needs from earlier passes lives on
+the task thread, which `next-action` hands back. If you want to *talk* to a
+worker, run `/kraken:unleash` in a session instead: it drains once, reports, and
+ends its turn — it does not watch the queue in the background.
+
+Want a bounded run — a scheduled container, a one-off drain? Pass `--once` to
+the loop: one pass, then exit.
 
 On **Windows**, the loop is a bash script: run it from WSL or Git Bash, with
 `copilot`, `python3` and `git` installed on that side (under WSL, install Copilot
@@ -450,7 +456,7 @@ CLI inside the distro — `npm install -g @github/copilot` — rather than calli
 Windows one, which a Linux shell cannot launch). Everything the loop invokes then
 resolves in the same environment — `gh` included: `kraken.py` reads the queue
 with `GH_TOKEN`, `GITHUB_TOKEN` or `gh auth token`, and a WSL shell does not see a
-`gh.exe` installed on Windows. Both scripts check for a token before they start.
+`gh.exe` installed on Windows. The loop and `kraken-copilot.sh` check for a token before they start.
 
 **`GH_TOKEN` and Copilot's login.** Copilot CLI also authenticates its *model*
 with `GH_TOKEN`/`GITHUB_TOKEN` when one is set (after `COPILOT_GITHUB_TOKEN`), so a
@@ -489,13 +495,13 @@ checkout; run every worker command from the work repo's checkout (or pass
 | Install the plugin             | `/plugin marketplace add rafael-adcp/kraken`<br>`/plugin install kraken@kraken` | Same two commands, inside `copilot`                                                                  | `"skills": ["$KRAKEN/skills"]` (and optionally `"extensions": ["$KRAKEN/extensions/pi/kraken.ts"]`) in `~/.pi/agent/settings.json` ([details](#pi)) |
 | Stand up the queue (once)      | `/kraken:init OWNER/tasks --project my_app`                                  | Same, inside `copilot`                                                                               | `/skill:init OWNER/tasks --project my_app`, inside `pi`                             |
 | Pre-allow unattended work      | Allowlist in the work repo's `.claude/settings.json` (walkthrough step 3)    | Nothing to write — both scripts pass `--allow-all-tools --no-ask-user` plus the deny rules          | Nothing to write — Pi never asks; the loop passes `--exclude-tools` and the extension's `gh` deny check: isolate the environment |
-| Launch a worker you can talk to | `/kraken:unleash OWNER/tasks --worker-name env-1 --project my_app`          | `$KRAKEN/scripts/kraken-copilot.sh OWNER/tasks --worker-name env-1 --project my_app`                | `/skill:unleash OWNER/tasks --worker-name env-1 --project my_app` — drains, no ambush yet |
-| Run with no session to watch   | —                                                                            | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app`                   | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness pi` |
-| Drain once and exit            | Append `--once` to `/kraken:unleash`                                         | Append `--once` to either script                                                                     | Append `--once` to the loop                                                         |
-| Idle on an empty queue         | Automatic — Monitor watcher, zero tokens                                     | Automatic — `watch --exit-on-wake`, re-armed per drain (interactive); polling outside the model (loop) | Automatic — polling outside the model (loop)                                        |
+| Launch a worker you can talk to | `/kraken:unleash OWNER/tasks --worker-name env-1 --project my_app`          | `$KRAKEN/scripts/kraken-copilot.sh OWNER/tasks --worker-name env-1 --project my_app`                | `/skill:unleash OWNER/tasks --worker-name env-1 --project my_app`, inside `pi` |
+| Run with no session to watch   | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness claude` | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app`                   | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness pi` |
+| Drain once and exit            | `/kraken:unleash` (every invocation drains once), or `--once` on the loop    | Append `--once` to either script                                                                     | Append `--once` to the loop                                                         |
+| Idle on an empty queue         | The loop — polling outside the model, zero tokens                            | Same (loop)                                                                                          | Same (loop)                                                                         |
 | See the queues                 | `/kraken:status OWNER/tasks`                                                 | Same, inside `copilot`                                                                               | `/skill:status OWNER/tasks`, inside `pi`                                            |
-| Stop a worker                  | Say "stop", or close the session                                             | Same (interactive); Ctrl-C (loop)                                                                    | Ctrl-C (loop)                                                                       |
-| Resume after a usage limit     | Nothing — `StopFailure` releases the claim, the watcher retries after reset  | Nothing (loop); send any message after the reset (interactive)                                       | Nothing (loop)                                                                      |
+| Stop a worker                  | Ctrl-C (loop); close the session (interactive)                               | Same                                                                                                 | Ctrl-C (loop)                                                                       |
+| Resume after a usage limit     | Nothing (loop) — the claim is released, the next poll retries               | Same                                                                                                 | Nothing (loop)                                                                      |
 
 ## Witness the Depths
 
@@ -659,12 +665,13 @@ back on the queue in seconds instead of sitting on a lease nobody is renewing, f
 worker on an account that still has quota. (`gh` still works at limit time;
 only the model API is blocked, which is why the release can land.)
 
-Retry is automatic too. The same hook stamps a local **wake-retry flag**, and
-the armed watcher re-emits its wake whenever the flag proves the previous wake's
-turn died (spaced by `KRAKEN_WATCH_RETRY_SECONDS`, default 5 min): while the
-limit lasts each retry fails for free, and the first one after the window resets
-wakes the worker, which re-claims the task and continues on the existing branch
-with the whole thread in hand. No operator gesture needed.
+Retry is automatic under the loop (`scripts/kraken-loop.sh --harness claude`):
+the rate-limited `claude -p` exits, the loop releases whatever the hook has not
+already, and its next poll is the retry — while the limit lasts each pass fails
+at the first request, and the first one after the window resets re-claims the
+task and continues on the existing branch with the whole thread in hand. No
+operator gesture needed. An interactive session does not retry on its own: after
+the reset, run `/kraken:unleash` again.
 
 The lease is the backstop for the residue — the hook itself failing, or a hard
 kill: 30 minutes without a renewal and the task is free for the next worker
@@ -672,16 +679,13 @@ regardless, no hook involved. (Removing the `in-progress` label by hand does
 *nothing* here — it's a badge for you, not the lock. The lock is the claim ref,
 and only the lease's clock or an explicit release opens it.)
 
-**On GitHub Copilot CLI** the recovery is the same, the retry is not. Kraken has no
-verified Copilot event for a usage limit, so there is no `StopFailure` equivalent:
-under `scripts/kraken-loop.sh` the `copilot -p` process exits, the loop releases the
-claim at once and its next poll is the retry — nothing to do. In an interactive
-session (`scripts/kraken-copilot.sh`) the lease frees the task within its TTL, but
-the one-shot watcher already fired for the dead turn, so the session stays quiet
-until you speak: after the limit resets, send it any message (or run
-`/kraken:unleash` again) and it drains and re-arms. A Pi worker under
-`kraken-loop.sh --harness pi` behaves like the Copilot loop: `pi -p` exits, the
-loop releases, and its next poll is the retry.
+**On GitHub Copilot CLI** the retry is the same and the release comes from the
+loop alone. Kraken has no verified Copilot event for a usage limit, so there is
+no `StopFailure` equivalent: under `scripts/kraken-loop.sh` the `copilot -p`
+process exits, the loop releases the claim at once and its next poll is the
+retry. In an interactive session (`scripts/kraken-copilot.sh`) the lease frees
+the task within its TTL; after the limit resets, run `/kraken:unleash` again. A
+Pi worker under `kraken-loop.sh --harness pi` behaves like the Copilot loop.
 
 </details>
 
@@ -698,8 +702,9 @@ task bodies are untrusted input to an agent that can push branches.
 <details>
 <summary><b>Does anything survive closing the terminal?</b></summary>
 
-The queue does — it's GitHub Issues. The worker doesn't: `/kraken:unleash` and
-its watcher live inside a Claude Code (or Copilot CLI) session. But a **graceful** exit now
+The queue does — it's GitHub Issues. The worker doesn't: `/kraken:unleash` lives
+inside a Claude Code (or Copilot CLI) session, and `scripts/kraken-loop.sh` inside
+the terminal that runs it. But a **graceful** exit now
 self-heals: a bundled `SessionEnd` hook fires when you close the terminal or
 `/exit`, and if the worker was still holding a claim it runs `kraken.py release`
 for you — `released: <worker>` / `reason: session ended`, then drops `in-progress`,
@@ -714,12 +719,9 @@ either, but its own `StopFailure` hook releases the claim there (see the limit
 FAQ above). A hard kill / crash / power loss fires neither hook — and it does not
 matter: the **lease expires on its own** 30 minutes later and the next worker to
 read the queue takes the task over (§5). The hooks only make that immediate; no
-server-side job, so it needs nothing running anywhere. And the watcher is no
-escape hatch: it is armed by `unleash` itself (its *Staying in ambush* step),
-inside the same session — not a command of its own — so it dies with it. Moving the poll out of the model is
-what [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) already does, though it
-still needs a live shell to run in; a genuinely headless driver (system cron,
-GitHub Actions) is open work —
+server-side job, so it needs nothing running anywhere. The ambush loop moves
+the poll out of the model, but it still needs a live shell to run in; a
+genuinely headless driver (system cron, GitHub Actions) is open work —
 [#57](https://github.com/rafael-adcp/kraken/issues/57).
 
 </details>
@@ -738,9 +740,9 @@ session (`COPILOT_AGENT_SESSION_ID`) so a Copilot session that ends gracefully
 while holding a lease hands it back on the spot, exactly like a Claude Code one.
 
 [`scripts/kraken-loop.sh`](scripts/kraken-loop.sh) carries the same optimization
-for Copilot: `kraken.py claim` records the open claim in
+for every harness it drives: `kraken.py claim` records the open claim in
 `~/.kraken/claim-<worker>.json` and every terminal transition
-(deliver/escalate/release) removes it, so when the `copilot` process exits with
+(deliver/escalate/release) removes it, so when the agent process exits with
 that file still present the drain provably died holding the lease — crash, kill,
 or a rate-limit abort — and the loop runs `kraken.py release` on the spot. Its
 exit/Ctrl-C trap does the same when the loop itself is stopped mid-drain. The
@@ -764,9 +766,9 @@ case. Side by side:
 | --- | --- | --- | --- |
 | Lease expiry (the floor) | ✅ | ✅ | ✅ |
 | Release on a graceful session end | `SessionEnd` hook | `SessionEnd` hook | `session_shutdown` in the extension |
-| Release when a loop drain dies | — (no loop needed) | `kraken-loop.sh` | `kraken-loop.sh --harness pi` |
-| Release + retry on a usage limit | `StopFailure` hook + watcher | loop releases, next poll retries | loop releases, next poll retries |
-| Merge / delete / close refused at the tool layer | allowlist ask-gate | `--deny-tool` rules | MCP writes: `--exclude-tools`; `gh` in `bash`: the extension's deny check |
+| Release when a loop drain dies | `kraken-loop.sh --harness claude` | `kraken-loop.sh` | `kraken-loop.sh --harness pi` |
+| Release + retry on a usage limit | `StopFailure` hook + loop releases, next poll retries | loop releases, next poll retries | loop releases, next poll retries |
+| Merge / delete / close refused at the tool layer | loop: `--disallowedTools` rules; interactive: allowlist ask-gate | `--deny-tool` rules | MCP writes: `--exclude-tools`; `gh` in `bash`: the extension's deny check |
 
 </details>
 

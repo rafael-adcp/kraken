@@ -41,8 +41,8 @@ differs, and each driver uses the one an operator actually runs:
 
 | | Claude Code (`claude`, default) | GitHub Copilot CLI (`copilot`) |
 | --- | --- | --- |
-| Invocation | `claude -p "/kraken:unleash … --once" --plugin-dir <repo>` | the drain-pass prompt and flags of `scripts/kraken-loop.sh`, single-sourced in `scripts/lib-copilot-drain.sh`, plus `--add-dir <repo>` |
-| Permissions | `--dangerously-skip-permissions` | `--allow-all-tools --no-ask-user` (the loop's own) |
+| Invocation | `claude -p "/kraken:unleash … --once" --plugin-dir <repo>` — `scripts/kraken-loop.sh --harness claude`'s own, single-sourced in `scripts/lib-claude-drain.sh` | the drain-pass prompt and flags of `scripts/kraken-loop.sh`, single-sourced in `scripts/lib-copilot-drain.sh`, plus `--add-dir <repo>` |
+| Permissions | `--permission-mode dontAsk`, the allow list and the deny rules (the loop's own) | `--allow-all-tools --no-ask-user` (the loop's own) |
 | Harness-only | `--max-turns` | `GH_TOKEN`/`GITHUB_TOKEN` stripped (Copilot would log the model in with the stub's fake token; `kraken.py` asks the stub's `gh auth token` instead) and `--disable-builtin-mcps` (the built-in GitHub MCP server would reach real GitHub around the stub) |
 | Auth | `ANTHROPIC_API_KEY` or a logged-in CLI | `COPILOT_GITHUB_TOKEN` or a stored `copilot login` |
 
