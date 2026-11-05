@@ -4,8 +4,9 @@
 # The interactive counterpart of scripts/kraken-loop.sh: it opens `copilot` in
 # the work repo and hands it `/kraken:unleash ...` as its first prompt, under
 # the same permission flags the loop's drain passes run with
-# (lib-copilot-drain.sh). The session stays open, stays in ambush behind the
-# `watch --exit-on-wake` watcher SKILL.md arms, and you can talk to it.
+# (lib-copilot-drain.sh). The skill drains the queue once and ends its turn;
+# the session stays open and you can talk to it. Continuous ambush is the
+# loop's job, not this session's (SKILL.md, "When the drain ends").
 #
 # Why a launcher at all: a Claude Code worker gets its unattended permissions
 # from the work repo's .claude/settings.json; Copilot CLI takes them as launch
@@ -39,7 +40,8 @@ Opens an interactive GitHub Copilot CLI session in the work repo running
   --project <name>       only take project:<name> tasks           [KRAKEN_PROJECT]
   --work-dir <dir>       the work repo checkout copilot runs in
                          (default: the current directory)        [KRAKEN_WORK_DIR]
-  --once                 drain once and stop instead of staying in ambush
+  --once                 pass --once to the skill (no closing pointer to
+                         the ambush loop)
   -- <flags>             passed to copilot verbatim (e.g. -- --model auto)
   -h, --help             show this help
 

@@ -99,6 +99,7 @@ skip_scenario() { echo "SKIP: ${SCENARIO_NAME:-scenario} ($1)"; exit 2; }
 
 # --- driving the skill headlessly ---------------------------------------------
 . "$ROOT/scripts/lib-copilot-drain.sh"
+. "$ROOT/scripts/lib-claude-drain.sh"
 
 AGENT_TIMEOUT="${AGENT_TIMEOUT:-${CLAUDE_AGENT_TIMEOUT:-600}}"
 
@@ -120,16 +121,19 @@ with_timeout() {
   fi
 }
 
-# drive_claude PROMPT_SUFFIX — the real skill under `claude -p`, once, with the
-# repo's own plugin dir loaded so CI needs no pre-install.
+# drive_claude PROMPT_SUFFIX — one drain pass exactly as scripts/kraken-loop.sh
+# --harness claude runs it (the slash command and permission flags from
+# lib-claude-drain.sh), with the repo's own plugin dir loaded so CI needs no
+# pre-install, plus a turn cap so a confused run cannot burn the budget.
 drive_claude() {
-  local prompt="/kraken:unleash ${COORD} --worker-name ${WORKER} --project ${PROJECT} --once"
+  local prompt
+  prompt="$(kraken_claude_prompt "$COORD" "$PROJECT" "$WORKER")"
   [ -n "$1" ] && prompt="${prompt}
 
 $1"
   ( cd "$WORK_DIR" && with_timeout "$AGENT_TIMEOUT" claude -p "$prompt" \
       --plugin-dir "$ROOT" \
-      --dangerously-skip-permissions \
+      "${KRAKEN_CLAUDE_FLAGS[@]}" \
       --max-turns "${CLAUDE_MAX_TURNS:-60}" )
 }
 

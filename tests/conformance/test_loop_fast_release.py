@@ -9,7 +9,8 @@ claim — the loop releases it on the spot (and its EXIT/INT/TERM trap covers th
 loop itself being killed), scoped to its OWN worker only. A clean drain is a
 strict no-op. Best-effort: a failed release falls back to the reaper.
 
-Every case runs once per `--harness` (CopilotLoopTests, PiLoopTests): the
+Every case runs once per `--harness` (CopilotLoopTests, ClaudeLoopTests,
+PiLoopTests): the
 release path is harness-agnostic by construction. How each harness is launched
 (argv, work dir) is pinned in test_loop_work_dir.py."""
 import os
@@ -178,6 +179,10 @@ class LoopFastReleaseCases:
 
 class CopilotLoopTests(LoopFastReleaseCases, KrakenConformanceTest):
     HARNESS = "copilot"
+
+
+class ClaudeLoopTests(LoopFastReleaseCases, KrakenConformanceTest):
+    HARNESS = "claude"
 
 
 class PiLoopTests(LoopFastReleaseCases, KrakenConformanceTest):

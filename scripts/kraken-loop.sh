@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# kraken-loop.sh — external "ambush" loop for a tentacle in any harness without a
-# native background watcher: GitHub Copilot CLI (the default), Pi, or another
-# agent CLI.
+# kraken-loop.sh — THE continuous "ambush" for a tentacle, on every harness:
+# GitHub Copilot CLI (the default), Claude Code, Pi, or another agent CLI.
 #
-# Such a harness has no Monitor tool to arm kraken's zero-token watcher (SKILL.md,
-# "Staying in ambush"), so this is the documented fallback: an outside-the-model shell loop
-# running ONE `--once`-style drain per iteration (a fresh agent process per
-# pass also gives each task the fresh-context isolation a subagent would).
+# The shell owns supervision — polling, process startup, shutdown and the
+# best-effort release of an abandoned claim — and the shared skill owns the
+# work: each pass starts ONE fresh agent process running a `--once` drain
+# (SKILL.md, "When the drain ends"), which carries tasks through `kraken.py
+# next-action` until the queue is idle. A fresh process per pass also gives
+# each drain the fresh-context isolation a subagent would; it also means no
+# conversation carries over from one pass to the next.
 #
 # Two directories, kept apart: the WORK DIR is where the agent runs (the work
 # repo's checkout — the code, the branch and the draft PR live there), and the
@@ -14,7 +16,8 @@
 # (AGENTS.md, SKILL.md, PROTOCOL.md, kraken.py). The only AGENTS.md the agent
 # auto-loads is the work repo's own, so copilot's prompt names the contract
 # files by absolute path and `--add-dir` grants it read access to the checkout;
-# Pi loads the skills from the checkout with `--skill`.
+# Claude Code loads the checkout as the plugin with `--plugin-dir`, and Pi
+# loads its skills with `--skill`.
 #
 # Cost control: each poll first runs the FREE, read-only `kraken.py
 # list-startable`; the model is only invoked when a task is actually startable,
@@ -29,7 +32,7 @@
 #
 # Usage:
 #   scripts/kraken-loop.sh OWNER/tasks --worker-name <name> --project <name> \
-#                          [--harness copilot|pi] [--work-dir <dir>] \
+#                          [--harness copilot|claude|pi] [--work-dir <dir>] \
 #                          [--poll <seconds>] [--once]
 #
 # Every flag also has an env-var fallback (KRAKEN_TASKS, KRAKEN_WORKER,
@@ -50,18 +53,19 @@ usage() {
   cat <<'EOF'
 Usage:
   scripts/kraken-loop.sh OWNER/tasks --worker-name <name> --project <name> \
-                         [--harness copilot|pi] [--work-dir <dir>] \
+                         [--harness copilot|claude|pi] [--work-dir <dir>] \
                          [--poll <seconds>] [--once]
 
-Continuous "ambush" loop for a tentacle in any harness without a native
-background watcher: each poll runs the free, read-only `kraken.py
-list-startable` and only invokes the model when the queue has a startable task.
-Ctrl-C to stop; it never outlives this terminal.
+The continuous "ambush" loop for a tentacle on any harness: each poll runs the
+free, read-only `kraken.py list-startable` and only invokes the model — one
+fresh `--once` drain pass — when the queue has a startable task. Ctrl-C to
+stop; it never outlives this terminal.
 
 Flags (each also has an env-var fallback; an explicit flag wins):
   --worker-name <name>   worker identity in every claim/comment   [KRAKEN_WORKER]
   --project <name>       only take project:<name> tasks           [KRAKEN_PROJECT]
-  --harness <name>       agent CLI: copilot (default) or pi       [KRAKEN_HARNESS]
+  --harness <name>       agent CLI: copilot (default), claude or pi
+                                                                  [KRAKEN_HARNESS]
   --work-dir <dir>       the work repo checkout the agent runs in
                          (default: the current directory)        [KRAKEN_WORK_DIR]
   --poll <seconds>       poll cadence (default 60)          [KRAKEN_POLL_SECONDS]
@@ -126,9 +130,9 @@ if [ -n "${KRAKEN_AGENT_CMD:-}" ]; then
   [ "${#AGENT_BASE[@]}" -gt 0 ] || { echo "kraken-loop: KRAKEN_AGENT_CMD names no command." >&2; exit 2; }
 else
   case "$HARNESS" in
-    copilot|pi) ;;
+    copilot|claude|pi) ;;
     *)
-      echo "kraken-loop: unknown harness '$HARNESS' (expected copilot or pi; set KRAKEN_AGENT_CMD for another CLI)." >&2
+      echo "kraken-loop: unknown harness '$HARNESS' (expected copilot, claude or pi; set KRAKEN_AGENT_CMD for another CLI)." >&2
       usage >&2
       exit 2 ;;
   esac
@@ -141,9 +145,10 @@ WORK_DIR="$(CDPATH= cd -- "$WORK_DIR" && pwd)" && cd "$WORK_DIR" \
   || { echo "kraken-loop: cannot cd into $WORK_DIR" >&2; exit 1; }
 
 # --- fast claim-release (self-heal) ----------------------------------------
-# The SessionEnd/StopFailure hooks only fire inside a plugin-loading session
-# (Claude Code, Copilot CLI), and this loop runs none, so it is the equivalent
-# for every harness it drives. `kraken.py claim` writes
+# The SessionEnd/StopFailure hooks fire only inside a plugin-loading session,
+# and of the agents this loop drives only Claude Code loads one (Pi's extension
+# is the same idea), so the loop carries the equivalent for every harness — a
+# second, harmless release where a hook already ran. `kraken.py claim` writes
 # $KRAKEN_STATE_DIR/claim-<worker>.json and every terminal transition
 # (deliver/escalate/release) removes it, so a file that survives the agent
 # process is proof the drain died holding the lease (crash, kill, rate-limit
@@ -174,6 +179,7 @@ trap 'exit 129' HUP
 # check` needs a --provider/--model this loop does not know, and a missing
 # login only fails the drain, which the release below already covers.
 . "$REPO_DIR/scripts/lib-copilot-drain.sh"
+. "$REPO_DIR/scripts/lib-claude-drain.sh"
 kraken_require_github_auth kraken-loop || exit 1
 PROMPT="$(kraken_copilot_prompt "$TASKS" "$PROJECT" "$WORKER" "$WORK_DIR" "$REPO_DIR")"
 
@@ -193,6 +199,14 @@ else
   case "$HARNESS" in
     # Add -s/--silent for terser logs.
     copilot) AGENT_CMD=(copilot -p "$PROMPT" --add-dir "$REPO_DIR" "${KRAKEN_COPILOT_FLAGS[@]}") ;;
+    # Claude Code runs the shared skill itself: this checkout loaded as the
+    # plugin for the session (so the contract is the one next to this script,
+    # whatever plugin version is installed), `/kraken:unleash ... --once` as
+    # the prompt, and the permission and deny flags from lib-claude-drain.sh.
+    # The plugin's SessionEnd/StopFailure hooks load with it and release on
+    # their own; the release below is the same, idempotent, fallback.
+    claude) AGENT_CMD=(claude -p "$(kraken_claude_prompt "$TASKS" "$PROJECT" "$WORKER")"
+                       --plugin-dir "$REPO_DIR" "${KRAKEN_CLAUDE_FLAGS[@]}") ;;
     # Pi loads the skills from the kraken checkout (it has no --add-dir) and
     # runs the skill itself. No -a/--approve: print mode never blocks on
     # project trust, so the work repo's .pi/ loads only if the operator already
@@ -227,6 +241,9 @@ drain_pass() {
     # release; a failure exits non-zero without saying whether it got as far
     # as a claim (`pi -p` exits 1 alike for a bad --model, an auth failure and
     # a refused request), so a surviving lease is released below either way.
+    # The pass ends when the agent exits: one process may carry several tasks
+    # (the skill runs `next-action` until idle), and the next poll starts a
+    # fresh one only if something is startable again.
     # stdin is closed: a headless drain never reads it, and `pi -p` waits for
     # EOF on an open non-tty stdin (ssh without a tty, systemd, CI) forever.
     "${AGENT_CMD[@]}" </dev/null
