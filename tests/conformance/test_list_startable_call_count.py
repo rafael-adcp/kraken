@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The queue watcher's idle poll must cost O(1) gh calls, not O(N) in queue size.
+"""The ambush loop's idle poll must cost O(1) gh calls, not O(N) in queue size.
 Pins the invocation count against the gh-stub's log."""
 import unittest
 
