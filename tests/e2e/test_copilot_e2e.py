@@ -45,7 +45,8 @@ class CopilotE2ETest(E2ETest):
     def run_loop_once(self, turns):
         """One drain pass exactly as an operator runs it: scripts/kraken-loop.sh."""
         return self.play(turns, ["bash", LOOP, COORD, "--worker-name", WORKER,
-                                 "--project", PROJECT, "--work-dir", self.work, "--once"])
+                                 "--project", PROJECT, "--work-dir", self.work,
+                                 "--harness", "copilot", "--once"])
 
     def run_with_plugin(self, turns, prompt):
         return self.play(turns, [COPILOT, "-p", prompt, "--plugin-dir", ROOT, "--add-dir", ROOT,
