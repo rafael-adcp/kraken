@@ -92,10 +92,10 @@ session folder) that runs `copilot` in the directory you launch it from, or in t
 
 ```bash
 cd /path/to/work-repo
-/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name <worker-name> --project <name>
+/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name <worker-name> --project <name> --harness copilot
 
 # or from anywhere, naming the work repo explicitly
-/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name <worker-name> --project <name> \
+/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name <worker-name> --project <name> --harness copilot \
   --work-dir /path/to/work-repo
 ```
 

@@ -117,8 +117,8 @@ a kraken checkout carry them for you — the same flags, from one source:
 
 ```
 cd /path/to/my_app
-/path/to/kraken/scripts/kraken-copilot.sh OWNER/tasks --worker-name env-1 --project my_app   # interactive
-/path/to/kraken/scripts/kraken-loop.sh    OWNER/tasks --worker-name env-1 --project my_app   # headless
+/path/to/kraken/scripts/kraken-copilot.sh OWNER/tasks --worker-name env-1 --project my_app                     # interactive
+/path/to/kraken/scripts/kraken-loop.sh    OWNER/tasks --worker-name env-1 --project my_app --harness copilot   # headless
 ```
 
 `kraken-copilot.sh` opens a Copilot session running `/kraken:unleash` that drains
@@ -339,7 +339,7 @@ reuses it through [`AGENTS.md`](AGENTS.md), and Pi loads it directly with
    `--deny-tool='shell(gh pr merge:*)'`, `'shell(gh repo delete:*)'`,
    `'shell(gh issue close:*)'`, and the GitHub MCP server's
    `merge_pull_request` / `issue_write`; `scripts/kraken-copilot.sh` and
-   `scripts/kraken-loop.sh` pass all of them. Claude Code under
+   `scripts/kraken-loop.sh --harness copilot` pass all of them. Claude Code under
 `scripts/kraken-loop.sh --harness claude` gets the same floor from
 [`scripts/lib-claude-drain.sh`](scripts/lib-claude-drain.sh): `--permission-mode
 dontAsk`, the worker's tools allowed, and deny rules for the same three `gh`
@@ -396,8 +396,8 @@ commands and the GitHub MCP server's two tools — never
    ```
 
    Each of those drains once. To keep a worker in ambush, launch it from its
-   work repo with `scripts/kraken-loop.sh` and the same three arguments, plus
-   `--harness claude` or `--harness pi` (Copilot is the default) — see [Keep it
+   work repo with `scripts/kraken-loop.sh`, the same three arguments, and a
+   required `--harness copilot`, `claude` or `pi` — see [Keep it
    draining](#keep-it-draining) and the [agent cheat sheet](#agent-cheat-sheet).
 
    Workers deliver on **work branches + draft PRs** — never the default branch,
@@ -427,7 +427,7 @@ mobile app) and the worker picks it up within a poll (60s; `--poll` changes it).
 
 ```
 cd /path/to/my_app
-/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app                    # Copilot CLI
+/path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness copilot  # Copilot CLI
 /path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness claude   # Claude Code
 /path/to/kraken/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness pi       # Pi
 ```
@@ -496,7 +496,7 @@ checkout; run every worker command from the work repo's checkout (or pass
 | Stand up the queue (once)      | `/kraken:init OWNER/tasks --project my_app`                                  | Same, inside `copilot`                                                                               | `/skill:init OWNER/tasks --project my_app`, inside `pi`                             |
 | Pre-allow unattended work      | Allowlist in the work repo's `.claude/settings.json` (walkthrough step 3)    | Nothing to write — both scripts pass `--allow-all-tools --no-ask-user` plus the deny rules          | Nothing to write — Pi never asks; the loop passes `--exclude-tools` and the extension's `gh` deny check: isolate the environment |
 | Launch a worker you can talk to | `/kraken:unleash OWNER/tasks --worker-name env-1 --project my_app`          | `$KRAKEN/scripts/kraken-copilot.sh OWNER/tasks --worker-name env-1 --project my_app`                | `/skill:unleash OWNER/tasks --worker-name env-1 --project my_app`, inside `pi` |
-| Run with no session to watch   | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness claude` | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app`                   | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness pi` |
+| Run with no session to watch   | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness claude` | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness copilot` | `$KRAKEN/scripts/kraken-loop.sh OWNER/tasks --worker-name env-1 --project my_app --harness pi` |
 | Drain once and exit            | `/kraken:unleash` (every invocation drains once), or `--once` on the loop    | Append `--once` to either script                                                                     | Append `--once` to the loop                                                         |
 | Idle on an empty queue         | The loop — polling outside the model, zero tokens                            | Same (loop)                                                                                          | Same (loop)                                                                         |
 | See the queues                 | `/kraken:status OWNER/tasks`                                                 | Same, inside `copilot`                                                                               | `/skill:status OWNER/tasks`, inside `pi`                                            |
@@ -681,7 +681,7 @@ and only the lease's clock or an explicit release opens it.)
 
 **On GitHub Copilot CLI** the retry is the same and the release comes from the
 loop alone. Kraken has no verified Copilot event for a usage limit, so there is
-no `StopFailure` equivalent: under `scripts/kraken-loop.sh` the `copilot -p`
+no `StopFailure` equivalent: under `scripts/kraken-loop.sh --harness copilot` the `copilot -p`
 process exits, the loop releases the claim at once and its next poll is the
 retry. In an interactive session (`scripts/kraken-copilot.sh`) the lease frees
 the task within its TTL; after the limit resets, run `/kraken:unleash` again. A
@@ -766,7 +766,7 @@ case. Side by side:
 | --- | --- | --- | --- |
 | Lease expiry (the floor) | ✅ | ✅ | ✅ |
 | Release on a graceful session end | `SessionEnd` hook | `SessionEnd` hook | `session_shutdown` in the extension |
-| Release when a loop drain dies | `kraken-loop.sh --harness claude` | `kraken-loop.sh` | `kraken-loop.sh --harness pi` |
+| Release when a loop drain dies | `kraken-loop.sh --harness claude` | `kraken-loop.sh --harness copilot` | `kraken-loop.sh --harness pi` |
 | Release + retry on a usage limit | `StopFailure` hook + loop releases, next poll retries | loop releases, next poll retries | loop releases, next poll retries |
 | Merge / delete / close refused at the tool layer | loop: `--disallowedTools` rules; interactive: allowlist ask-gate | `--deny-tool` rules | MCP writes: `--exclude-tools`; `gh` in `bash`: the extension's deny check |
 

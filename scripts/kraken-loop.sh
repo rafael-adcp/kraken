@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # kraken-loop.sh — THE continuous "ambush" for a tentacle, on every harness:
-# GitHub Copilot CLI (the default), Claude Code, Pi, or another agent CLI.
+# GitHub Copilot CLI, Claude Code, Pi, or another agent CLI.
 #
 # The shell owns supervision — polling, process startup, shutdown and the
 # best-effort release of an abandoned claim — and the shared skill owns the
@@ -32,13 +32,14 @@
 #
 # Usage:
 #   scripts/kraken-loop.sh OWNER/tasks --worker-name <name> --project <name> \
-#                          [--harness copilot|claude|pi] [--work-dir <dir>] \
+#                          --harness copilot|claude|pi [--work-dir <dir>] \
 #                          [--poll <seconds>] [--once]
 #
 # Every flag also has an env-var fallback (KRAKEN_TASKS, KRAKEN_WORKER,
 # KRAKEN_PROJECT, KRAKEN_HARNESS, KRAKEN_WORK_DIR, KRAKEN_POLL_SECONDS); an
 # explicit flag wins over the env var. The work dir defaults to the directory
-# you run it from. KRAKEN_AGENT_CMD runs an unlisted agent CLI instead.
+# you run it from. KRAKEN_AGENT_CMD runs an unlisted agent CLI instead of a
+# named harness, so --harness is required only without it.
 set -u
 
 # --- locate the kraken checkout ---------------------------------------------
@@ -53,7 +54,7 @@ usage() {
   cat <<'EOF'
 Usage:
   scripts/kraken-loop.sh OWNER/tasks --worker-name <name> --project <name> \
-                         [--harness copilot|claude|pi] [--work-dir <dir>] \
+                         --harness copilot|claude|pi [--work-dir <dir>] \
                          [--poll <seconds>] [--once]
 
 The continuous "ambush" loop for a tentacle on any harness: each poll runs the
@@ -64,7 +65,7 @@ stop; it never outlives this terminal.
 Flags (each also has an env-var fallback; an explicit flag wins):
   --worker-name <name>   worker identity in every claim/comment   [KRAKEN_WORKER]
   --project <name>       only take project:<name> tasks           [KRAKEN_PROJECT]
-  --harness <name>       agent CLI: copilot (default), claude or pi
+  --harness <name>       agent CLI, required: copilot, claude or pi
                                                                   [KRAKEN_HARNESS]
   --work-dir <dir>       the work repo checkout the agent runs in
                          (default: the current directory)        [KRAKEN_WORK_DIR]
@@ -85,7 +86,7 @@ EOF
 TASKS="${KRAKEN_TASKS:-}"
 WORKER="${KRAKEN_WORKER:-}"
 PROJECT="${KRAKEN_PROJECT:-}"
-HARNESS="${KRAKEN_HARNESS:-copilot}"
+HARNESS="${KRAKEN_HARNESS:-}"
 WORK_DIR="${KRAKEN_WORK_DIR:-$PWD}"
 POLL="${KRAKEN_POLL_SECONDS:-60}"
 ONCE=0
@@ -111,6 +112,9 @@ missing=""
 [ -n "$TASKS" ]   || missing="$missing OWNER/tasks"
 [ -n "$WORKER" ]  || missing="$missing --worker-name"
 [ -n "$PROJECT" ] || missing="$missing --project"
+# KRAKEN_AGENT_CMD replaces the harness table, so it stands in for --harness.
+[ -n "$HARNESS" ] || [ -n "${KRAKEN_AGENT_CMD:-}" ] \
+  || missing="$missing --harness (accepted: copilot, claude or pi)"
 if [ -n "$missing" ]; then
   echo "kraken-loop: missing required argument(s):$missing" >&2
   usage >&2

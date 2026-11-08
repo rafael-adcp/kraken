@@ -12,8 +12,9 @@ itself — the checkout loaded as the plugin, `/kraken:unleash ... --once` — u
 lib-claude-drain.sh's permission and deny flags. `--harness pi` (or
 KRAKEN_HARNESS=pi) runs `pi` likewise, loading the skills from the kraken
 checkout with `--skill`; KRAKEN_AGENT_CMD runs an
-unlisted CLI, split into argv without ever being evaluated. Copilot stays the
-default — every test here that names no harness pins that."""
+unlisted CLI, split into argv without ever being evaluated. No harness is
+assumed: with neither --harness, KRAKEN_HARNESS nor KRAKEN_AGENT_CMD the loop
+refuses and names the accepted values."""
 import os
 import re
 import stat
@@ -62,7 +63,10 @@ class LoopWorkDirTests(KrakenConformanceTest):
         # A startable task, so the drain pass actually reaches `copilot`.
         self.mk_issue(7, "startable task", "kraken-task", "project:app")
 
-    def run_loop(self, *flags, cwd=ROOT, env=None, unset=()):
+    def run_loop(self, *flags, harness="copilot", cwd=ROOT, env=None, unset=()):
+        """`harness` is the --harness value; None leaves the flag off."""
+        if harness is not None:
+            flags = (*flags, "--harness", harness)
         full_env = self.base_env(env)
         full_env["PATH"] = self.bin_dir + os.pathsep + full_env["PATH"]
         for var in unset:
@@ -149,15 +153,37 @@ class LoopWorkDirTests(KrakenConformanceTest):
         self.assertTrue(self.has_label(7, "kraken-task"), "the queue must be untouched")
         self.assertFalse(self.has_label(7, "in-progress"), "the queue must be untouched")
 
-    # --- the harness: copilot by default, pi, or an unlisted CLI ---------------
+    # --- the harness: always named — copilot, claude, pi, or an unlisted CLI ---
 
-    def test_copilot_is_the_default_harness(self):
-        proc = self.run_loop("--work-dir", self.work)
+    def assert_refused_for_missing_harness(self, proc):
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        first_line = proc.stderr.splitlines()[0]
+        self.assertIn("missing required argument", first_line)
+        self.assertIn("--harness", first_line)
+        for accepted in ("copilot", "claude", "pi"):
+            self.assertIn(accepted, first_line)
+        self.assertFalse(os.path.isfile(self.cwd_file), "an agent ran with no harness named")
+        self.assertTrue(self.has_label(7, "kraken-task"), "the queue must be untouched")
+        self.assertFalse(self.has_label(7, "in-progress"), "the queue must be untouched")
+
+    def test_no_harness_refuses_and_names_the_accepted_ones(self):
+        self.assert_refused_for_missing_harness(
+            self.run_loop("--work-dir", self.work, harness=None))
+
+    def test_empty_harness_counts_as_no_harness(self):
+        self.assert_refused_for_missing_harness(
+            self.run_loop("--work-dir", self.work, harness=""))
+        self.assert_refused_for_missing_harness(
+            self.run_loop("--work-dir", self.work, harness=None, env={"KRAKEN_HARNESS": ""}))
+
+    def test_agent_cmd_stands_in_for_the_harness(self):
+        proc = self.run_loop("--work-dir", self.work, harness=None,
+                             env={"KRAKEN_AGENT_CMD": "mycli --print"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.agent_name(), "copilot")
+        self.assertEqual(self.agent_name(), "mycli")
 
     def test_pi_runs_in_the_work_dir_with_the_skills_from_the_checkout(self):
-        proc = self.run_loop("--work-dir", self.work, "--harness", "pi")
+        proc = self.run_loop("--work-dir", self.work, harness="pi")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.agent_name(), "pi")
         self.assert_ran_in(self.work)
@@ -170,7 +196,7 @@ class LoopWorkDirTests(KrakenConformanceTest):
         ])
 
     def test_claude_runs_the_shared_skill_in_the_work_dir(self):
-        proc = self.run_loop("--work-dir", self.work, "--harness", "claude")
+        proc = self.run_loop("--work-dir", self.work, harness="claude")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.agent_name(), "claude")
         self.assert_ran_in(self.work)
@@ -201,7 +227,7 @@ class LoopWorkDirTests(KrakenConformanceTest):
         # Copilot's deny rules (scripts/lib-copilot-drain.sh) in Pi's two
         # halves: the GitHub MCP merge / issue-write tools excluded whole, and
         # the kraken extension that refuses the three `gh` commands in bash.
-        self.run_loop("--work-dir", self.work, "--harness", "pi")
+        self.run_loop("--work-dir", self.work, harness="pi")
         args = self.copilot_args()
         excluded = args[args.index("--exclude-tools") + 1].split(",")
         self.assertEqual(sorted(excluded),
@@ -243,17 +269,17 @@ class LoopWorkDirTests(KrakenConformanceTest):
                 self.assertEqual(self.agent_name(), harness)
 
     def test_harness_env_fallback_and_flag_precedence(self):
-        proc = self.run_loop("--work-dir", self.work, env={"KRAKEN_HARNESS": "pi"})
+        proc = self.run_loop("--work-dir", self.work, harness=None, env={"KRAKEN_HARNESS": "pi"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.agent_name(), "pi")
 
-        proc = self.run_loop("--work-dir", self.work, "--harness", "copilot",
+        proc = self.run_loop("--work-dir", self.work, harness="copilot",
                              env={"KRAKEN_HARNESS": "pi"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.agent_name(), "copilot")
 
     def test_unknown_harness_refuses_before_invoking_any_agent(self):
-        proc = self.run_loop("--work-dir", self.work, "--harness", "nope")
+        proc = self.run_loop("--work-dir", self.work, harness="nope")
         self.assertEqual(proc.returncode, 2)
         self.assertIn("unknown harness 'nope'", proc.stderr)
         self.assertFalse(os.path.isfile(self.cwd_file), "an agent ran under an unknown harness")
@@ -263,7 +289,7 @@ class LoopWorkDirTests(KrakenConformanceTest):
         # Whitespace-split, the generic drain prompt appended last, shell
         # metacharacters passed through literally — and --harness ignored.
         canary = os.path.join(self.state, "pwned")
-        proc = self.run_loop("--work-dir", self.work, "--harness", "ignored",
+        proc = self.run_loop("--work-dir", self.work, harness="ignored",
                              env={"KRAKEN_AGENT_CMD": "  mycli --print  $(touch %s) *  " % canary})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.agent_name(), "mycli")
@@ -274,7 +300,8 @@ class LoopWorkDirTests(KrakenConformanceTest):
         self.assertFalse(os.path.exists(canary), "KRAKEN_AGENT_CMD was evaluated")
 
     def test_blank_agent_cmd_refuses(self):
-        proc = self.run_loop("--work-dir", self.work, env={"KRAKEN_AGENT_CMD": "   "})
+        proc = self.run_loop("--work-dir", self.work, harness=None,
+                             env={"KRAKEN_AGENT_CMD": "   "})
         self.assertEqual(proc.returncode, 2)
         self.assertIn("KRAKEN_AGENT_CMD", proc.stderr)
         self.assertFalse(os.path.isfile(self.cwd_file), "an agent ran with no command")
